@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-03-30.
+> Living document for team reference. Last updated: 2026-03-30 (post-Phase 2).
 
 ---
 
@@ -28,19 +28,20 @@ qb-context/
 ├── cmd/qb-context/main.go         — CLI entry + MCP daemon + CLI tool subcommand
 ├── internal/
 │   ├── config/config.go            — Config with CLI flags
-│   ├── types/types.go              — ASTNode, ASTEdge, enums, ID generation
+│   ├── types/types.go              — ASTNode, ASTEdge, enums, RiskLevel, NodeScore, Community, ProjectSummary
 │   ├── watcher/watcher.go          — Filesystem watcher (fsnotify + debounce + gitignore)
 │   ├── parser/parser.go            — Multi-language parser (Go native AST, regex for JS/TS/PHP)
 │   ├── parser/queries/*.scm        — Tree-sitter query files (reference, for future use)
-│   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec)
-│   ├── storage/migrations.go       — Schema creation
+│   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec, node_scores, project_summaries)
+│   ├── storage/migrations.go       — Schema creation (6 tables + vec0)
 │   ├── embedding/engine.go         — Embedding engine (hash fallback, ONNX interface)
 │   ├── embedding/model/embed.go    — Placeholder for ONNX model embedding
-│   ├── graph/graph.go              — gonum directed graph (BFS, PageRank)
-│   ├── search/hybrid.go            — Hybrid search (RRF fusion)
+│   ├── graph/graph.go              — gonum directed graph (BFS, PageRank, Betweenness, Louvain, InDegree)
+│   ├── search/hybrid.go            — Multi-signal composite search (PPR+BM25+Betweenness+InDegree+Semantic)
+│   ├── adr/adr.go                  — Architecture Decision Records discoverer
 │   └── mcp/
 │       ├── server.go               — JSON-RPC 2.0 MCP server over stdio
-│       └── tools.go                — 5 MCP tool implementations
+│       └── tools.go                — 5 MCP tool implementations (context w/ architecture mode, impact w/ risk levels)
 ├── tests/integration_test.go       — Full pipeline integration test
 ├── .golangci.yml                   — Linter configuration
 ├── go.mod / go.sum
@@ -54,14 +55,20 @@ qb-context/
 - `ASTEdge`: SourceID, TargetID, EdgeType
 - `FileEvent`: Path, Action (Created/Modified/Deleted)
 - `SearchResult`: Node, Score
+- `RiskLevel` string: CRITICAL, HIGH, MEDIUM, LOW (hop-based impact classification)
+- `NodeScore`: NodeID, PageRank, Betweenness (precomputed graph metrics)
+- `Community`: ID, NodeIDs (Louvain cluster membership)
+- `ProjectSummary`: Project, Summary, SourceHash (ADR/architecture documents)
 
 ### Storage (`internal/storage`)
 - SQLite with WAL mode, foreign keys, busy timeout, trusted_schema OFF
-- Tables: `nodes`, `edges` (with CASCADE), `nodes_fts` (FTS5 with porter tokenizer), `node_embeddings` (vec0, cosine, 384-dim)
+- Tables: `nodes`, `edges` (with CASCADE), `nodes_fts` (FTS5 with porter tokenizer), `node_embeddings` (vec0, cosine, 384-dim), `node_scores` (betweenness/pagerank with CASCADE), `project_summaries` (ADR documents)
 - Uses `ON CONFLICT DO UPDATE` for nodes (not INSERT OR REPLACE which cascades deletes)
 - Uses `INSERT OR IGNORE` for edges
-- `RawQuery`: SELECT-only, blocks load_extension/writefile/fts3_tokenizer, wrapped in read-only transaction
+- `RawQuery`: SELECT-only, rejects `;` (multi-statement), blocks load_extension/writefile/fts3_tokenizer/attach, uses `BeginTx(ReadOnly: true)` for proper transaction isolation
 - `UpsertEmbedding` validates 384-dim, uses delete+insert for vec0 compatibility
+- `UpsertNodeScores` / `GetNodeScore` / `GetAllBetweenness` for graph metric persistence
+- `UpsertProjectSummary` / `GetProjectSummary` / `GetAllProjectSummaries` for ADR storage
 - **Build tag**: Requires `-tags "fts5"` for FTS5 support with go-sqlite3
 
 ### Parser (`internal/parser`)
@@ -86,13 +93,28 @@ qb-context/
 ### Graph (`internal/graph`)
 - gonum v0.17.0 directed graph with string hash ID <-> int64 ID mapping
 - `BlastRadius`: BFS traversing **incoming edges** (`g.dg.To()`) — finds dependents (who calls this node)
+- `BlastRadiusWithDepth`: same as BlastRadius but returns `map[string]int` (hashID → hop depth)
 - `PersonalizedPageRank`: PageRankSparse (0.85 damping) with post-hoc blending (approximation, not true PPR)
-- Thread-safe with sync.RWMutex
+- `ComputeBetweenness`: Brandes' algorithm via `network.Betweenness()`, normalized to [0,1]
+- `DetectCommunities`: Louvain via `community.Modularize()`, cached with invalidation on any graph mutation
+- `ComputeInDegree`: in-degree authority per node, normalized to [0,1]
+- Thread-safe with sync.RWMutex, community cache invalidated on BuildFromEdges/AddEdge/RemoveEdge/RemoveNode
+
+### ADR (`internal/adr`)
+- `Discoverer.Discover()` walks repo for ARCHITECTURE.md, ADR.md, DESIGN.md, adr/ dirs
+- Reads content (max 8000 bytes, UTF-8-safe truncation), computes SHA-256 hash
+- Deduplicates directories on case-insensitive filesystems (macOS) via `os.SameFile`
+- Called during `indexRepo()` after graph build, stored in `project_summaries` table
 
 ### Search (`internal/search`)
-- `HybridSearch`: dual-path search combining FTS5 lexical + KNN semantic
-- Reciprocal Rank Fusion (k=60): score = Σ 1/(k + rank + 1) across lists
-- PageRank boost: multiplies RRF score by (1 + rank*100) from active files
+- Multi-signal composite scoring replacing simple RRF:
+  ```
+  composite = 0.35*PPR + 0.25*BM25 + 0.15*Betweenness + 0.10*InDegree + 0.15*SemanticSim
+  ```
+- All signals normalized to [0,1] before weighting
+- PPR seeded from top 10 FTS results (query-time, not index-time)
+- FTS5 enhancements: prefix matching (`term*`), CamelCase splitting, stop word filtering, FTS5 special char sanitization
+- Per-file cap: max 3 results per unique `file_path`
 
 ### MCP Server (`internal/mcp`)
 - Custom JSON-RPC 2.0 over stdio (no third-party MCP SDK)
@@ -101,10 +123,10 @@ qb-context/
 - `GetHandler(name)` and `GetTools()` for programmatic access (used by CLI tool)
 
 ### MCP Tools (`internal/mcp/tools.go`)
-- `context` → HybridSearch.Search (query + limit + active files)
-- `impact` → GraphEngine.BlastRadius + node enrichment
+- `context` → HybridSearch.Search (query + limit + active files), supports `mode: "architecture"` for Louvain community detection, includes `architecture_context` from ADR documents when available
+- `impact` → BlastRadiusWithDepth + risk levels (hop 1=CRITICAL, 2=HIGH, 3=MEDIUM, 4+=LOW), includes betweenness risk_score, affected_tests detection, structured summary
 - `read_symbol` → Store.GetNode + byte-range file read (path traversal + symlink protected via EvalSymlinks)
-- `query` → Store.RawQuery (SELECT-only, read-only transaction)
+- `query` → Store.RawQuery (SELECT-only, read-only transaction with BeginTx)
 - `index` → full re-index pipeline callback
 
 ### CLI Tool (`cmd/qb-context/main.go`)
@@ -114,8 +136,10 @@ qb-context/
 - Modeled after C project's `cli` subcommand
 
 ### Main Orchestrator (`cmd/qb-context/main.go`)
-- Boot: config → storage → embedding → parser → graph → initial index → watcher → MCP server
+- Boot: config → storage → embedding → parser → graph → initial index (+ betweenness + ADR) → watcher → MCP server
 - Worker pool for parallel file parsing during initial index
+- Betweenness centrality computed and stored in `node_scores` at index time
+- ADR documents discovered and stored in `project_summaries` at index time
 - Incremental updates via filesystem watcher callbacks
 - Graceful shutdown on SIGINT/SIGTERM with sync.Once cleanup
 
@@ -128,13 +152,15 @@ qb-context/
 | github.com/mattn/go-sqlite3 | SQLite driver (CGO) |
 | github.com/fsnotify/fsnotify | Filesystem events |
 | github.com/crackcomm/go-gitignore | .gitignore matching |
-| gonum.org/v1/gonum v0.17.0 | Graph engine, PageRank, (future: Betweenness, Louvain) |
+| gonum.org/v1/gonum v0.17.0 | Graph engine, PageRank, Betweenness, Louvain community detection, InDegree |
 | (future) github.com/asg017/sqlite-vec-go-bindings | Vector search |
 | (future) github.com/shota3506/onnxruntime-purego | ONNX inference |
 
 ---
 
-## Completed Work — All 8 Commits
+## Completed Work — All 16 Commits
+
+### Phase 1: Foundation (Commits 1-8)
 
 | # | Hash | Description | Status |
 |---|------|-------------|--------|
@@ -147,92 +173,74 @@ qb-context/
 | 7 | `71b524a` | DA #3 fixes: shutdown safety, security hardening, test improvements | Done |
 | 8 | `aef1421` | CLI subcommand for direct MCP tool invocation | Done |
 
-### Test Coverage
+### Phase 2: Advanced Analysis (Commits 9-16)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 9 | `e13ea57` | Betweenness centrality + risk-level impact analysis | Agent A (Sonnet) | Done |
+| 10 | `b08d0f5` | Louvain community detection | Agent B (Sonnet) | Done |
+| 11 | `1a118d9` | ADR (Architecture Decision Records) support | Agent C (Sonnet) | Done |
+| 12 | `cf8ec9d` | Merge: Louvain into main (conflict resolution) | Orchestrator | Done |
+| 13 | `3b793d0` | Ignore worktree directories | Orchestrator | Done |
+| 14 | `f2bb59d` | Merge: ADR into main (conflict resolution) | Orchestrator | Done |
+| 15 | `e7305e8` | Multi-signal ranked search fusion | Agent D (Sonnet) | Done |
+| 16 | `e60d573` | DA #4 fixes: security hardening, cache invalidation, thread safety | 3 Sonnet agents | Done |
+
+### Test Coverage (12 packages, all passing)
 - `internal/types` — 6 tests (ID generation, enum values)
-- `internal/storage` — 15 tests (CRUD, FTS5, search, raw query, cascade delete)
+- `internal/storage` — 21 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries)
 - `internal/parser` — 17 tests (Go/JS/TS/PHP parsing, edge extraction)
 - `internal/embedding` — 5 tests (hash embedder, serialization, cosine similarity, empty string)
-- `internal/graph` — 16 tests (BFS, cycles, depth limits, PageRank, DAG)
-- `internal/search` — 4 tests (RRF fusion, PageRank boost, limits)
+- `internal/graph` — 24 tests (BFS, cycles, depth limits, PageRank, DAG, betweenness, blast radius depth, communities, in-degree)
+- `internal/search` — 8 tests (composite scoring, per-file cap, CamelCase, stop words, limits)
 - `internal/mcp` — 6 tests (initialize, tools/list, tools/call, unknown method, concurrent)
+- `internal/adr` — 4 tests (discover files, ADR directory, empty repo, max chars truncation)
 - `tests/integration_test.go` — full pipeline (parse → store → embed → graph → search → delete)
 
-### Devil's Advocate Reviews (3 completed)
+### Devil's Advocate Reviews (4 completed)
 - **Review #1** (after Commits 1-3): 9 issues found — SQL injection, FTS5 schema, CASCADE deletes, watcher race, PHP bugs, file size check. All fixed.
 - **Review #2** (after Commit 4): 7 issues found — BFS direction, path traversal, byte range, notification responses, marshal errors. All fixed.
 - **Review #3** (after Commits 5-6): 23 issues found — double-close panic (sync.Once), goroutine limit (semaphore), fd leak (walker.Stop), SQL injection hardening (trusted_schema OFF, blocklist), symlink bypass (EvalSymlinks), test improvements (cycles, concurrent, empty string, DAG PageRank). All fixed.
+- **Review #4** (after Phase 2): 16 issues found (3 CRITICAL, 5 HIGH, 4 MEDIUM, 4 LOW). 10 fixed:
+  - CRITICAL: FTS5 query injection (sanitize special chars), RawQuery multi-statement bypass (reject `;`), RawQuery transaction isolation (BeginTx with ReadOnly). All fixed.
+  - HIGH: Community cache invalidation on AddEdge/RemoveEdge/RemoveNode (fixed), misleading Community.Modularity field removed (fixed), isolated nodes in community detection (fixed). Stale betweenness on incremental updates and race between search signals are documented limitations.
+  - MEDIUM: Missing mutex on UpdateFTS/DeleteFTSByFile (fixed), UTF-8 truncation in ADR (fixed). ADR path traversal via symlinks and re-index serialization are low-risk.
 
 ---
 
-## Next Phase — 4 Features from C Project
+## Completed Features — From C Project
 
-> **Full plan with agent assignments, file changes, schema additions, and conflict matrix:**
-> `.claude/plans/binary-baking-parasol.md`
+> **Original plan:** `.claude/plans/binary-baking-parasol.md`
 
-### Feature 1: Louvain Community Detection
-- **gonum API:** `community.Modularize(g, 1.0, nil)` → `ReducedGraph.Communities()` + `community.Q()` for modularity
-- In-memory cached on GraphEngine (lazy via `sync.Once`), invalidated on `BuildFromEdges`
-- Expose via `context` tool `mode: "architecture"`
-- Returns community clusters with node details + modularity score
-- **Files:** `graph.go` (DetectCommunities + cache fields), `tools.go` (mode param on context), `types.go` (Community struct)
+### Feature 1: Louvain Community Detection (Done)
+- `community.Modularize(undirected, 1.0, nil)` → communities + `community.Q()` for modularity
+- In-memory cached on GraphEngine, invalidated on any graph mutation (BuildFromEdges, AddEdge, RemoveEdge, RemoveNode)
+- Exposed via `context` tool `mode: "architecture"` — returns community clusters with node IDs + modularity score
+- Includes isolated nodes (zero edges) in detection
 - **Tests:** two-cluster detection, cache invalidation, empty graph
 
-### Feature 2: Betweenness Centrality + Risk Levels (CRITICAL PATH)
-- **gonum API:** `network.Betweenness(g)` — Brandes' algorithm, returns `map[int64]float64`
-- Computed at INDEX TIME (after PageRank), normalized to [0,1], stored in new `node_scores` table
-- New `BlastRadiusWithDepth()` returns `map[string]int` (hashID → hop depth)
+### Feature 2: Betweenness Centrality + Risk Levels (Done)
+- `network.Betweenness(g)` — Brandes' algorithm, normalized to [0,1], stored in `node_scores` table at index time
+- `BlastRadiusWithDepth()` returns `map[string]int` (hashID → hop depth)
 - Impact tool restructured: hop 1=CRITICAL, 2=HIGH, 3=MEDIUM, 4+=LOW
-- Returns grouped: `{risk_score, direct[], high_risk[], medium_risk[], low_risk[], affected_tests[], summary}`
-- **Schema:** `node_scores (node_id TEXT PK, pagerank REAL, betweenness REAL, FK → nodes ON DELETE CASCADE)`
-- **Files:** `graph.go`, `migrations.go`, `sqlite.go`, `tools.go`, `main.go`, `types.go`
-- **Tests:** betweenness normalization, blast radius depths, node_scores CRUD, cascade delete
+- Returns: `{risk_score, affected_count, direct[], high_risk[], medium_risk[], low_risk[], affected_tests[], summary}`
+- **Tests:** betweenness normalization, blast radius depths, node_scores CRUD, cascade delete, GetAllBetweenness
 
-### Feature 3: ADR (Architecture Decision Records) Support
-- New `internal/adr/adr.go` package — `Discoverer.Discover()` walks repo for ARCHITECTURE.md, ADR.md, adr/ dirs
-- Reads content (max 8000 chars), computes SHA-256 hash, parses into sections (max 16)
-- **Schema:** `project_summaries (project TEXT PK, summary TEXT, source_hash TEXT, created_at, updated_at)`
+### Feature 3: ADR Support (Done)
+- `internal/adr/adr.go` — discovers ARCHITECTURE.md, ADR.md, DESIGN.md, adr/ dirs
+- Max 8000 bytes content (UTF-8-safe truncation), SHA-256 hash for change detection
+- Case-insensitive filesystem deduplication via `os.SameFile`
 - Surfaced as `architecture_context` field in `context` tool responses
-- Called during `indexRepo()` after graph build
-- **Files:** `adr/adr.go` (new), `migrations.go`, `sqlite.go`, `tools.go`, `main.go`, `types.go`
-- **Tests:** discover files, empty repo, max chars, CRUD roundtrip
+- **Tests:** discover files, ADR directory, empty repo, max chars, CRUD roundtrip, update-existing
 
-### Feature 4: Multi-Signal Ranked Search Fusion (depends on Feature 2)
-- Replace simple RRF + PageRank with composite scoring:
-  ```
-  composite = 0.35*PPR + 0.25*BM25 + 0.15*Betweenness + 0.10*InDegree + 0.15*SemanticSim
-  ```
+### Feature 4: Multi-Signal Ranked Search Fusion (Done)
+- Composite scoring: `0.35*PPR + 0.25*BM25 + 0.15*Betweenness + 0.10*InDegree + 0.15*SemanticSim`
 - All signals normalized to [0,1] before weighting
-- PPR seeded from top 10 FTS results (query-time, not index-time)
-- New `ComputeInDegree()` method on GraphEngine (count `g.dg.To(id).Len()`, normalize)
-- FTS5 enhancements: prefix matching (`term*`), CamelCase splitting, stop word filtering, per-file cap (max 3)
-- **Files:** `hybrid.go` (full refactor), `graph.go` (InDegree), `sqlite.go` (GetAllBetweenness)
-- **Tests:** composite scoring, betweenness boost, CamelCase, per-file cap, normalization
-
-### Execution Plan
-```
-Phase 1 (3 parallel Sonnet agents):
-  Agent A: Feature 2 (Betweenness + Risk)  ██████████████
-  Agent B: Feature 1 (Louvain Communities)  ████████████
-  Agent C: Feature 3 (ADR Support)          ████████████
-
-Phase 2 (1 sequential Sonnet agent, after Agent A):
-  Agent D: Feature 4 (Ranked Fusion)                      ██████████████
-
-Final: Devil's Advocate Opus review                                      ████████
-```
-
-### Shared File Conflict Matrix
-| File | Agent A | Agent B | Agent C | Agent D |
-|------|---------|---------|---------|---------|
-| `graph.go` | ComputeBetweenness, BlastRadiusWithDepth | DetectCommunities + cache | — | ComputeInDegree |
-| `tools.go` | Rewrite impact handler | Add mode to context | Add ADR to context | — |
-| `migrations.go` | node_scores table | — | project_summaries table | — |
-| `sqlite.go` | NodeScore CRUD | — | ProjectSummary CRUD | GetAllBetweenness |
-| `types.go` | RiskLevel, NodeScore | Community | ProjectSummary | — |
-| `main.go` | Betweenness in indexRepo | — | ADR discover in indexRepo | — |
-| `hybrid.go` | — | — | — | Full refactor |
-
-All conflicts are additive (new methods, new struct fields, appending to slices). No overlapping edits.
+- Query-time PPR seeded from top 10 FTS results
+- FTS5 enhancements: prefix matching (`term*`), CamelCase splitting, stop word filtering, special char sanitization
+- Per-file cap: max 3 results per unique `file_path`
+- `ComputeInDegree()` on GraphEngine — counts incoming edges, normalized to [0,1]
+- **Tests:** composite scoring, per-file cap, CamelCase splitting, stop words
 
 ### Features Explicitly Skipped (for now)
 - trace_call_path (covered by impact tool)
@@ -241,6 +249,7 @@ All conflicts are additive (new methods, new struct fields, appending to slices)
 - Cypher query language
 - Co-change frequency (requires git history integration)
 - explore mode (premature)
+- HITS authority/hub scores (C project uses, but InDegree covers similar ground)
 
 ---
 
@@ -270,3 +279,7 @@ qb-context cli context '{"query":"payment","limit":5}'  # test a tool
 - sqlite-vec extension must be loaded for semantic search to work
 - PersonalizedPageRank is an approximation (standard PageRank + post-hoc blending)
 - gonum Betweenness doesn't support sampling (O(V*E) for large graphs)
+- Betweenness scores become stale after incremental file updates (only recomputed on full indexRepo)
+- Composite search signals (PPR, InDegree) are computed under separate RLocks — concurrent graph rebuilds can cause inconsistency between signals within a single search
+- No re-index serialization — concurrent `index` tool calls can race
+- ADR discoverer does not validate paths against symlinks pointing outside repo root
