@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -25,6 +27,16 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	cfg := config.ParseFlags()
+
+	// If the first non-binary argument is "cli", enter CLI mode instead of
+	// starting the MCP server and filesystem watcher.
+	for i, arg := range os.Args[1:] {
+		if arg == "cli" {
+			runCLI(cfg, os.Args[i+2:]) // pass everything after "cli"
+			return
+		}
+	}
+
 	log.Printf("qb-context daemon starting — repo: %s", cfg.RepoRoot)
 
 	// 1. Initialize SQLite storage
@@ -106,6 +118,99 @@ func main() {
 	if err := server.Serve(); err != nil {
 		log.Fatalf("MCP server error: %v", err)
 	}
+}
+
+// runCLI handles the "cli" subcommand for direct tool invocation
+func runCLI(cfg *config.Config, args []string) {
+	log.SetOutput(os.Stderr)
+
+	// Handle --list flag
+	if len(args) > 0 && args[0] == "--list" {
+		store, err := storage.NewStore(cfg.DBPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+
+		embedder := embedding.NewHashEmbedder()
+		defer embedder.Close()
+		graphEngine := graph.New()
+		hybridSearch := search.New(store, embedder, graphEngine)
+
+		server := mcp.NewServer()
+		mcp.RegisterTools(server, mcp.ToolDeps{
+			Store: store, Graph: graphEngine, Search: hybridSearch, RepoRoot: cfg.RepoRoot,
+		}, nil)
+
+		fmt.Printf("%-15s %s\n", "TOOL", "DESCRIPTION")
+		fmt.Printf("%-15s %s\n", "----", "-----------")
+		for _, t := range server.GetTools() {
+			fmt.Printf("%-15s %s\n", t.Name, t.Description)
+		}
+		return
+	}
+
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: qb-context cli <tool_name> [json_args]\n")
+		fmt.Fprintf(os.Stderr, "       qb-context cli --list\n")
+		os.Exit(1)
+	}
+
+	toolName := args[0]
+	argsJSON := json.RawMessage("{}")
+	if len(args) >= 2 {
+		if !json.Valid([]byte(args[1])) {
+			fmt.Fprintf(os.Stderr, "Invalid JSON args: %s\n", args[1])
+			os.Exit(1)
+		}
+		argsJSON = json.RawMessage(args[1])
+	}
+
+	// Boot pipeline
+	store, err := storage.NewStore(cfg.DBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	embedder := embedding.NewHashEmbedder()
+	defer embedder.Close()
+	p := parser.New()
+	graphEngine := graph.New()
+	hybridSearch := search.New(store, embedder, graphEngine)
+
+	// Index repo
+	indexRepo(cfg, store, p, embedder, graphEngine)
+
+	// Register tools and look up handler
+	server := mcp.NewServer()
+	mcp.RegisterTools(server, mcp.ToolDeps{
+		Store: store, Graph: graphEngine, Search: hybridSearch, RepoRoot: cfg.RepoRoot,
+	}, func(path string) error {
+		indexRepo(cfg, store, p, embedder, graphEngine)
+		return nil
+	})
+
+	handler, ok := server.GetHandler(toolName)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Unknown tool: %s\nUse --list to see available tools.\n", toolName)
+		os.Exit(1)
+	}
+
+	result, err := handler(argsJSON)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Tool error: %v\n", err)
+		os.Exit(1)
+	}
+
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to marshal result: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(out))
 }
 
 // indexRepo performs a full index of the repository

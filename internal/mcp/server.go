@@ -85,6 +85,23 @@ func (s *Server) RegisterTool(def ToolDefinition, handler ToolHandler) {
 	s.handlers[def.Name] = handler
 }
 
+// GetHandler returns the handler for a named tool, or false if not found.
+func (s *Server) GetHandler(name string) (ToolHandler, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h, ok := s.handlers[name]
+	return h, ok
+}
+
+// GetTools returns a copy of all registered tool definitions.
+func (s *Server) GetTools() []ToolDefinition {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tools := make([]ToolDefinition, len(s.tools))
+	copy(tools, s.tools)
+	return tools
+}
+
 // Serve starts the server and processes requests until EOF or error
 func (s *Server) Serve() error {
 	scanner := bufio.NewScanner(s.input)
