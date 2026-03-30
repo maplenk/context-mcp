@@ -87,6 +87,16 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 
 	result := &ParseResult{}
 
+	// H1: Extract import edges from Go import statements
+	for _, imp := range file.Imports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+		result.Edges = append(result.Edges, types.ASTEdge{
+			SourceID: types.GenerateNodeID(relPath, relPath),
+			TargetID: types.GenerateNodeID(relPath, importPath),
+			EdgeType: types.EdgeTypeImports,
+		})
+	}
+
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch decl := n.(type) {
 		case *ast.FuncDecl:
@@ -225,11 +235,15 @@ func extractGoCalls(body *ast.BlockStmt) []string {
 }
 
 // JavaScript/TypeScript regex patterns
+// Note: removed (?m)^ line-start anchoring so indented declarations are found
 var (
-	jsFuncDeclRe  = regexp.MustCompile(`(?m)^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(`)
-	jsArrowFuncRe = regexp.MustCompile(`(?m)^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(`)
-	jsClassDeclRe = regexp.MustCompile(`(?m)^(?:export\s+)?class\s+(\w+)`)
-	jsCallExprRe  = regexp.MustCompile(`(?:^|[^.\w])(\w+)\s*\(`)
+	jsFuncDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*[(<]`)
+	jsArrowFuncRe   = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[a-zA-Z_]\w*)\s*(?::\s*[^=]+?)?\s*=>`)
+	jsClassDeclRe   = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:default\s+)?class\s+(\w+)`)
+	jsMethodDeclRe  = regexp.MustCompile(`(?m)(?:^|\n)\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{`)
+	jsCallExprRe    = regexp.MustCompile(`(?:^|[^.\w])(\w+)\s*\(`)
+	jsImportFromRe  = regexp.MustCompile(`(?m)import\s+(?:(?:[\w{},\s*]+)\s+from\s+)?['"]([^'"]+)['"]`)
+	jsRequireRe     = regexp.MustCompile(`require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
 )
 
 // parseJavaScript uses regex-based extraction for JS/TS files
@@ -238,19 +252,28 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	text := string(content)
 	lines := strings.Split(text, "\n")
 
+	// Track names already added to avoid duplicates
+	seen := map[string]bool{}
+
 	// Extract function declarations
 	for _, match := range jsFuncDeclRe.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
-		startByte := uint32(match[0])
-		endByte := findBlockEnd(content, match[0])
-		contentSum := buildContentSum(lines, match[0], name)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		// Compute startByte: skip any leading newline captured by the regex
+		rawStart := match[0]
+		startByte := skipLeadingNewline(content, rawStart)
+		endByte := findBlockEnd(content, startByte)
+		contentSum := buildContentSum(lines, startByte, name)
 
 		result.Nodes = append(result.Nodes, types.ASTNode{
 			ID:         types.GenerateNodeID(relPath, name),
 			FilePath:   relPath,
 			SymbolName: name,
 			NodeType:   types.NodeTypeFunction,
-			StartByte:  startByte,
+			StartByte:  uint32(startByte),
 			EndByte:    endByte,
 			ContentSum: contentSum,
 		})
@@ -259,41 +282,85 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	// Extract arrow functions
 	for _, match := range jsArrowFuncRe.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
-		startByte := uint32(match[0])
-		endByte := findBlockEnd(content, match[0])
-		contentSum := buildContentSum(lines, match[0], name)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		rawStart := match[0]
+		startByte := skipLeadingNewline(content, rawStart)
+		endByte := findBlockEnd(content, startByte)
+		contentSum := buildContentSum(lines, startByte, name)
 
 		result.Nodes = append(result.Nodes, types.ASTNode{
 			ID:         types.GenerateNodeID(relPath, name),
 			FilePath:   relPath,
 			SymbolName: name,
 			NodeType:   types.NodeTypeFunction,
-			StartByte:  startByte,
+			StartByte:  uint32(startByte),
 			EndByte:    endByte,
 			ContentSum: contentSum,
 		})
 	}
 
-	// Extract classes
+	// Extract classes and their methods
 	for _, match := range jsClassDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		startByte := uint32(match[0])
-		endByte := findBlockEnd(content, match[0])
-		contentSum := buildContentSum(lines, match[0], name)
+		className := text[match[2]:match[3]]
+		if seen[className] {
+			continue
+		}
+		seen[className] = true
+		rawStart := match[0]
+		startByte := skipLeadingNewline(content, rawStart)
+		endByte := findBlockEnd(content, startByte)
+		contentSum := buildContentSum(lines, startByte, className)
 
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
+		classNode := types.ASTNode{
+			ID:         types.GenerateNodeID(relPath, className),
 			FilePath:   relPath,
-			SymbolName: name,
+			SymbolName: className,
 			NodeType:   types.NodeTypeClass,
-			StartByte:  startByte,
+			StartByte:  uint32(startByte),
 			EndByte:    endByte,
 			ContentSum: contentSum,
-		})
+		}
+		result.Nodes = append(result.Nodes, classNode)
+
+		// Extract methods inside this class body
+		classBody := text[startByte:endByte]
+		for _, methodMatch := range jsMethodDeclRe.FindAllStringSubmatchIndex(classBody, -1) {
+			methodName := classBody[methodMatch[2]:methodMatch[3]]
+			// Skip constructor and keywords
+			if methodName == "constructor" || methodName == "if" || methodName == "for" || methodName == "while" || methodName == "switch" || methodName == "catch" || methodName == "function" {
+				continue
+			}
+			qualifiedName := className + "." + methodName
+			if seen[qualifiedName] {
+				continue
+			}
+			seen[qualifiedName] = true
+
+			methodAbsStart := startByte + methodMatch[0]
+			methodAbsStart = skipLeadingNewline(content, methodAbsStart)
+			methodEndByte := findBlockEnd(content, methodAbsStart)
+			methodContentSum := buildContentSum(lines, methodAbsStart, qualifiedName)
+
+			result.Nodes = append(result.Nodes, types.ASTNode{
+				ID:         types.GenerateNodeID(relPath, qualifiedName),
+				FilePath:   relPath,
+				SymbolName: qualifiedName,
+				NodeType:   types.NodeTypeMethod,
+				StartByte:  uint32(methodAbsStart),
+				EndByte:    methodEndByte,
+				ContentSum: methodContentSum,
+			})
+		}
 	}
 
 	// Extract call edges (connecting nodes found in this file to their calls)
 	for i, node := range result.Nodes {
+		if node.EndByte > uint32(len(content)) {
+			continue
+		}
 		bodyText := string(content[node.StartByte:node.EndByte])
 		for _, callMatch := range jsCallExprRe.FindAllStringSubmatch(bodyText, -1) {
 			target := callMatch[1]
@@ -309,16 +376,61 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		}
 	}
 
+	// H1: Extract import edges
+	// import ... from 'module'
+	for _, match := range jsImportFromRe.FindAllStringSubmatch(text, -1) {
+		modulePath := match[1]
+		result.Edges = append(result.Edges, types.ASTEdge{
+			SourceID: types.GenerateNodeID(relPath, relPath),
+			TargetID: types.GenerateNodeID(relPath, modulePath),
+			EdgeType: types.EdgeTypeImports,
+		})
+	}
+	// require('module')
+	for _, match := range jsRequireRe.FindAllStringSubmatch(text, -1) {
+		modulePath := match[1]
+		result.Edges = append(result.Edges, types.ASTEdge{
+			SourceID: types.GenerateNodeID(relPath, relPath),
+			TargetID: types.GenerateNodeID(relPath, modulePath),
+			EdgeType: types.EdgeTypeImports,
+		})
+	}
+
 	return result, nil
+}
+
+// skipLeadingNewline advances past a leading newline character at pos
+func skipLeadingNewline(content []byte, pos int) int {
+	if pos < len(content) && content[pos] == '\n' {
+		return pos + 1
+	}
+	return pos
 }
 
 // PHP regex patterns
 var (
-	phpClassDeclRe  = regexp.MustCompile(`(?m)^(?:abstract\s+)?class\s+(\w+)`)
-	phpMethodDeclRe = regexp.MustCompile(`(?m)^\s+(?:public|protected|private)\s+(?:static\s+)?function\s+(\w+)\s*\(`)
-	phpFuncDeclRe   = regexp.MustCompile(`(?m)^function\s+(\w+)\s*\(`)
-	phpNewExprRe    = regexp.MustCompile(`new\s+(\w+)\s*\(`)
+	phpClassDeclRe    = regexp.MustCompile(`(?m)^(?:abstract\s+)?class\s+(\w+)`)
+	phpMethodDeclRe   = regexp.MustCompile(`(?m)^\s+(?:public|protected|private)\s+(?:static\s+)?function\s+(\w+)\s*\(`)
+	phpFuncDeclRe     = regexp.MustCompile(`(?m)^function\s+(\w+)\s*\(`)
+	phpNewExprRe      = regexp.MustCompile(`new\s+(\w+)\s*\(`)
+	phpUseRe          = regexp.MustCompile(`(?m)^use\s+([\w\\]+)`)
+	phpMethodCallRe   = regexp.MustCompile(`(?:\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
+	phpStaticCallRe   = regexp.MustCompile(`([A-Z]\w+)\s*::\s*(\w+)\s*\(`)
+	phpFuncCallRe     = regexp.MustCompile(`(?:^|[^>\w])(\w+)\s*\(`)
 )
+
+// phpCallKeywords are PHP keywords/constructs that look like function calls but aren't
+var phpCallKeywords = map[string]bool{
+	"if": true, "else": true, "elseif": true, "for": true, "foreach": true,
+	"while": true, "do": true, "switch": true, "case": true, "catch": true,
+	"return": true, "echo": true, "print": true, "throw": true, "try": true,
+	"finally": true, "new": true, "class": true, "function": true, "array": true,
+	"list": true, "isset": true, "unset": true, "empty": true, "die": true,
+	"exit": true, "include": true, "require": true, "include_once": true,
+	"require_once": true, "use": true, "namespace": true, "public": true,
+	"private": true, "protected": true, "static": true, "abstract": true,
+	"true": true, "false": true, "null": true, "self": true, "parent": true,
+}
 
 // parsePHP uses regex-based extraction for PHP files
 func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) {
@@ -391,12 +503,14 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		})
 	}
 
-	// Extract instantiation edges (new ClassName)
+	// Extract instantiation edges (new ClassName) and call edges
 	for _, node := range result.Nodes {
 		if node.EndByte > uint32(len(content)) {
 			continue
 		}
 		bodyText := string(content[node.StartByte:node.EndByte])
+
+		// Instantiation edges: new ClassName()
 		for _, newMatch := range phpNewExprRe.FindAllStringSubmatch(bodyText, -1) {
 			target := newMatch[1]
 			result.Edges = append(result.Edges, types.ASTEdge{
@@ -405,27 +519,170 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				EdgeType: types.EdgeTypeInstantiates,
 			})
 		}
+
+		// M5: Method call edges — $this->method(), $obj->method(), self::method()
+		for _, callMatch := range phpMethodCallRe.FindAllStringSubmatch(bodyText, -1) {
+			target := callMatch[1]
+			if !phpCallKeywords[target] {
+				result.Edges = append(result.Edges, types.ASTEdge{
+					SourceID: node.ID,
+					TargetID: types.GenerateNodeID(relPath, target),
+					EdgeType: types.EdgeTypeCalls,
+				})
+			}
+		}
+
+		// M5: Static call edges — ClassName::method()
+		for _, callMatch := range phpStaticCallRe.FindAllStringSubmatch(bodyText, -1) {
+			className := callMatch[1]
+			methodName := callMatch[2]
+			target := className + "." + methodName
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: node.ID,
+				TargetID: types.GenerateNodeID(relPath, target),
+				EdgeType: types.EdgeTypeCalls,
+			})
+		}
+
+		// M5: Plain function call edges — functionName()
+		if node.NodeType == types.NodeTypeFunction || node.NodeType == types.NodeTypeMethod {
+			for _, callMatch := range phpFuncCallRe.FindAllStringSubmatch(bodyText, -1) {
+				target := callMatch[1]
+				if phpCallKeywords[target] || target == extractBaseName(node.SymbolName) {
+					continue
+				}
+				result.Edges = append(result.Edges, types.ASTEdge{
+					SourceID: node.ID,
+					TargetID: types.GenerateNodeID(relPath, target),
+					EdgeType: types.EdgeTypeCalls,
+				})
+			}
+		}
+	}
+
+	// H1: Extract PHP import (use) edges
+	for _, match := range phpUseRe.FindAllStringSubmatch(text, -1) {
+		usePath := match[1]
+		result.Edges = append(result.Edges, types.ASTEdge{
+			SourceID: types.GenerateNodeID(relPath, relPath),
+			TargetID: types.GenerateNodeID(relPath, usePath),
+			EdgeType: types.EdgeTypeImports,
+		})
 	}
 
 	return result, nil
 }
 
-// findBlockEnd finds the matching closing brace for a code block
+// extractBaseName returns the part after the last "." in a qualified name,
+// or the whole name if there is no ".".
+func extractBaseName(name string) string {
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		return name[idx+1:]
+	}
+	return name
+}
+
+// findBlockEnd finds the matching closing brace for a code block.
+// It uses a state machine to correctly skip braces inside strings,
+// comments, regex literals, and template literals.
 func findBlockEnd(content []byte, startPos int) uint32 {
+	type scanState int
+	const (
+		stateCode scanState = iota
+		stateSingleQuote
+		stateDoubleQuote
+		stateBacktick // JS template literal
+		stateLineComment
+		stateBlockComment
+		stateRegex
+	)
+
+	state := stateCode
 	depth := 0
 	started := false
-	for i := startPos; i < len(content); i++ {
-		switch content[i] {
-		case '{':
-			depth++
-			started = true
-		case '}':
-			depth--
-			if started && depth == 0 {
-				return uint32(i + 1)
+	n := len(content)
+
+	for i := startPos; i < n; i++ {
+		ch := content[i]
+
+		switch state {
+		case stateCode:
+			switch ch {
+			case '\'':
+				state = stateSingleQuote
+			case '"':
+				state = stateDoubleQuote
+			case '`':
+				state = stateBacktick
+			case '/':
+				if i+1 < n {
+					if content[i+1] == '/' {
+						state = stateLineComment
+						i++ // skip second /
+					} else if content[i+1] == '*' {
+						state = stateBlockComment
+						i++ // skip *
+					} else if looksLikeRegex(content, i) {
+						state = stateRegex
+					}
+				}
+			case '{':
+				depth++
+				started = true
+			case '}':
+				depth--
+				if started && depth == 0 {
+					return uint32(i + 1)
+				}
+			}
+
+		case stateSingleQuote:
+			if ch == '\\' && i+1 < n {
+				i++ // skip escaped character
+			} else if ch == '\'' {
+				state = stateCode
+			}
+
+		case stateDoubleQuote:
+			if ch == '\\' && i+1 < n {
+				i++ // skip escaped character
+			} else if ch == '"' {
+				state = stateCode
+			}
+
+		case stateBacktick:
+			if ch == '\\' && i+1 < n {
+				i++ // skip escaped character
+			} else if ch == '`' {
+				state = stateCode
+			}
+			// Note: we don't handle ${...} interpolation because the braces
+			// inside template expressions would need recursive parsing.
+			// For block-end detection, skipping the whole template literal is sufficient.
+
+		case stateLineComment:
+			if ch == '\n' {
+				state = stateCode
+			}
+
+		case stateBlockComment:
+			if ch == '*' && i+1 < n && content[i+1] == '/' {
+				state = stateCode
+				i++ // skip /
+			}
+
+		case stateRegex:
+			if ch == '\\' && i+1 < n {
+				i++ // skip escaped character
+			} else if ch == '/' {
+				state = stateCode
+			} else if ch == '\n' {
+				// regex can't span lines — treat as end
+				state = stateCode
 			}
 		}
 	}
+
 	// If no matching brace found, return end of content or a reasonable limit
 	end := startPos + 5000
 	if end > len(content) {
@@ -434,26 +691,112 @@ func findBlockEnd(content []byte, startPos int) uint32 {
 	return uint32(end)
 }
 
-// buildContentSum creates a summary from the line containing the declaration
+// looksLikeRegex determines if a '/' at position i is likely the start of a
+// regex literal rather than a division operator, by looking at the preceding
+// non-whitespace character.
+func looksLikeRegex(content []byte, i int) bool {
+	// Walk backwards to find the previous non-whitespace character
+	for j := i - 1; j >= 0; j-- {
+		ch := content[j]
+		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+			continue
+		}
+		// After these characters, '/' starts a regex:
+		// = ( [ { , ; ! & | ? : ~ ^ % + - * < > \n (start of statement)
+		switch ch {
+		case '=', '(', '[', '{', ',', ';', '!', '&', '|', '?', ':', '~', '^', '%', '+', '-', '*', '<', '>':
+			return true
+		}
+		// After a keyword like return/typeof/in/instanceof, '/' starts a regex
+		// but after an identifier or ')' or ']' or a number, it's division
+		return false
+	}
+	// At start of content, '/' is a regex
+	return true
+}
+
+// buildContentSum creates a summary from the declaration and any preceding
+// doc block (JSDoc /** ... */, PHPDoc, or consecutive // comments).
 func buildContentSum(lines []string, byteOffset int, name string) string {
 	// Find the line number for this byte offset
 	currentOffset := 0
 	for i, line := range lines {
 		nextOffset := currentOffset + len(line) + 1 // +1 for newline
 		if currentOffset <= byteOffset && byteOffset < nextOffset {
-			// Check for preceding comment (JSDoc/PHPDoc style)
-			summary := name
-			if i > 0 {
-				prevLine := strings.TrimSpace(lines[i-1])
-				if strings.HasPrefix(prevLine, "//") || strings.HasPrefix(prevLine, "*") || strings.HasPrefix(prevLine, "/**") {
-					summary = prevLine + " " + name
-				}
+			// Walk backwards to capture the full doc comment block
+			docLines := collectDocBlock(lines, i)
+			if len(docLines) > 0 {
+				return strings.TrimSpace(strings.Join(docLines, " ") + " " + name)
 			}
-			return strings.TrimSpace(summary)
+			return name
 		}
 		currentOffset = nextOffset
 	}
 	return name
+}
+
+// collectDocBlock walks backwards from the line before declLine, collecting
+// contiguous comment lines that form a doc block. It handles:
+//   - JSDoc/PHPDoc blocks: /** ... */
+//   - Single-line comments: // ...
+//
+// Returns the collected comment text lines (in top-to-bottom order).
+func collectDocBlock(lines []string, declLine int) []string {
+	if declLine <= 0 {
+		return nil
+	}
+
+	var collected []string
+	j := declLine - 1
+
+	// Check if we're at the end of a block comment (line contains */)
+	trimmed := strings.TrimSpace(lines[j])
+	if strings.HasSuffix(trimmed, "*/") || trimmed == "*/" {
+		// Walk backwards through the block comment to find /**
+		for j >= 0 {
+			line := strings.TrimSpace(lines[j])
+			collected = append([]string{cleanCommentLine(line)}, collected...)
+			if strings.HasPrefix(line, "/**") || strings.HasPrefix(line, "/*") {
+				break
+			}
+			j--
+		}
+		return collected
+	}
+
+	// Check for single-line comment block (// or lines starting with *)
+	for j >= 0 {
+		line := strings.TrimSpace(lines[j])
+		if strings.HasPrefix(line, "//") {
+			collected = append([]string{cleanCommentLine(line)}, collected...)
+			j--
+		} else if strings.HasPrefix(line, "*") || strings.HasPrefix(line, "/**") {
+			// Inside a doc block — keep going up
+			collected = append([]string{cleanCommentLine(line)}, collected...)
+			if strings.HasPrefix(line, "/**") || strings.HasPrefix(line, "/*") {
+				break
+			}
+			j--
+		} else {
+			break
+		}
+	}
+
+	return collected
+}
+
+// cleanCommentLine strips comment prefix characters from a line.
+func cleanCommentLine(line string) string {
+	line = strings.TrimSpace(line)
+	// Strip block comment markers
+	line = strings.TrimPrefix(line, "/**")
+	line = strings.TrimPrefix(line, "/*")
+	line = strings.TrimSuffix(line, "*/")
+	// Strip leading * (common in multi-line block comments)
+	line = strings.TrimPrefix(line, "*")
+	// Strip // prefix
+	line = strings.TrimPrefix(line, "//")
+	return strings.TrimSpace(line)
 }
 
 // jsKeywords is the set of common JS keywords and builtins used to filter call edges.
