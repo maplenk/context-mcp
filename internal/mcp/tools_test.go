@@ -617,6 +617,7 @@ func TestAllToolsRegistered(t *testing.T) {
 		"impact",
 		"read_symbol",
 		"query",
+		"health",
 		"index",
 		"trace_call_path",
 		"get_key_symbols",

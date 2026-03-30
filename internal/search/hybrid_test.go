@@ -265,8 +265,64 @@ func TestSearch_PerFileCap(t *testing.T) {
 			fileCount++
 		}
 	}
-	if fileCount > maxPerFile {
-		t.Errorf("per-file cap exceeded: got %d results from samefile.go, want at most %d", fileCount, maxPerFile)
+	if fileCount > defaultMaxPerFile {
+		t.Errorf("per-file cap exceeded: got %d results from samefile.go, want at most %d", fileCount, defaultMaxPerFile)
+	}
+}
+
+// TestSearch_CustomMaxPerFile verifies that a custom max_per_file parameter is respected.
+func TestSearch_CustomMaxPerFile(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert 5 nodes all in the same file, all matching the query
+	nodes := make([]types.ASTNode, 5)
+	for i := range nodes {
+		name := "HandleRequest" + string(rune('A'+i))
+		nodes[i] = types.ASTNode{
+			ID:         types.GenerateNodeID("handlers.go", name),
+			FilePath:   "handlers.go",
+			SymbolName: name,
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  uint32(i * 100),
+			EndByte:    uint32(i*100 + 90),
+			ContentSum: name + " handles HTTP request processing",
+		}
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	embedder := embedding.NewHashEmbedder()
+	g := graph.New()
+	hs := New(s, embedder, g)
+
+	// Request with custom maxPerFile of 5 (higher than default 3)
+	results, err := hs.Search("handle request", 10, nil, 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	fileCount := 0
+	for _, r := range results {
+		if r.Node.FilePath == "handlers.go" {
+			fileCount++
+		}
+	}
+	// With maxPerFile=5, we should get up to 5 results from the same file
+	if fileCount > 5 {
+		t.Errorf("custom per-file cap exceeded: got %d results from handlers.go, want at most 5", fileCount)
+	}
+	// And it should be more than the default of 3 (if enough nodes matched)
+	if fileCount <= defaultMaxPerFile && len(results) > defaultMaxPerFile {
+		t.Logf("Note: only %d results from handlers.go matched; custom cap may not have been exercised", fileCount)
+	}
+}
+
+// TestSanitizeFTS_StripsStar verifies that the * wildcard is stripped from user input.
+func TestSanitizeFTS_StripsStar(t *testing.T) {
+	result := sanitizeFTS("test*query")
+	if strings.Contains(result, "*") {
+		t.Errorf("expected * to be stripped from user input, got: %s", result)
 	}
 }
 

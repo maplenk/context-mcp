@@ -608,3 +608,67 @@ func TestGetAllProjectSummaries(t *testing.T) {
 		t.Fatalf("expected 2 summaries, got %d", len(result))
 	}
 }
+
+// ---- Schema Versioning ----
+
+func TestSchemaVersion_InitialVersion(t *testing.T) {
+	s := newTestStore(t)
+
+	version, err := s.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Errorf("expected schema version %d, got %d", currentSchemaVersion, version)
+	}
+}
+
+func TestSchemaVersion_IdempotentMigrations(t *testing.T) {
+	// Opening the store twice should not fail — migrations are idempotent
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test_idempotent.db")
+
+	s1, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore (first): %v", err)
+	}
+	s1.Close()
+
+	s2, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore (second): %v", err)
+	}
+	defer s2.Close()
+
+	version, err := s2.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Errorf("expected schema version %d after re-open, got %d", currentSchemaVersion, version)
+	}
+}
+
+// ---- GetNodeByName deterministic ordering ----
+
+func TestGetNodeByName_DeterministicOrder(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert multiple nodes with the same symbol name but different file paths
+	nodes := []types.ASTNode{
+		sampleNode(types.GenerateNodeID("z_file.go", "SharedName"), "z_file.go", "SharedName", types.NodeTypeFunction),
+		sampleNode(types.GenerateNodeID("a_file.go", "SharedName"), "a_file.go", "SharedName", types.NodeTypeFunction),
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	// GetNodeByName should return the one with the earliest file_path (a_file.go)
+	got, err := s.GetNodeByName("SharedName")
+	if err != nil {
+		t.Fatalf("GetNodeByName: %v", err)
+	}
+	if got.FilePath != "a_file.go" {
+		t.Errorf("expected deterministic result from a_file.go, got %s", got.FilePath)
+	}
+}

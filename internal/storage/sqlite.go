@@ -93,7 +93,9 @@ func (s *Store) UpsertNode(node types.ASTNode) error {
 	}
 
 	// Update FTS index (delete old entry then insert new)
-	s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID)
+	if _, err := s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
+		return fmt.Errorf("FTS delete: %w", err)
+	}
 	_, err = s.db.Exec(
 		"INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
 		node.SymbolName, node.ContentSum, node.ID)
@@ -151,8 +153,12 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 		if err != nil {
 			return err
 		}
-		tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID)
-		ftsStmt.Exec(node.SymbolName, node.ContentSum, node.ID)
+		if _, err := tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
+			return fmt.Errorf("FTS delete for %s: %w", node.ID, err)
+		}
+		if _, err := ftsStmt.Exec(node.SymbolName, node.ContentSum, node.ID); err != nil {
+			return fmt.Errorf("FTS insert for %s: %w", node.ID, err)
+		}
 	}
 
 	return tx.Commit()
@@ -300,7 +306,7 @@ func (s *Store) GetNodeByName(symbolName string) (*types.ASTNode, error) {
 
 	row := s.db.QueryRow(`
 		SELECT id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum
-		FROM nodes WHERE symbol_name = ? LIMIT 1`, symbolName)
+		FROM nodes WHERE symbol_name = ? ORDER BY file_path, id LIMIT 1`, symbolName)
 
 	var node types.ASTNode
 	var nt uint8

@@ -86,6 +86,36 @@ func TestDiscover_EmptyRepo(t *testing.T) {
 	}
 }
 
+func TestDiscover_SymlinkOutsideRepo(t *testing.T) {
+	repoDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	// Create a real file outside the repo
+	outsideFile := filepath.Join(outsideDir, "ARCHITECTURE.md")
+	if err := os.WriteFile(outsideFile, []byte("# Outside"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Create a symlink inside the repo pointing outside
+	symlinkPath := filepath.Join(repoDir, "ARCHITECTURE.md")
+	if err := os.Symlink(outsideFile, symlinkPath); err != nil {
+		t.Skipf("Cannot create symlinks on this platform: %v", err)
+	}
+
+	d := NewDiscoverer(repoDir)
+	docs, err := d.Discover()
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	// The symlink pointing outside the repo should be skipped
+	for _, doc := range docs {
+		if doc.Path == "ARCHITECTURE.md" {
+			t.Error("symlink pointing outside repo should not be discovered")
+		}
+	}
+}
+
 func TestDiscover_MaxChars(t *testing.T) {
 	dir := t.TempDir()
 

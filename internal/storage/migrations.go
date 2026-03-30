@@ -1,13 +1,19 @@
 package storage
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 )
 
-// runMigrations creates all required tables and indexes
-func (s *Store) runMigrations() error {
-	migrations := []string{
+// currentSchemaVersion is the latest schema version.
+// Increment this when adding new migrations.
+const currentSchemaVersion = 1
+
+// migrationSet maps schema versions to their SQL statements.
+// Version 1 is the initial schema.
+var migrationSet = map[int][]string{
+	1: {
 		// Core nodes table
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id TEXT PRIMARY KEY,
@@ -65,16 +71,81 @@ func (s *Store) runMigrations() error {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+	},
+}
+
+// getSchemaVersion returns the current schema version from the database.
+// Returns 0 if the schema_version table does not exist yet.
+func (s *Store) getSchemaVersion() (int, error) {
+	// Check if the schema_version table exists
+	var count int
+	err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_version'`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("checking schema_version table: %w", err)
+	}
+	if count == 0 {
+		return 0, nil
 	}
 
-	for i, m := range migrations {
-		if _, err := s.db.Exec(m); err != nil {
-			return fmt.Errorf("migration %d failed: %w", i, err)
+	var version int
+	err = s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("reading schema version: %w", err)
+	}
+	return version, nil
+}
+
+// setSchemaVersion records the schema version in the database within the given transaction.
+func setSchemaVersion(tx *sql.Tx, version int) error {
+	_, err := tx.Exec(`INSERT OR REPLACE INTO schema_version (version) VALUES (?)`, version)
+	return err
+}
+
+// runMigrations creates the schema_version table and applies any pending migrations
+func (s *Store) runMigrations() error {
+	// Ensure schema_version table exists
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`); err != nil {
+		return fmt.Errorf("creating schema_version table: %w", err)
+	}
+
+	currentVersion, err := s.getSchemaVersion()
+	if err != nil {
+		return fmt.Errorf("getting schema version: %w", err)
+	}
+
+	// Apply migrations from currentVersion+1 up to currentSchemaVersion
+	for v := currentVersion + 1; v <= currentSchemaVersion; v++ {
+		stmts, ok := migrationSet[v]
+		if !ok {
+			return fmt.Errorf("migration version %d not found", v)
 		}
+
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("beginning migration %d transaction: %w", v, err)
+		}
+
+		for i, stmt := range stmts {
+			if _, err := tx.Exec(stmt); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("migration %d statement %d failed: %w", v, i, err)
+			}
+		}
+
+		if err := setSchemaVersion(tx, v); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("recording schema version %d: %w", v, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("committing migration %d: %w", v, err)
+		}
+
+		log.Printf("Applied schema migration version %d", v)
 	}
 
 	// Try to create the vec0 table (requires sqlite-vec extension)
-	_, err := s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS node_embeddings USING vec0(
+	_, err = s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS node_embeddings USING vec0(
 		node_id TEXT PRIMARY KEY,
 		embedding float[384] distance_metric=cosine
 	)`)
@@ -87,4 +158,9 @@ func (s *Store) runMigrations() error {
 	}
 
 	return nil
+}
+
+// SchemaVersion returns the current schema version (exported for testing)
+func (s *Store) SchemaVersion() (int, error) {
+	return s.getSchemaVersion()
 }

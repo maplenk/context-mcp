@@ -29,9 +29,10 @@ type ToolDeps struct {
 // ContextParams are the parameters for the context tool.
 // Tags provide JSON schema metadata for the MCP SDK.
 type ContextParams struct {
-	Query string `json:"query" jsonschema:"required,description=Natural language or keyword query to search for relevant code"`
-	Limit int    `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 10)"`
-	Mode  string `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
+	Query      string `json:"query" jsonschema:"required,description=Natural language or keyword query to search for relevant code"`
+	Limit      int    `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 10)"`
+	Mode       string `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
+	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 3)"`
 }
 
 // ImpactParams are the parameters for the impact tool.
@@ -49,6 +50,9 @@ type ReadSymbolParams struct {
 type QueryParams struct {
 	SQL string `json:"sql" jsonschema:"required,description=SQL SELECT query to execute"`
 }
+
+// HealthParams are the parameters for the health tool (empty — no inputs).
+type HealthParams struct{}
 
 // IndexParams are the parameters for the index tool.
 type IndexParams struct {
@@ -110,6 +114,7 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerImpactTool(s, deps)
 	registerReadSymbolTool(s, deps)
 	registerQueryTool(s, deps)
+	registerHealthTool(s, deps)
 	registerIndexTool(s, deps, indexFn)
 	registerTraceCallPathTool(s, deps)
 	registerGetKeySymbolsTool(s, deps)
@@ -142,7 +147,7 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 	if deps.Search == nil {
 		return nil, fmt.Errorf("search engine not initialized")
 	}
-	results, err := deps.Search.Search(p.Query, p.Limit, nil)
+	results, err := deps.Search.Search(p.Query, p.Limit, nil, p.MaxPerFile)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -194,6 +199,11 @@ func registerContextTool(s *Server, deps ToolDeps) {
 					"type":        "string",
 					"description": "Search mode: 'search' (default) for hybrid search, 'architecture' for community detection",
 					"default":     "search",
+				},
+				"max_per_file": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum results per unique file path (default: 3)",
+					"default":     3,
 				},
 			},
 			"required": []string{"query"},
@@ -484,7 +494,50 @@ func registerQueryTool(s *Server, deps ToolDeps) {
 	})
 }
 
-// ----- Tool 5: index -----
+// ----- Tool 5: health -----
+
+func healthHandler(deps ToolDeps) (interface{}, error) {
+	var nodeCount, edgeCount int
+	if deps.Graph != nil {
+		nodeCount = deps.Graph.NodeCount()
+		edgeCount = deps.Graph.EdgeCount()
+	}
+	return map[string]interface{}{
+		"status":  "healthy",
+		"nodes":   nodeCount,
+		"edges":   edgeCount,
+		"version": "0.2.0",
+	}, nil
+}
+
+func registerHealthTool(s *Server, deps ToolDeps) {
+	desc := "Returns daemon health status and metrics."
+
+	// CLI handler
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		return healthHandler(deps)
+	}
+
+	s.RegisterTool(ToolDefinition{
+		Name:        "health",
+		Description: desc,
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	}, cliHandler)
+
+	// SDK handler
+	_ = s.RegisterSDKTool("health", desc, func(p HealthParams) (*mcp_golang.ToolResponse, error) {
+		result, err := healthHandler(deps)
+		if err != nil {
+			return nil, err
+		}
+		return toToolResponse(result)
+	})
+}
+
+// ----- Tool 6: index -----
 
 func indexHandler(indexFn IndexFunc, p IndexParams) (interface{}, error) {
 	if indexFn == nil {
