@@ -47,9 +47,9 @@ func main() {
 	}
 	log.Printf("Storage initialized at %s", cfg.DBPath)
 
-	// 2. Initialize embedding engine
-	embedder := embedding.NewHashEmbedder()
-	log.Printf("Embedding engine initialized (hash-based fallback)")
+	// 2. Initialize embedding engine (TF-IDF based with real semantic locality)
+	embedder := embedding.NewEmbedder()
+	log.Printf("Embedding engine initialized (TF-IDF embedder)")
 
 	// Unified cleanup, safe to call multiple times (signal handler + deferred path).
 	var cleanupOnce sync.Once
@@ -134,7 +134,7 @@ func runCLI(cfg *config.Config, args []string) {
 		}
 		defer store.Close()
 
-		embedder := embedding.NewHashEmbedder()
+		embedder := embedding.NewEmbedder()
 		defer embedder.Close()
 		graphEngine := graph.New()
 		hybridSearch := search.New(store, embedder, graphEngine)
@@ -176,7 +176,7 @@ func runCLI(cfg *config.Config, args []string) {
 	}
 	defer store.Close()
 
-	embedder := embedding.NewHashEmbedder()
+	embedder := embedding.NewEmbedder()
 	defer embedder.Close()
 	p := parser.New()
 	graphEngine := graph.New()
@@ -328,7 +328,18 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 
 			vectors, err := embedder.EmbedBatch(texts)
 			if err != nil {
-				log.Printf("Embedding batch error: %v", err)
+				// Batch failed — fall back to one-at-a-time embedding for this batch
+				log.Printf("Embedding batch error (falling back to individual): %v", err)
+				for j, text := range texts {
+					vec, embedErr := embedder.Embed(text)
+					if embedErr != nil {
+						log.Printf("Individual embedding error for %s: %v", batch[j].SymbolName, embedErr)
+						continue // skip this node but continue with rest
+					}
+					if storeErr := store.UpsertEmbedding(batch[j].ID, vec); storeErr != nil {
+						log.Printf("Failed to store embedding for %s: %v", batch[j].SymbolName, storeErr)
+					}
+				}
 				continue
 			}
 

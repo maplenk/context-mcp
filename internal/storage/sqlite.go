@@ -19,8 +19,9 @@ const embeddingDim = 384
 
 // Store manages all SQLite database operations
 type Store struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db          *sql.DB
+	mu          sync.RWMutex
+	hasVecTable bool // true if sqlite-vec vec0 table was created successfully
 }
 
 // NewStore opens (or creates) a SQLite database at the given path and runs migrations
@@ -226,7 +227,11 @@ func (s *Store) DeleteByFile(filePath string) error {
 
 // UpsertEmbedding stores a vector embedding for a node.
 // The embedding must be exactly 384 dimensions.
+// Returns nil (no-op) if sqlite-vec is not available, enabling graceful degradation.
 func (s *Store) UpsertEmbedding(nodeID string, embedding []float32) error {
+	if !s.hasVecTable {
+		return nil // graceful degradation: sqlite-vec not available
+	}
 	if len(embedding) != embeddingDim {
 		return fmt.Errorf("embedding dimension mismatch: got %d, want %d", len(embedding), embeddingDim)
 	}
@@ -438,8 +443,19 @@ func (s *Store) SearchLexical(query string, limit int) ([]types.SearchResult, er
 	return results, rows.Err()
 }
 
-// SearchSemantic performs KNN semantic search using sqlite-vec
+// HasVecTable returns whether the sqlite-vec virtual table is available
+func (s *Store) HasVecTable() bool {
+	return s.hasVecTable
+}
+
+// SearchSemantic performs KNN semantic search using sqlite-vec.
+// Returns nil, nil (empty results, no error) if sqlite-vec is not available,
+// enabling graceful degradation to lexical-only search.
 func (s *Store) SearchSemantic(queryEmbedding []float32, limit int) ([]types.SearchResult, error) {
+	if !s.hasVecTable {
+		return nil, nil
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

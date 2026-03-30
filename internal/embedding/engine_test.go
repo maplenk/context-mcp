@@ -173,3 +173,212 @@ func TestCosineSimilarity_DifferentIsLessThanOne(t *testing.T) {
 		t.Errorf("expected similarity < 1.0 for different vectors, got %f", sim)
 	}
 }
+
+// ----------- TFIDFEmbedder Tests -----------
+
+// TestTFIDFEmbedder_Dimension verifies that Embed returns a 384-dimensional vector.
+func TestTFIDFEmbedder_Dimension(t *testing.T) {
+	e := NewTFIDFEmbedder()
+	vec, err := e.Embed("hello world")
+	if err != nil {
+		t.Fatalf("Embed error: %v", err)
+	}
+	if len(vec) != EmbeddingDim {
+		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	}
+}
+
+// TestTFIDFEmbedder_Deterministic verifies same input always produces same output.
+func TestTFIDFEmbedder_Deterministic(t *testing.T) {
+	e := NewTFIDFEmbedder()
+	const text = "deterministic embedding test"
+
+	vec1, err := e.Embed(text)
+	if err != nil {
+		t.Fatalf("first Embed: %v", err)
+	}
+	vec2, err := e.Embed(text)
+	if err != nil {
+		t.Fatalf("second Embed: %v", err)
+	}
+
+	for i := range vec1 {
+		if vec1[i] != vec2[i] {
+			t.Errorf("dimension %d differs: %v vs %v", i, vec1[i], vec2[i])
+		}
+	}
+}
+
+// TestTFIDFEmbedder_Normalized verifies that the L2 norm is approximately 1.0.
+func TestTFIDFEmbedder_Normalized(t *testing.T) {
+	e := NewTFIDFEmbedder()
+	vec, err := e.Embed("test normalization of embedding vector")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	var sumSq float64
+	for _, v := range vec {
+		sumSq += float64(v) * float64(v)
+	}
+	norm := math.Sqrt(sumSq)
+	if math.Abs(norm-1.0) > 1e-5 {
+		t.Errorf("expected L2 norm ~1.0, got %f", norm)
+	}
+}
+
+// TestTFIDFEmbedder_SemanticLocality verifies that similar inputs produce more similar
+// vectors than dissimilar inputs. This is the KEY property that HashEmbedder lacks.
+func TestTFIDFEmbedder_SemanticLocality(t *testing.T) {
+	e := NewTFIDFEmbedder()
+
+	// Two similar code descriptions
+	vecA, _ := e.Embed("ReadFile reads a file from disk")
+	vecB, _ := e.Embed("ReadFileContents reads file contents from disk")
+
+	// A completely different description
+	vecC, _ := e.Embed("database connection pool management with retries")
+
+	simAB := CosineSimilarity(vecA, vecB)
+	simAC := CosineSimilarity(vecA, vecC)
+
+	if simAB <= simAC {
+		t.Errorf("expected similar texts to have higher similarity: sim(A,B)=%f <= sim(A,C)=%f", simAB, simAC)
+	}
+}
+
+// TestTFIDFEmbedder_CamelCaseSimilarity verifies that CamelCase identifiers with
+// shared components produce similar vectors.
+func TestTFIDFEmbedder_CamelCaseSimilarity(t *testing.T) {
+	e := NewTFIDFEmbedder()
+
+	vecA, _ := e.Embed("ComputeChecksum")
+	vecB, _ := e.Embed("ComputeHash")
+	vecC, _ := e.Embed("DatabaseConnection")
+
+	simAB := CosineSimilarity(vecA, vecB)
+	simAC := CosineSimilarity(vecA, vecC)
+
+	if simAB <= simAC {
+		t.Errorf("expected 'ComputeChecksum' closer to 'ComputeHash' than 'DatabaseConnection': sim(A,B)=%f, sim(A,C)=%f", simAB, simAC)
+	}
+}
+
+// TestTFIDFEmbedder_EmptyString verifies that empty input returns a valid vector.
+func TestTFIDFEmbedder_EmptyString(t *testing.T) {
+	e := NewTFIDFEmbedder()
+	vec, err := e.Embed("")
+	if err != nil {
+		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
+	}
+	if len(vec) != EmbeddingDim {
+		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	}
+}
+
+// TestTFIDFEmbedder_EmbedBatch verifies batch embedding works correctly.
+func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
+	e := NewTFIDFEmbedder()
+	texts := []string{
+		"first text about reading files",
+		"second text about database queries",
+		"third text about network connections",
+	}
+
+	vecs, err := e.EmbedBatch(texts)
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(vecs) != len(texts) {
+		t.Errorf("expected %d vectors, got %d", len(texts), len(vecs))
+	}
+	for i, v := range vecs {
+		if len(v) != EmbeddingDim {
+			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), EmbeddingDim)
+		}
+	}
+}
+
+// TestTFIDFEmbedder_SelfSimilarityIsOne verifies cosine similarity of a vector with itself is ~1.0.
+func TestTFIDFEmbedder_SelfSimilarityIsOne(t *testing.T) {
+	e := NewTFIDFEmbedder()
+	vec, err := e.Embed("cosine similarity self test for tfidf")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	sim := CosineSimilarity(vec, vec)
+	if math.Abs(sim-1.0) > 1e-5 {
+		t.Errorf("self cosine similarity: expected ~1.0, got %f", sim)
+	}
+}
+
+// TestNewEmbedder_ReturnsTFIDF verifies that NewEmbedder returns a TFIDFEmbedder.
+func TestNewEmbedder_ReturnsTFIDF(t *testing.T) {
+	e := NewEmbedder()
+	if e == nil {
+		t.Fatal("NewEmbedder returned nil")
+	}
+	// Verify it's a TFIDFEmbedder by checking it implements Embedder and produces valid output
+	vec, err := e.Embed("test")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vec) != EmbeddingDim {
+		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	}
+}
+
+// TestTokenize verifies the tokenizer handles various input formats.
+func TestTokenize(t *testing.T) {
+	tests := []struct {
+		input    string
+		contains []string // tokens that should be present
+	}{
+		{"ReadFile", []string{"read", "file"}},
+		{"parse_json_data", []string{"parse", "json", "data"}},
+		{"HTTPServer", []string{"http", "server"}},
+		{"simple words here", []string{"simple", "words", "here"}},
+		{"mixedCase_and_underscores", []string{"mixed", "case", "underscores"}},
+	}
+
+	for _, tt := range tests {
+		tokens := tokenize(tt.input)
+		tokenSet := make(map[string]bool)
+		for _, tok := range tokens {
+			tokenSet[tok] = true
+		}
+		for _, expected := range tt.contains {
+			if !tokenSet[expected] {
+				t.Errorf("tokenize(%q): expected token %q in %v", tt.input, expected, tokens)
+			}
+		}
+	}
+}
+
+// TestSplitCamelCase verifies CamelCase splitting.
+func TestSplitCamelCase(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"ReadFile", []string{"Read", "File"}},
+		{"HTTPServer", []string{"HTTP", "Server"}},
+		{"parseJSON", []string{"parse", "JSON"}},
+		{"simple", []string{"simple"}},
+		{"ABC", []string{"ABC"}},
+	}
+
+	for _, tt := range tests {
+		got := splitCamelCase(tt.input)
+		if len(got) != len(tt.expected) {
+			t.Errorf("splitCamelCase(%q) = %v, want %v", tt.input, got, tt.expected)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.expected[i] {
+				t.Errorf("splitCamelCase(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.expected[i])
+			}
+		}
+	}
+}
