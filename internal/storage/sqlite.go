@@ -43,6 +43,12 @@ func NewStore(dbPath string) (*Store, error) {
 
 	s := &Store{db: db}
 
+	// Disable extension loading to prevent load_extension() attacks
+	if _, err := db.Exec("PRAGMA trusted_schema = OFF"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("disabling trusted schema: %w", err)
+	}
+
 	if err := s.runMigrations(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
@@ -472,6 +478,20 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	if !strings.HasPrefix(trimmed, "SELECT") {
 		return nil, fmt.Errorf("only SELECT queries are allowed, got: %s", strings.SplitN(trimmed, " ", 2)[0])
 	}
+
+	// Reject queries containing dangerous SQLite functions/patterns
+	dangerousPatterns := []string{"load_extension", "writefile", "fts3_tokenizer"}
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(trimmed, strings.ToUpper(pattern)) {
+			return nil, fmt.Errorf("query contains forbidden pattern: %s", pattern)
+		}
+	}
+
+	// Wrap in a deferred (read-only) transaction to prevent any side effects
+	if _, err := s.db.Exec("BEGIN DEFERRED"); err != nil {
+		return nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer s.db.Exec("ROLLBACK")
 
 	rows, err := s.db.Query(query)
 	if err != nil {

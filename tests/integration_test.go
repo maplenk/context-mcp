@@ -171,7 +171,7 @@ class UserService {
 	t.Logf("Search 'calculator add' returned %d results", len(results))
 	// We expect at least some results from FTS5
 	if len(results) == 0 {
-		t.Log("Warning: no search results (may be expected if FTS5 tokenization doesn't match)")
+		t.Errorf("expected at least 1 search result for 'calculator add', got 0")
 	}
 
 	// 8. Test search for JS content
@@ -193,11 +193,12 @@ class UserService {
 	}
 
 	// 10. Test blast radius (if we have edges)
+	// BlastRadius traverses INCOMING edges (who calls the given node), so we test
+	// on the target (callee) to properly validate that callers are found.
 	if graphEngine.EdgeCount() > 0 {
-		// Find a node that has outgoing edges
 		for _, edge := range edges {
-			affected := graphEngine.BlastRadius(edge.SourceID, 3)
-			t.Logf("BlastRadius for %s: %d affected nodes", edge.SourceID[:8], len(affected))
+			affected := graphEngine.BlastRadius(edge.TargetID, 3)
+			t.Logf("BlastRadius for target %s: %d affected nodes", edge.TargetID[:8], len(affected))
 			break
 		}
 	}

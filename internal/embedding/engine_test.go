@@ -140,6 +140,21 @@ func TestCosineSimilarity_SelfIsOne(t *testing.T) {
 	}
 }
 
+// TestHashEmbedder_EmptyString verifies that Embed("") returns a valid 384-dim vector
+// without panicking or returning an error. An empty string may produce a zero vector
+// (all dimensions zero after normalization) or a valid hash-based vector — both are
+// acceptable as long as the slice length is correct and no error is returned.
+func TestHashEmbedder_EmptyString(t *testing.T) {
+	e := NewHashEmbedder()
+	vec, err := e.Embed("")
+	if err != nil {
+		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
+	}
+	if len(vec) != EmbeddingDim {
+		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	}
+}
+
 // TestCosineSimilarity_DifferentIsLessThanOne verifies that two different vectors have similarity < 1.0.
 func TestCosineSimilarity_DifferentIsLessThanOne(t *testing.T) {
 	e := NewHashEmbedder()

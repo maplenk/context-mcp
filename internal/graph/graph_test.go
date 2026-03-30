@@ -181,3 +181,75 @@ func TestPersonalizedPageRank_EmptyGraph(t *testing.T) {
 		t.Errorf("expected nil for empty graph, got %v", ranks)
 	}
 }
+
+// TestBlastRadius_Cycle verifies that BlastRadius terminates without looping when
+// the graph contains a cycle. Graph: A→B→C→A (each edge means "source calls target").
+// BlastRadius(A) traverses incoming edges:
+//   - C has an edge to A (C→A), so C is found at depth 1.
+//   - B has an edge to C (B→C), so B is found at depth 2.
+//   - A has an edge to B (A→B), but A is already in the visited set, so traversal stops.
+//
+// The result must contain exactly B and C and must not hang.
+func TestBlastRadius_Cycle(t *testing.T) {
+	g := New()
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
+	})
+
+	result := g.BlastRadius("node-a", 10)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 affected nodes for cyclic graph, got %d: %v", len(result), result)
+	}
+
+	resultSet := make(map[string]bool)
+	for _, id := range result {
+		resultSet[id] = true
+	}
+	if !resultSet["node-b"] {
+		t.Error("blast radius should contain 'node-b'")
+	}
+	if !resultSet["node-c"] {
+		t.Error("blast radius should contain 'node-c'")
+	}
+}
+
+// TestPersonalizedPageRank_DAG verifies PageRank scores on a simple DAG.
+// Graph: A→B, A→C, B→D, C→D (A is a source, D is most-depended-upon).
+// When traversing with PageRank, D receives contributions from both B and C,
+// so it should accumulate a higher score than A (which has no incoming edges).
+func TestPersonalizedPageRank_DAG(t *testing.T) {
+	g := New()
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-a", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+	})
+
+	ranks := g.PersonalizedPageRank([]string{"node-a"})
+	if ranks == nil {
+		t.Fatal("PersonalizedPageRank returned nil")
+	}
+
+	// All 4 nodes should have positive scores
+	for _, id := range []string{"node-a", "node-b", "node-c", "node-d"} {
+		score, ok := ranks[id]
+		if !ok {
+			t.Fatalf("%s missing from PageRank result", id)
+		}
+		if score <= 0 {
+			t.Errorf("%s has non-positive score: %f", id, score)
+		}
+	}
+
+	// D has two incoming edges (from B and C), making it the most-linked-to
+	// among the non-seeded nodes. It should rank higher than B (1 incoming).
+	scoreD := ranks["node-d"]
+	scoreB := ranks["node-b"]
+	if scoreD <= scoreB {
+		t.Errorf("expected node-d (score=%f) to rank higher than node-b (score=%f)", scoreD, scoreB)
+	}
+}

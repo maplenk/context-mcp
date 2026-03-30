@@ -196,7 +196,16 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 			if err != nil {
 				return nil, fmt.Errorf("resolving path: %w", err)
 			}
-			if !strings.HasPrefix(absPath, deps.RepoRoot) {
+			// Resolve symlinks to prevent symlink-based path traversal bypass
+			absPath, err = filepath.EvalSymlinks(absPath)
+			if err != nil {
+				return nil, fmt.Errorf("resolving symlinks in path: %w", err)
+			}
+			resolvedRoot, _ := filepath.EvalSymlinks(deps.RepoRoot)
+			if resolvedRoot == "" {
+				resolvedRoot = deps.RepoRoot
+			}
+			if !strings.HasPrefix(absPath, resolvedRoot) {
 				return nil, fmt.Errorf("path traversal detected: %s is outside repo root", node.FilePath)
 			}
 			f, err := os.Open(absPath)

@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"math"
 	"strings"
-	"sync"
 )
 
 const EmbeddingDim = 384
@@ -21,9 +20,7 @@ type Embedder interface {
 // This is a fallback implementation that maintains the correct vector dimensionality
 // and provides basic semantic locality (similar strings produce somewhat similar vectors).
 // It should be replaced with a real ONNX-based embedder for production use.
-type HashEmbedder struct {
-	mu sync.Mutex
-}
+type HashEmbedder struct{}
 
 // NewHashEmbedder creates a new hash-based embedder
 func NewHashEmbedder() *HashEmbedder {

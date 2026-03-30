@@ -32,13 +32,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
-	defer store.Close()
 	log.Printf("Storage initialized at %s", cfg.DBPath)
 
 	// 2. Initialize embedding engine
 	embedder := embedding.NewHashEmbedder()
-	defer embedder.Close()
 	log.Printf("Embedding engine initialized (hash-based fallback)")
+
+	// Unified cleanup, safe to call multiple times (signal handler + deferred path).
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			store.Close()
+			embedder.Close()
+		})
+	}
+	defer cleanup()
 
 	// 3. Initialize parser
 	p := parser.New()
@@ -62,7 +70,7 @@ func main() {
 	if err := w.Start(); err != nil {
 		log.Fatalf("Failed to start watcher: %v", err)
 	}
-	defer w.Stop()
+	defer w.Stop() // safe: cleanup() above does not touch the watcher
 	log.Printf("Filesystem watcher started")
 
 	// 8. Start incremental update goroutine
@@ -90,8 +98,7 @@ func main() {
 		sig := <-sigCh
 		log.Printf("Received signal %v, shutting down...", sig)
 		w.Stop()
-		store.Close()
-		embedder.Close()
+		cleanup()
 		os.Exit(0)
 	}()
 
@@ -103,14 +110,17 @@ func main() {
 
 // indexRepo performs a full index of the repository
 func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) {
-	// Walk the repo to find all source files
-	w, err := watcher.New(cfg.RepoRoot, cfg.DebounceInterval, cfg.ExcludedDirs)
+	// Walk the repo to find all source files.
+	// Use a temporary watcher only for its WalkExisting logic; stop it
+	// immediately after the walk to avoid leaking OS file descriptors.
+	walker, err := watcher.New(cfg.RepoRoot, cfg.DebounceInterval, cfg.ExcludedDirs)
 	if err != nil {
 		log.Printf("Failed to create walker: %v", err)
 		return
 	}
 
-	files, err := w.WalkExisting()
+	files, err := walker.WalkExisting()
+	walker.Stop() // release fds immediately; we no longer need this watcher
 	if err != nil {
 		log.Printf("Failed to walk repository: %v", err)
 		return
@@ -256,7 +266,9 @@ func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Sto
 			log.Printf("File changed: %s", event.Path)
 
 			// Delete old data for this file
-			store.DeleteByFile(event.Path)
+			if err := store.DeleteByFile(event.Path); err != nil {
+				log.Printf("Failed to delete stale data for %s: %v", event.Path, err)
+			}
 
 			// Re-parse the file
 			result, err := p.ParseFile(absPath, cfg.RepoRoot)

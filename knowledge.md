@@ -33,10 +33,10 @@ qb-context/
 │   ├── embedding/engine.go         — Embedding engine (hash fallback, ONNX interface)
 │   ├── embedding/model/embed.go    — Placeholder for ONNX model embedding
 │   ├── graph/graph.go              — gonum directed graph (BFS, PageRank)
-│   ├── search/hybrid.go            — Hybrid search (RRF fusion) [PENDING]
+│   ├── search/hybrid.go            — Hybrid search (RRF fusion)
 │   └── mcp/
 │       ├── server.go               — JSON-RPC 2.0 MCP server over stdio
-│       └── tools.go                — 5 MCP tool stubs
+│       └── tools.go                — 5 MCP tool implementations
 ├── .golangci.yml                   — Linter configuration
 ├── go.mod / go.sum
 └── knowledge.md                    — This file
@@ -81,14 +81,35 @@ qb-context/
 
 ### Graph (`internal/graph`)
 - gonum directed graph with string hash ID <-> int64 ID mapping
-- `BlastRadius`: BFS via `traverse.BreadthFirst` with depth cap
+- `BlastRadius`: BFS traversing **incoming edges** (`g.dg.To()`) — finds dependents (who calls this node), not dependencies
 - `PersonalizedPageRank`: PageRankSparse with blended personalization
 - Thread-safe with sync.RWMutex
+
+### Search (`internal/search`)
+- `HybridSearch`: dual-path search combining FTS5 lexical + KNN semantic
+- Reciprocal Rank Fusion (k=60): score = Σ 1/(k + rank + 1) across lists
+- PageRank boost: multiplies RRF score by (1 + rank*100) from active files
+- Returns ranked `SearchResult` (Node + Score)
 
 ### MCP Server (`internal/mcp`)
 - Custom JSON-RPC 2.0 over stdio (no third-party MCP SDK)
 - Handles: initialize, tools/list, tools/call, ping, notifications/initialized
-- 5 tool stubs registered: context, impact, read_symbol, query, index
+- Silently ignores unknown notifications (no response for requests without ID)
+- Handles marshal errors in tool responses
+- 5 tools fully wired: context, impact, read_symbol, query, index
+
+### MCP Tools (`internal/mcp/tools.go`)
+- `context` → HybridSearch.Search (query + limit + active files)
+- `impact` → GraphEngine.BlastRadius + node enrichment
+- `read_symbol` → Store.GetNode + byte-range file read (path traversal protected)
+- `query` → Store.RawQuery (SELECT-only)
+- `index` → full re-index pipeline callback
+
+### Main Orchestrator (`cmd/qb-context/main.go`)
+- Boot: config → storage → embedding → parser → graph → initial index → watcher → MCP server
+- Worker pool for parallel file parsing during initial index
+- Incremental updates via filesystem watcher callbacks
+- Graceful shutdown on SIGINT/SIGTERM
 
 ---
 
@@ -144,27 +165,29 @@ Critical issues identified and fixed:
 
 ---
 
-## In Progress
+## All Commits Complete
 
-### Bug Fix Agents (3 Sonnet agents running)
-1. **fix-fts5-schema** — Fixing FTS5 contentless table to use node_id reference, updating SearchLexical JOIN
-2. **fix-watcher-race** — Adding `stopped` flag to prevent panic on closed channel
-3. **fix-parser-issues** — PHP multi-class method attribution, file size check, jsKeywords promotion
+All 6 commits landed, all tests pass (`go test -tags "fts5" ./... -count=1`).
 
----
+### Commit 4: Hybrid Search + MCP Wiring (2 parallel Sonnet agents)
+- Hybrid search: FTS5 + KNN + RRF fusion + PageRank boost
+- All 5 MCP tools wired to real implementations
 
-## Remaining Work
+### Commit 5: Orchestrator + Security Fixes
+- Full main.go boot sequence with worker pool, watcher, graceful shutdown
+- BFS blast radius direction fix (incoming edges)
+- Path traversal protection in read_symbol
+- Byte range validation (uint32 underflow, 5MB cap)
+- MCP notification silence + marshal error handling
 
-### Commit 4: Hybrid Search + MCP Wiring (2 parallel agents)
-- **4A**: Hybrid search engine — FTS5 lexical + KNN semantic + RRF fusion (k=60) + PageRank boost
-- **4B**: Wire MCP tools to real implementations (context→search, impact→BFS, read_symbol→byte read, query→SQL, index→reindex)
+### Commit 6: Tests
+- Unit tests: embedding (4), graph (6), MCP server (5), hybrid search (4)
+- Integration test: full pipeline (parse → store → embed → graph → search → delete)
 
-### Commit 5: Main Orchestrator (1 agent)
-- Full main.go: init storage → init embedding → initial index (walk→parse→store→embed→graph) → start watcher → start MCP server → graceful shutdown
-
-### Commit 6: Tests (2 parallel agents)
-- **6A**: Unit tests for graph, embedding, search, MCP
-- **6B**: Integration test (full pipeline)
+### Devil's Advocate Reviews
+- **Review #1** (after Commits 1-3): 9 issues found, all fixed
+- **Review #2** (after Commit 4): 7 issues found, all fixed in Commit 5
+- **Review #3** (after Commits 5-6): in progress
 
 ---
 

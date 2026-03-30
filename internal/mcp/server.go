@@ -43,11 +43,16 @@ type ToolDefinition struct {
 // ToolHandler is the function signature for tool implementations
 type ToolHandler func(params json.RawMessage) (interface{}, error)
 
+// maxConcurrentRequests caps the number of request-handler goroutines that
+// may run simultaneously, preventing unbounded goroutine/memory growth.
+const maxConcurrentRequests = 10
+
 // Server is the MCP server that communicates over stdio
 type Server struct {
 	tools    []ToolDefinition
 	handlers map[string]ToolHandler
 	mu       sync.Mutex
+	sema     chan struct{} // semaphore for bounded concurrency
 	input    io.Reader
 	output   io.Writer
 }
@@ -56,6 +61,7 @@ type Server struct {
 func NewServer() *Server {
 	return &Server{
 		handlers: make(map[string]ToolHandler),
+		sema:     make(chan struct{}, maxConcurrentRequests),
 		input:    os.Stdin,
 		output:   os.Stdout,
 	}
@@ -65,6 +71,7 @@ func NewServer() *Server {
 func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 	return &Server{
 		handlers: make(map[string]ToolHandler),
+		sema:     make(chan struct{}, maxConcurrentRequests),
 		input:    input,
 		output:   output,
 	}
@@ -97,7 +104,11 @@ func (s *Server) Serve() error {
 			continue
 		}
 
-		go s.handleRequest(req)
+		s.sema <- struct{}{} // acquire concurrency slot
+		go func(r JSONRPCRequest) {
+			defer func() { <-s.sema }() // release slot when done
+			s.handleRequest(r)
+		}(req)
 	}
 
 	return scanner.Err()

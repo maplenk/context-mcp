@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +213,40 @@ func TestToolsCall_HandlerInvoked(t *testing.T) {
 	text, _ := contentItem["text"].(string)
 	if !strings.Contains(text, "handler was called") {
 		t.Errorf("expected response text to contain 'handler was called', got %q", text)
+	}
+}
+
+// TestConcurrentRequests verifies that the server correctly handles multiple JSON-RPC
+// requests arriving in a single input buffer, dispatching each to a goroutine and
+// collecting all responses. This exercises the goroutine dispatch and the mutex in
+// writeResponse.
+func TestConcurrentRequests(t *testing.T) {
+	const numRequests = 5
+	var input strings.Builder
+	for i := 1; i <= numRequests; i++ {
+		input.WriteString(`{"jsonrpc":"2.0","id":` + fmt.Sprintf("%d", i) + `,"method":"tools/list","params":{}}` + "\n")
+	}
+
+	output := &bytes.Buffer{}
+	server := NewServerWithIO(strings.NewReader(input.String()), output)
+
+	runServerSync(server)
+
+	responses := readResponses(t, output)
+	if len(responses) != numRequests {
+		t.Fatalf("expected %d responses, got %d (raw=%q)", numRequests, len(responses), output.String())
+	}
+
+	// Verify every expected ID has a matching response without an error.
+	for i := 1; i <= numRequests; i++ {
+		resp := findResponse(responses, float64(i))
+		if resp == nil {
+			t.Errorf("no response for request id=%d", i)
+			continue
+		}
+		if resp.Error != nil {
+			t.Errorf("request id=%d: unexpected error: %v", i, resp.Error)
+		}
 	}
 }
 

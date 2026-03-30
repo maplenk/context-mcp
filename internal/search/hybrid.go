@@ -9,7 +9,7 @@ import (
 	"github.com/naman/qb-context/internal/types"
 )
 
-const rrrK = 60 // RRF constant
+const rrfK = 60 // RRF constant
 
 // HybridSearch combines lexical, semantic, and structural search
 type HybridSearch struct {
@@ -92,7 +92,7 @@ func reciprocalRankFusion(lists ...[]types.SearchResult) []types.SearchResult {
 	for _, list := range lists {
 		for rank, result := range list {
 			id := result.Node.ID
-			scores[id] += 1.0 / float64(rrrK+rank+1) // rank is 0-indexed, RRF uses 1-indexed
+			scores[id] += 1.0 / float64(rrfK+rank+1) // rank is 0-indexed, RRF uses 1-indexed
 			if _, exists := nodes[id]; !exists {
 				nodes[id] = result.Node
 			}
