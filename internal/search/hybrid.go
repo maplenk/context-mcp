@@ -116,8 +116,10 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// Normalize semantic scores to [0,1]
 	semanticScores := normalizeScores(semanticResults)
 
-	// Query-time PPR seeded from top 10 FTS results
+	// Compute graph-derived signals (PPR + InDegree) under a single lock
+	// acquisition to prevent race conditions from concurrent graph mutations.
 	var pprScores map[string]float64
+	var inDegreeScores map[string]float64
 	if h.graph != nil && len(lexicalResults) > 0 {
 		seedCount := 10
 		if seedCount > len(lexicalResults) {
@@ -129,18 +131,15 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		}
 		// Also include active file nodes as seeds
 		seeds = append(seeds, activeFileNodeIDs...)
-		raw := h.graph.PersonalizedPageRank(seeds)
-		pprScores = normalizeMap(raw)
+		rawPPR, rawInDegree := h.graph.ComputeSearchSignals(seeds)
+		pprScores = normalizeMap(rawPPR)
+		inDegreeScores = rawInDegree // already [0,1] normalized
+	} else if h.graph != nil {
+		inDegreeScores = h.graph.ComputeInDegree()
 	}
 
 	// Load betweenness scores (already [0,1] from index time)
 	betweennessScores, _ := h.store.GetAllBetweenness()
-
-	// Compute in-degree authority
-	var inDegreeScores map[string]float64
-	if h.graph != nil {
-		inDegreeScores = h.graph.ComputeInDegree()
-	}
 
 	// Compute composite scores
 	var results []types.SearchResult
