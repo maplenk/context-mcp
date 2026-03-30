@@ -216,6 +216,61 @@ func TestBlastRadius_Cycle(t *testing.T) {
 	}
 }
 
+func TestComputeBetweenness_LinearChain(t *testing.T) {
+	g := New()
+	// A→B→C: B is the hub connecting A to C
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+	})
+
+	btwn := g.ComputeBetweenness()
+	if btwn == nil {
+		t.Fatal("ComputeBetweenness returned nil")
+	}
+
+	// B is on the shortest path between A and C, so it should have the highest betweenness
+	if btwn["node-b"] <= btwn["node-a"] {
+		t.Errorf("expected node-b betweenness (%f) > node-a (%f)", btwn["node-b"], btwn["node-a"])
+	}
+	if btwn["node-b"] <= btwn["node-c"] {
+		t.Errorf("expected node-b betweenness (%f) > node-c (%f)", btwn["node-b"], btwn["node-c"])
+	}
+}
+
+func TestComputeBetweenness_EmptyGraph(t *testing.T) {
+	g := New()
+	btwn := g.ComputeBetweenness()
+	if btwn != nil {
+		t.Errorf("expected nil for empty graph, got %v", btwn)
+	}
+}
+
+func TestBlastRadiusWithDepth_DepthValues(t *testing.T) {
+	g := New()
+	// A→B→C→D: blast radius of D should show C at depth 1, B at depth 2, A at depth 3
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+	})
+
+	result := g.BlastRadiusWithDepth("node-d", 10)
+	if result == nil {
+		t.Fatal("BlastRadiusWithDepth returned nil")
+	}
+
+	if result["node-c"] != 1 {
+		t.Errorf("node-c depth: got %d, want 1", result["node-c"])
+	}
+	if result["node-b"] != 2 {
+		t.Errorf("node-b depth: got %d, want 2", result["node-b"])
+	}
+	if result["node-a"] != 3 {
+		t.Errorf("node-a depth: got %d, want 3", result["node-a"])
+	}
+}
+
 // TestPersonalizedPageRank_DAG verifies PageRank scores on a simple DAG.
 // Graph: A→B, A→C, B→D, C→D (A is a source, D is most-depended-upon).
 // When traversing with PageRank, D receives contributions from both B and C,

@@ -48,6 +48,14 @@ func (s *Store) runMigrations() error {
 			node_id UNINDEXED,
 			tokenize='porter unicode61'
 		)`,
+
+		// Node scores table for precomputed graph metrics
+		`CREATE TABLE IF NOT EXISTS node_scores (
+			node_id TEXT PRIMARY KEY,
+			pagerank REAL NOT NULL DEFAULT 0,
+			betweenness REAL NOT NULL DEFAULT 0,
+			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+		)`,
 	}
 
 	for i, m := range migrations {

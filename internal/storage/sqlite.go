@@ -525,6 +525,74 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	return results, rows.Err()
 }
 
+// UpsertNodeScores batch-inserts node scores using a transaction
+func (s *Store) UpsertNodeScores(scores []types.NodeScore) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO node_scores (node_id, pagerank, betweenness)
+		VALUES (?, ?, ?)
+		ON CONFLICT(node_id) DO UPDATE SET
+			pagerank = excluded.pagerank,
+			betweenness = excluded.betweenness`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, score := range scores {
+		if _, err := stmt.Exec(score.NodeID, score.PageRank, score.Betweenness); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetNodeScore retrieves the scores for a single node
+func (s *Store) GetNodeScore(nodeID string) (*types.NodeScore, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRow(`SELECT node_id, pagerank, betweenness FROM node_scores WHERE node_id = ?`, nodeID)
+	var score types.NodeScore
+	err := row.Scan(&score.NodeID, &score.PageRank, &score.Betweenness)
+	if err != nil {
+		return nil, err
+	}
+	return &score, nil
+}
+
+// GetAllBetweenness retrieves all betweenness centrality scores as a map
+func (s *Store) GetAllBetweenness() (map[string]float64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT node_id, betweenness FROM node_scores WHERE betweenness > 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]float64)
+	for rows.Next() {
+		var nodeID string
+		var betweenness float64
+		if err := rows.Scan(&nodeID, &betweenness); err != nil {
+			return nil, err
+		}
+		result[nodeID] = betweenness
+	}
+	return result, rows.Err()
+}
+
 // serializeFloat32 converts a float32 slice to a little-endian byte slice for sqlite-vec
 func serializeFloat32(v []float32) []byte {
 	buf := make([]byte, len(v)*4)

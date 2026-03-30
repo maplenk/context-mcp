@@ -101,3 +101,20 @@ type SearchResult struct {
 	Node  ASTNode `json:"node"`
 	Score float64 `json:"score"`
 }
+
+// RiskLevel represents the severity of impact from a change
+type RiskLevel string
+
+const (
+	RiskCritical RiskLevel = "CRITICAL"
+	RiskHigh     RiskLevel = "HIGH"
+	RiskMedium   RiskLevel = "MEDIUM"
+	RiskLow      RiskLevel = "LOW"
+)
+
+// NodeScore holds precomputed graph metrics for a node
+type NodeScore struct {
+	NodeID      string  `json:"node_id"`
+	PageRank    float64 `json:"pagerank"`
+	Betweenness float64 `json:"betweenness"`
+}

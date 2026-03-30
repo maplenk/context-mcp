@@ -448,3 +448,88 @@ func TestSearchLexical_RespectsLimit(t *testing.T) {
 		t.Errorf("SearchLexical did not respect limit 2: got %d results", len(results))
 	}
 }
+
+func TestUpsertNodeScores_Roundtrip(t *testing.T) {
+	s := newTestStore(t)
+
+	// Need a node to reference (FK constraint)
+	node := sampleNode(types.GenerateNodeID("score.go", "ScoreFunc"), "score.go", "ScoreFunc", types.NodeTypeFunction)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	scores := []types.NodeScore{
+		{NodeID: node.ID, PageRank: 0.5, Betweenness: 0.8},
+	}
+	if err := s.UpsertNodeScores(scores); err != nil {
+		t.Fatalf("UpsertNodeScores: %v", err)
+	}
+
+	got, err := s.GetNodeScore(node.ID)
+	if err != nil {
+		t.Fatalf("GetNodeScore: %v", err)
+	}
+	if got.Betweenness != 0.8 {
+		t.Errorf("Betweenness: got %f, want 0.8", got.Betweenness)
+	}
+	if got.PageRank != 0.5 {
+		t.Errorf("PageRank: got %f, want 0.5", got.PageRank)
+	}
+}
+
+func TestNodeScores_CascadeDelete(t *testing.T) {
+	s := newTestStore(t)
+
+	node := sampleNode(types.GenerateNodeID("cascade.go", "CascadeFunc"), "cascade.go", "CascadeFunc", types.NodeTypeFunction)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	scores := []types.NodeScore{
+		{NodeID: node.ID, PageRank: 0.1, Betweenness: 0.2},
+	}
+	if err := s.UpsertNodeScores(scores); err != nil {
+		t.Fatalf("UpsertNodeScores: %v", err)
+	}
+
+	// Delete the node — score should cascade delete
+	if err := s.DeleteByFile("cascade.go"); err != nil {
+		t.Fatalf("DeleteByFile: %v", err)
+	}
+
+	_, err := s.GetNodeScore(node.ID)
+	if err == nil {
+		t.Error("expected error after cascade delete, got nil")
+	}
+}
+
+func TestGetAllBetweenness(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create two nodes with scores
+	nodeA := sampleNode(types.GenerateNodeID("btwn.go", "FuncA"), "btwn.go", "FuncA", types.NodeTypeFunction)
+	nodeB := sampleNode(types.GenerateNodeID("btwn.go", "FuncB"), "btwn.go", "FuncB", types.NodeTypeFunction)
+	if err := s.UpsertNodes([]types.ASTNode{nodeA, nodeB}); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	scores := []types.NodeScore{
+		{NodeID: nodeA.ID, Betweenness: 0.9},
+		{NodeID: nodeB.ID, Betweenness: 0.0}, // zero betweenness, should NOT appear
+	}
+	if err := s.UpsertNodeScores(scores); err != nil {
+		t.Fatalf("UpsertNodeScores: %v", err)
+	}
+
+	result, err := s.GetAllBetweenness()
+	if err != nil {
+		t.Fatalf("GetAllBetweenness: %v", err)
+	}
+
+	if result[nodeA.ID] != 0.9 {
+		t.Errorf("FuncA betweenness: got %f, want 0.9", result[nodeA.ID])
+	}
+	if _, ok := result[nodeB.ID]; ok {
+		t.Error("FuncB with zero betweenness should not appear in results")
+	}
+}

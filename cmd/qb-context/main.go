@@ -348,6 +348,23 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		graphEngine.BuildFromEdges(edges)
 		log.Printf("Graph built with %d nodes, %d edges", graphEngine.NodeCount(), graphEngine.EdgeCount())
 	}
+
+	// Compute and store betweenness centrality
+	betweenness := graphEngine.ComputeBetweenness()
+	if len(betweenness) > 0 {
+		var scores []types.NodeScore
+		for nodeID, btwn := range betweenness {
+			scores = append(scores, types.NodeScore{
+				NodeID:      nodeID,
+				Betweenness: btwn,
+			})
+		}
+		if err := store.UpsertNodeScores(scores); err != nil {
+			log.Printf("Failed to store node scores: %v", err)
+		} else {
+			log.Printf("Stored betweenness scores for %d nodes", len(scores))
+		}
+	}
 }
 
 // handleFileEvents processes incremental file change events from the watcher

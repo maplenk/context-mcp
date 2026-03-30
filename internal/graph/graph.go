@@ -197,6 +197,89 @@ func (g *GraphEngine) PersonalizedPageRank(activeNodeIDs []string) map[string]fl
 	return result
 }
 
+// ComputeBetweenness computes betweenness centrality for all nodes using
+// Brandes' algorithm (via gonum), normalized to [0,1].
+// Returns a map of hash ID → betweenness score.
+func (g *GraphEngine) ComputeBetweenness() map[string]float64 {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if g.dg.Nodes().Len() == 0 {
+		return nil
+	}
+
+	// Brandes' algorithm via gonum
+	raw := network.Betweenness(g.dg)
+
+	// Find max for normalization
+	var maxVal float64
+	for _, v := range raw {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+
+	result := make(map[string]float64)
+	if maxVal == 0 {
+		// All betweenness is zero — return zeros
+		for id := range raw {
+			if hashID, ok := g.reverseMap[id]; ok {
+				result[hashID] = 0
+			}
+		}
+		return result
+	}
+
+	// Normalize to [0,1]
+	for id, v := range raw {
+		if hashID, ok := g.reverseMap[id]; ok {
+			result[hashID] = v / maxVal
+		}
+	}
+
+	return result
+}
+
+// BlastRadiusWithDepth performs BFS over incoming edges (same as BlastRadius)
+// but returns a map of hash ID → hop depth instead of a flat list.
+func (g *GraphEngine) BlastRadiusWithDepth(nodeHashID string, maxDepth int) map[string]int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	startID, ok := g.idMap[nodeHashID]
+	if !ok {
+		return nil
+	}
+
+	if g.dg.Node(startID) == nil {
+		return nil
+	}
+
+	result := make(map[string]int)
+	visited := map[int64]bool{startID: true}
+	currentLevel := []int64{startID}
+
+	for depth := 1; depth <= maxDepth && len(currentLevel) > 0; depth++ {
+		var nextLevel []int64
+		for _, nodeID := range currentLevel {
+			preds := g.dg.To(nodeID)
+			for preds.Next() {
+				predID := preds.Node().ID()
+				if !visited[predID] {
+					visited[predID] = true
+					nextLevel = append(nextLevel, predID)
+					if hashID, ok := g.reverseMap[predID]; ok {
+						result[hashID] = depth
+					}
+				}
+			}
+		}
+		currentLevel = nextLevel
+	}
+
+	return result
+}
+
 // NodeCount returns the number of nodes in the graph
 func (g *GraphEngine) NodeCount() int {
 	g.mu.RLock()

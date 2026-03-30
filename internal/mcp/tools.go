@@ -131,29 +131,75 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 				nodeID = node.ID
 			}
 
-			affected := deps.Graph.BlastRadius(nodeID, p.Depth)
+			// Get affected nodes with their hop depths
+			affectedWithDepth := deps.Graph.BlastRadiusWithDepth(nodeID, p.Depth)
 
-			// Resolve affected IDs to node details
+			// Get betweenness score for the target node
+			var riskScore float64
+			if score, err := deps.Store.GetNodeScore(nodeID); err == nil {
+				riskScore = score.Betweenness
+			}
+
+			// impactNode is a minimal node descriptor for the response
 			type impactNode struct {
 				ID         string `json:"id"`
 				SymbolName string `json:"symbol_name"`
 				FilePath   string `json:"file_path"`
 			}
-			var nodes []impactNode
-			for _, id := range affected {
-				if node, err := deps.Store.GetNode(id); err == nil {
-					nodes = append(nodes, impactNode{
-						ID:         node.ID,
-						SymbolName: node.SymbolName,
-						FilePath:   node.FilePath,
-					})
+
+			// Group affected nodes by risk level based on hop depth
+			var direct []impactNode    // depth 1 = CRITICAL
+			var highRisk []impactNode  // depth 2 = HIGH
+			var mediumRisk []impactNode // depth 3 = MEDIUM
+			var lowRisk []impactNode   // depth 4+ = LOW
+			var affectedTests []impactNode
+
+			for id, depth := range affectedWithDepth {
+				node, err := deps.Store.GetNode(id)
+				if err != nil {
+					continue
+				}
+				n := impactNode{
+					ID:         node.ID,
+					SymbolName: node.SymbolName,
+					FilePath:   node.FilePath,
+				}
+
+				// Identify test nodes
+				if strings.Contains(node.SymbolName, "test") || strings.Contains(node.SymbolName, "Test") {
+					affectedTests = append(affectedTests, n)
+				}
+
+				// Group by risk level
+				switch depth {
+				case 1:
+					direct = append(direct, n)
+				case 2:
+					highRisk = append(highRisk, n)
+				case 3:
+					mediumRisk = append(mediumRisk, n)
+				default:
+					lowRisk = append(lowRisk, n)
 				}
 			}
+
+			totalAffected := len(affectedWithDepth)
+			summary := fmt.Sprintf(
+				"Symbol has betweenness %.2f — %d direct dependents, %d total affected, %d tests impacted",
+				riskScore, len(direct), totalAffected, len(affectedTests),
+			)
+
 			return map[string]interface{}{
 				"symbol":         p.SymbolID,
 				"depth":          p.Depth,
-				"affected_count": len(nodes),
-				"affected":       nodes,
+				"risk_score":     riskScore,
+				"affected_count": totalAffected,
+				"direct":         direct,
+				"high_risk":      highRisk,
+				"medium_risk":    mediumRisk,
+				"low_risk":       lowRisk,
+				"affected_tests": affectedTests,
+				"summary":        summary,
 			}, nil
 		},
 	)
