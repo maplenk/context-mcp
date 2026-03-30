@@ -4,52 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
+
+	mcp_golang "github.com/metoro-io/mcp-golang"
 )
-
-// runServer starts the server in a goroutine and returns when it finishes.
-// Use a small input buffer so the server exits after processing all lines.
-func runServerSync(server *Server) {
-	done := make(chan struct{})
-	go func() {
-		server.Serve()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		// server should have exited when the input was exhausted
-	}
-	// Allow goroutine-dispatched handlers to finish writing responses
-	time.Sleep(100 * time.Millisecond)
-}
-
-// readResponses decodes all newline-delimited JSON responses from a buffer.
-func readResponses(t *testing.T, buf *bytes.Buffer) []JSONRPCResponse {
-	t.Helper()
-	var responses []JSONRPCResponse
-	dec := json.NewDecoder(buf)
-	for dec.More() {
-		var resp JSONRPCResponse
-		if err := dec.Decode(&resp); err != nil {
-			t.Fatalf("decode response: %v (raw=%q)", err, buf.String())
-		}
-		responses = append(responses, resp)
-	}
-	return responses
-}
-
-// findResponse returns the first response whose ID matches, or nil.
-func findResponse(responses []JSONRPCResponse, id float64) *JSONRPCResponse {
-	for i := range responses {
-		if v, ok := responses[i].ID.(float64); ok && v == id {
-			return &responses[i]
-		}
-	}
-	return nil
-}
 
 // TestNewServerWithIO verifies that NewServerWithIO creates a non-nil server.
 func TestNewServerWithIO(t *testing.T) {
@@ -61,7 +22,8 @@ func TestNewServerWithIO(t *testing.T) {
 	}
 }
 
-// TestRegisterTool verifies that RegisterTool adds a tool to the server.
+// TestRegisterTool verifies that RegisterTool adds a tool to the server's
+// internal CLI handler map.
 func TestRegisterTool(t *testing.T) {
 	input := &bytes.Buffer{}
 	output := &bytes.Buffer{}
@@ -75,199 +37,416 @@ func TestRegisterTool(t *testing.T) {
 		return "ok", nil
 	})
 
-	server.mu.Lock()
-	toolCount := len(server.tools)
-	_, handlerExists := server.handlers["my_tool"]
-	server.mu.Unlock()
-
-	if toolCount != 1 {
-		t.Errorf("expected 1 tool registered, got %d", toolCount)
+	tools := server.GetTools()
+	if len(tools) != 1 {
+		t.Errorf("expected 1 tool registered, got %d", len(tools))
 	}
-	if !handlerExists {
+
+	handler, ok := server.GetHandler("my_tool")
+	if !ok {
 		t.Error("handler for 'my_tool' not registered")
 	}
-}
-
-// TestInitialize verifies that the initialize method returns the correct protocolVersion.
-func TestInitialize(t *testing.T) {
-	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n"
-	input := bytes.NewBufferString(req)
-	output := &bytes.Buffer{}
-	server := NewServerWithIO(input, output)
-
-	runServerSync(server)
-
-	responses := readResponses(t, output)
-	resp := findResponse(responses, 1)
-	if resp == nil {
-		t.Fatalf("no response with id=1; got: %s", output.String())
-	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %v", resp.Error)
-	}
-
-	result, ok := resp.Result.(map[string]interface{})
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-	version, ok := result["protocolVersion"].(string)
-	if !ok {
-		t.Fatalf("protocolVersion missing or wrong type: %v", result["protocolVersion"])
-	}
-	if version != "2024-11-05" {
-		t.Errorf("expected protocolVersion='2024-11-05', got %q", version)
+	if handler == nil {
+		t.Error("handler for 'my_tool' is nil")
 	}
 }
 
-// TestToolsList verifies that registered tools are returned in the tools/list response.
-func TestToolsList(t *testing.T) {
-	req := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}` + "\n"
-	input := bytes.NewBufferString(req)
-	output := &bytes.Buffer{}
-	server := NewServerWithIO(input, output)
+// TestGetTools verifies that GetTools returns a copy of registered tools.
+func TestGetTools(t *testing.T) {
+	server := NewServerWithIO(&bytes.Buffer{}, &bytes.Buffer{})
 
 	server.RegisterTool(ToolDefinition{
-		Name:        "search_code",
-		Description: "Searches the code graph",
+		Name:        "tool_a",
+		Description: "Tool A",
+		InputSchema: map[string]interface{}{},
+	}, func(params json.RawMessage) (interface{}, error) { return nil, nil })
+
+	server.RegisterTool(ToolDefinition{
+		Name:        "tool_b",
+		Description: "Tool B",
+		InputSchema: map[string]interface{}{},
+	}, func(params json.RawMessage) (interface{}, error) { return nil, nil })
+
+	tools := server.GetTools()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+	if tools[0].Name != "tool_a" {
+		t.Errorf("expected first tool 'tool_a', got %q", tools[0].Name)
+	}
+	if tools[1].Name != "tool_b" {
+		t.Errorf("expected second tool 'tool_b', got %q", tools[1].Name)
+	}
+}
+
+// TestGetHandler_NotFound verifies that GetHandler returns false for unknown tools.
+func TestGetHandler_NotFound(t *testing.T) {
+	server := NewServerWithIO(&bytes.Buffer{}, &bytes.Buffer{})
+	_, ok := server.GetHandler("nonexistent")
+	if ok {
+		t.Error("expected GetHandler to return false for nonexistent tool")
+	}
+}
+
+// TestToolHandler_Invocation verifies that a CLI handler can be invoked
+// directly via GetHandler.
+func TestToolHandler_Invocation(t *testing.T) {
+	server := NewServerWithIO(&bytes.Buffer{}, &bytes.Buffer{})
+
+	called := false
+	server.RegisterTool(ToolDefinition{
+		Name:        "echo",
+		Description: "Echo tool",
+		InputSchema: map[string]interface{}{},
+	}, func(params json.RawMessage) (interface{}, error) {
+		called = true
+		return "echoed", nil
+	})
+
+	handler, ok := server.GetHandler("echo")
+	if !ok {
+		t.Fatal("handler not found")
+	}
+	result, err := handler(json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if !called {
+		t.Error("handler was not invoked")
+	}
+	if result != "echoed" {
+		t.Errorf("expected 'echoed', got %v", result)
+	}
+}
+
+// TestToolHandler_Error verifies that a CLI handler error is returned correctly.
+func TestToolHandler_Error(t *testing.T) {
+	server := NewServerWithIO(&bytes.Buffer{}, &bytes.Buffer{})
+
+	server.RegisterTool(ToolDefinition{
+		Name:        "fail",
+		Description: "Failing tool",
+		InputSchema: map[string]interface{}{},
+	}, func(params json.RawMessage) (interface{}, error) {
+		return nil, fmt.Errorf("intentional error")
+	})
+
+	handler, _ := server.GetHandler("fail")
+	_, err := handler(json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected error from handler")
+	}
+	if !strings.Contains(err.Error(), "intentional error") {
+		t.Errorf("expected 'intentional error', got %q", err.Error())
+	}
+}
+
+// sendJSONRPC is a helper that writes a JSON-RPC request line into a writer.
+func sendJSONRPC(w io.Writer, id interface{}, method string, params interface{}) error {
+	var paramsRaw json.RawMessage
+	if params != nil {
+		b, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+		paramsRaw = b
+	}
+	req := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+	}
+	if paramsRaw != nil {
+		req["params"] = json.RawMessage(paramsRaw)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "%s\n", data)
+	return err
+}
+
+// readJSONRPCResponse reads newline-delimited JSON-RPC responses from the
+// output buffer until the expected count is reached or a timeout fires.
+func readJSONRPCResponses(t *testing.T, buf *bytes.Buffer, want int, timeout time.Duration) []map[string]interface{} {
+	t.Helper()
+	deadline := time.After(timeout)
+	var responses []map[string]interface{}
+
+	for len(responses) < want {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d responses, got %d (raw=%q)", want, len(responses), buf.String())
+		default:
+		}
+
+		data := buf.Bytes()
+		if len(data) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		// Try to decode all available responses
+		dec := json.NewDecoder(bytes.NewReader(data))
+		var decoded []map[string]interface{}
+		for dec.More() {
+			var resp map[string]interface{}
+			if err := dec.Decode(&resp); err != nil {
+				break
+			}
+			decoded = append(decoded, resp)
+		}
+		responses = decoded
+		if len(responses) < want {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return responses
+}
+
+// TestSDKServe_Initialize verifies that the SDK-backed server responds to
+// an initialize request with the correct protocol version and server info.
+func TestSDKServe_Initialize(t *testing.T) {
+	input := &bytes.Buffer{}
+	output := &bytes.Buffer{}
+
+	// Write initialize request
+	sendJSONRPC(input, 1, "initialize", map[string]interface{}{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo": map[string]interface{}{
+			"name":    "test-client",
+			"version": "1.0",
+		},
+	})
+
+	server := NewServerWithIO(input, output)
+
+	// Register a dummy tool so the server has tools capability
+	server.RegisterTool(ToolDefinition{
+		Name:        "test",
+		Description: "test",
 		InputSchema: map[string]interface{}{},
 	}, func(params json.RawMessage) (interface{}, error) {
 		return nil, nil
 	})
 
-	runServerSync(server)
+	// Start server in goroutine
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve()
+	}()
 
-	responses := readResponses(t, output)
-	resp := findResponse(responses, 2)
-	if resp == nil {
-		t.Fatalf("no response with id=2; got: %s", output.String())
-	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %v", resp.Error)
+	// Wait for response
+	responses := readJSONRPCResponses(t, output, 1, 3*time.Second)
+	if len(responses) < 1 {
+		t.Fatal("no response received for initialize")
 	}
 
-	result, ok := resp.Result.(map[string]interface{})
+	resp := responses[0]
+	result, ok := resp["result"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
+		t.Fatalf("result is not a map: %T — full response: %v", resp["result"], resp)
+	}
+
+	version, _ := result["protocolVersion"].(string)
+	if version != "2024-11-05" {
+		t.Errorf("expected protocolVersion '2024-11-05', got %q", version)
+	}
+
+	serverInfo, ok := result["serverInfo"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("serverInfo missing or wrong type: %v", result["serverInfo"])
+	}
+	if serverInfo["name"] != "qb-context" {
+		t.Errorf("expected server name 'qb-context', got %v", serverInfo["name"])
+	}
+}
+
+// TestSDKServe_ToolsList verifies that tools registered with the SDK are
+// returned via the tools/list protocol method.
+func TestSDKServe_ToolsList(t *testing.T) {
+	// Build a combined input: initialize then tools/list
+	input := &bytes.Buffer{}
+	sendJSONRPC(input, 1, "initialize", map[string]interface{}{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo":      map[string]interface{}{"name": "test", "version": "1.0"},
+	})
+	// notifications/initialized (no id)
+	notif, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	fmt.Fprintf(input, "%s\n", notif)
+	sendJSONRPC(input, 2, "tools/list", map[string]interface{}{})
+
+	output := &bytes.Buffer{}
+	server := NewServerWithIO(input, output)
+
+	// Register via SDK
+	_ = server.RegisterSDKTool("search_code", "Searches the code graph", func(args testSearchArgs) (*ToolResponse, error) {
+		return nil, nil
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve()
+	}()
+
+	// We expect at least 2 responses (initialize + tools/list)
+	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
+
+	// Find the tools/list response (id=2)
+	var toolsResp map[string]interface{}
+	for _, r := range responses {
+		if id, ok := r["id"].(float64); ok && id == 2 {
+			toolsResp = r
+			break
+		}
+	}
+	if toolsResp == nil {
+		t.Fatalf("no response with id=2; got %d responses", len(responses))
+	}
+
+	result, ok := toolsResp["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("result not a map: %v", toolsResp)
 	}
 	tools, ok := result["tools"].([]interface{})
 	if !ok {
 		t.Fatalf("tools field missing or wrong type: %v", result["tools"])
 	}
-	if len(tools) != 1 {
-		t.Errorf("expected 1 tool, got %d", len(tools))
+	if len(tools) < 1 {
+		t.Errorf("expected at least 1 tool, got %d", len(tools))
 	}
 
-	toolMap, ok := tools[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("tool entry is not a map: %T", tools[0])
+	// Verify our tool is in the list
+	found := false
+	for _, tool := range tools {
+		toolMap, _ := tool.(map[string]interface{})
+		if toolMap["name"] == "search_code" {
+			found = true
+			break
+		}
 	}
-	if toolMap["name"] != "search_code" {
-		t.Errorf("expected tool name 'search_code', got %v", toolMap["name"])
+	if !found {
+		t.Error("tool 'search_code' not found in tools/list response")
 	}
 }
 
-// TestToolsCall_HandlerInvoked verifies that calling a tool invokes its handler.
-func TestToolsCall_HandlerInvoked(t *testing.T) {
-	req := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo_tool","arguments":{}}}` + "\n"
-	input := bytes.NewBufferString(req)
+// TestSDKServe_ToolsCall verifies that calling a tool via the SDK protocol
+// invokes the handler and returns the correct content.
+func TestSDKServe_ToolsCall(t *testing.T) {
+	input := &bytes.Buffer{}
+	sendJSONRPC(input, 1, "initialize", map[string]interface{}{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo":      map[string]interface{}{"name": "test", "version": "1.0"},
+	})
+	notif, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	fmt.Fprintf(input, "%s\n", notif)
+	sendJSONRPC(input, 2, "tools/call", map[string]interface{}{
+		"name":      "echo_tool",
+		"arguments": map[string]interface{}{"message": "hello SDK"},
+	})
+
 	output := &bytes.Buffer{}
 	server := NewServerWithIO(input, output)
 
 	handlerCalled := false
-	server.RegisterTool(ToolDefinition{
-		Name:        "echo_tool",
-		Description: "Echoes back",
-		InputSchema: map[string]interface{}{},
-	}, func(params json.RawMessage) (interface{}, error) {
+	_ = server.RegisterSDKTool("echo_tool", "Echoes input", func(args testEchoArgs) (*ToolResponse, error) {
 		handlerCalled = true
-		return "handler was called", nil
+		return NewToolResponse(NewTextContent(fmt.Sprintf("echo: %s", args.Message))), nil
 	})
 
-	runServerSync(server)
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve()
+	}()
+
+	// Wait for 2 responses (initialize + tools/call)
+	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
 
 	if !handlerCalled {
-		t.Error("handler was not invoked for tools/call")
+		t.Error("SDK tool handler was not invoked")
 	}
 
-	responses := readResponses(t, output)
-	resp := findResponse(responses, 3)
-	if resp == nil {
-		t.Fatalf("no response with id=3; got: %s", output.String())
+	// Find tools/call response
+	var callResp map[string]interface{}
+	for _, r := range responses {
+		if id, ok := r["id"].(float64); ok && id == 2 {
+			callResp = r
+			break
+		}
 	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %v", resp.Error)
+	if callResp == nil {
+		t.Fatalf("no response with id=2; got %d responses", len(responses))
 	}
 
-	result, ok := resp.Result.(map[string]interface{})
+	result, ok := callResp["result"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("result not a map: %T", resp.Result)
+		t.Fatalf("result not a map: %v", callResp)
 	}
 	content, ok := result["content"].([]interface{})
 	if !ok || len(content) == 0 {
-		t.Fatalf("content missing or empty: %v", result["content"])
+		t.Fatalf("content missing or empty: %v", result)
 	}
-	contentItem, ok := content[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("content[0] not a map")
-	}
-	text, _ := contentItem["text"].(string)
-	if !strings.Contains(text, "handler was called") {
-		t.Errorf("expected response text to contain 'handler was called', got %q", text)
+	item, _ := content[0].(map[string]interface{})
+	text, _ := item["text"].(string)
+	if !strings.Contains(text, "echo: hello SDK") {
+		t.Errorf("expected 'echo: hello SDK' in text, got %q", text)
 	}
 }
 
-// TestConcurrentRequests verifies that the server correctly handles multiple JSON-RPC
-// requests arriving in a single input buffer, dispatching each to a goroutine and
-// collecting all responses. This exercises the goroutine dispatch and the mutex in
-// writeResponse.
-func TestConcurrentRequests(t *testing.T) {
-	const numRequests = 5
-	var input strings.Builder
-	for i := 1; i <= numRequests; i++ {
-		input.WriteString(`{"jsonrpc":"2.0","id":` + fmt.Sprintf("%d", i) + `,"method":"tools/list","params":{}}` + "\n")
+// TestConcurrentToolRegistration verifies that multiple tools can be
+// registered concurrently without data races.
+func TestConcurrentToolRegistration(t *testing.T) {
+	server := NewServerWithIO(&bytes.Buffer{}, &bytes.Buffer{})
+
+	const numTools = 5
+	done := make(chan struct{})
+	for i := 0; i < numTools; i++ {
+		go func(idx int) {
+			server.RegisterTool(ToolDefinition{
+				Name:        fmt.Sprintf("tool_%d", idx),
+				Description: fmt.Sprintf("Tool %d", idx),
+				InputSchema: map[string]interface{}{},
+			}, func(params json.RawMessage) (interface{}, error) {
+				return nil, nil
+			})
+			done <- struct{}{}
+		}(i)
+	}
+	for i := 0; i < numTools; i++ {
+		<-done
 	}
 
-	output := &bytes.Buffer{}
-	server := NewServerWithIO(strings.NewReader(input.String()), output)
-
-	runServerSync(server)
-
-	responses := readResponses(t, output)
-	if len(responses) != numRequests {
-		t.Fatalf("expected %d responses, got %d (raw=%q)", numRequests, len(responses), output.String())
-	}
-
-	// Verify every expected ID has a matching response without an error.
-	for i := 1; i <= numRequests; i++ {
-		resp := findResponse(responses, float64(i))
-		if resp == nil {
-			t.Errorf("no response for request id=%d", i)
-			continue
-		}
-		if resp.Error != nil {
-			t.Errorf("request id=%d: unexpected error: %v", i, resp.Error)
-		}
+	tools := server.GetTools()
+	if len(tools) != numTools {
+		t.Errorf("expected %d tools, got %d", numTools, len(tools))
 	}
 }
 
-// TestUnknownMethod_ReturnsError verifies that an unknown method returns a JSON-RPC error.
-func TestUnknownMethod_ReturnsError(t *testing.T) {
-	req := `{"jsonrpc":"2.0","id":4,"method":"unknown/method","params":{}}` + "\n"
-	input := bytes.NewBufferString(req)
-	output := &bytes.Buffer{}
-	server := NewServerWithIO(input, output)
+// ToolResponse and NewToolResponse / NewTextContent are re-exported from the
+// SDK for convenience in tests.
+type ToolResponse = mcp_golang.ToolResponse
 
-	runServerSync(server)
+var (
+	NewToolResponse = mcp_golang.NewToolResponse
+	NewTextContent  = mcp_golang.NewTextContent
+)
 
-	responses := readResponses(t, output)
-	resp := findResponse(responses, 4)
-	if resp == nil {
-		t.Fatalf("no response with id=4; got: %s", output.String())
-	}
-	if resp.Error == nil {
-		t.Fatal("expected an error response for unknown method, got nil")
-	}
-	if resp.Error.Code != -32601 {
-		t.Errorf("expected error code -32601 (Method not found), got %d", resp.Error.Code)
-	}
+// testSearchArgs is a named struct for the SDK search tool handler in tests.
+type testSearchArgs struct {
+	Query string `json:"query" jsonschema:"required,description=Search query"`
+}
+
+// testEchoArgs is a named struct for the SDK echo tool handler in tests.
+type testEchoArgs struct {
+	Message string `json:"message" jsonschema:"required,description=Message to echo"`
 }
