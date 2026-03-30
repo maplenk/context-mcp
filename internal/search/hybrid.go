@@ -44,6 +44,14 @@ var stopWords = map[string]bool{
 // Matches: sequences of uppercase+lowercase (e.g. "Read"), all-lowercase runs, or all-uppercase runs.
 var camelCaseRe = regexp.MustCompile(`[A-Z][a-z]*|[a-z]+|[A-Z]+`)
 
+// fts5SpecialRe matches FTS5 special characters that must be sanitized before query construction.
+var fts5SpecialRe = regexp.MustCompile(`[":(){}^+\-]`)
+
+// sanitizeFTS replaces FTS5 special characters with spaces to prevent query injection.
+func sanitizeFTS(s string) string {
+	return fts5SpecialRe.ReplaceAllString(s, " ")
+}
+
 // HybridSearch combines lexical, semantic, and structural search with composite scoring
 type HybridSearch struct {
 	store    *storage.Store
@@ -173,6 +181,9 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 
 // buildFTSQuery enhances a query for FTS5 with CamelCase splitting, prefix matching, and stop word filtering
 func buildFTSQuery(query string) string {
+	// Sanitize FTS5 special characters to prevent query injection
+	query = sanitizeFTS(query)
+
 	// Split CamelCase tokens
 	words := strings.Fields(query)
 	var expanded []string

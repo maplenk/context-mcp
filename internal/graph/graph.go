@@ -72,6 +72,7 @@ func (g *GraphEngine) AddEdge(edge types.ASTEdge) {
 	tgtID := g.ensureNode(edge.TargetID)
 	if srcID != tgtID && !g.dg.HasEdgeFromTo(srcID, tgtID) {
 		g.dg.SetEdge(g.dg.NewEdge(g.dg.Node(srcID), g.dg.Node(tgtID)))
+		g.communityValid = false
 	}
 }
 
@@ -84,6 +85,7 @@ func (g *GraphEngine) RemoveEdge(sourceHash, targetHash string) {
 	tgtID, tgtOk := g.idMap[targetHash]
 	if srcOk && tgtOk {
 		g.dg.RemoveEdge(srcID, tgtID)
+		g.communityValid = false
 	}
 }
 
@@ -99,6 +101,7 @@ func (g *GraphEngine) RemoveNode(hashID string) {
 	g.dg.RemoveNode(id)
 	delete(g.idMap, hashID)
 	delete(g.reverseMap, id)
+	g.communityValid = false
 }
 
 // BlastRadius performs BFS over incoming edges to find all nodes that depend on
@@ -378,19 +381,19 @@ func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
 	// The undirected graph is needed for community detection — build one from edges
 	undirected := simple.NewUndirectedGraph()
 	edges := g.dg.Edges()
-	nodeSet := make(map[int64]bool)
 	for edges.Next() {
 		e := edges.Edge()
 		from := e.From().ID()
 		to := e.To().ID()
-		nodeSet[from] = true
-		nodeSet[to] = true
 		if from != to && !undirected.HasEdgeBetween(from, to) {
 			undirected.SetEdge(undirected.NewEdge(simple.Node(from), simple.Node(to)))
 		}
 	}
-	// Ensure all nodes are in the undirected graph
-	for id := range nodeSet {
+	// Ensure ALL nodes from the directed graph are in the undirected graph
+	// (isolated nodes with no edges would otherwise be silently dropped)
+	allNodes := g.dg.Nodes()
+	for allNodes.Next() {
+		id := allNodes.Node().ID()
 		if undirected.Node(id) == nil {
 			undirected.AddNode(simple.Node(id))
 		}

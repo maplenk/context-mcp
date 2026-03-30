@@ -121,9 +121,8 @@ type NodeScore struct {
 
 // Community represents a group of tightly coupled code symbols detected by Louvain
 type Community struct {
-	ID         int      `json:"id"`
-	NodeIDs    []string `json:"node_ids"`
-	Modularity float64  `json:"modularity"`
+	ID      int      `json:"id"`
+	NodeIDs []string `json:"node_ids"`
 }
 
 // ProjectSummary represents an architecture decision record or project summary

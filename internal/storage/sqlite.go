@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
@@ -244,6 +245,9 @@ func (s *Store) UpsertEmbedding(nodeID string, embedding []float32) error {
 
 // UpdateFTS updates the FTS index for a node
 func (s *Store) UpdateFTS(node types.ASTNode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// Delete old entry if exists
 	s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID)
 	// Insert new entry
@@ -255,6 +259,9 @@ func (s *Store) UpdateFTS(node types.ASTNode) error {
 
 // DeleteFTSByFile removes FTS entries for all nodes in a file
 func (s *Store) DeleteFTSByFile(filePath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.Exec(
 		"DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)",
 		filePath)
@@ -479,21 +486,27 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("only SELECT queries are allowed, got: %s", strings.SplitN(trimmed, " ", 2)[0])
 	}
 
+	// Reject multi-statement queries
+	if strings.Contains(query, ";") {
+		return nil, fmt.Errorf("multi-statement queries are not allowed")
+	}
+
 	// Reject queries containing dangerous SQLite functions/patterns
-	dangerousPatterns := []string{"load_extension", "writefile", "fts3_tokenizer"}
+	dangerousPatterns := []string{"load_extension", "writefile", "fts3_tokenizer", "attach"}
 	for _, pattern := range dangerousPatterns {
 		if strings.Contains(trimmed, strings.ToUpper(pattern)) {
 			return nil, fmt.Errorf("query contains forbidden pattern: %s", pattern)
 		}
 	}
 
-	// Wrap in a deferred (read-only) transaction to prevent any side effects
-	if _, err := s.db.Exec("BEGIN DEFERRED"); err != nil {
-		return nil, fmt.Errorf("beginning transaction: %w", err)
+	// Use a proper read-only transaction on a pinned connection
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("beginning read-only transaction: %w", err)
 	}
-	defer s.db.Exec("ROLLBACK")
+	defer tx.Rollback()
 
-	rows, err := s.db.Query(query)
+	rows, err := tx.Query(query)
 	if err != nil {
 		return nil, err
 	}

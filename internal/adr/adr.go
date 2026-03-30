@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 const maxContentBytes = 8000
@@ -131,6 +132,10 @@ func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
 	content := string(data)
 	if len(content) > maxContentBytes {
 		content = content[:maxContentBytes]
+		// Ensure we don't break a multi-byte UTF-8 character
+		for len(content) > 0 && !utf8.Valid([]byte(content)) {
+			content = content[:len(content)-1]
+		}
 	}
 
 	hash := sha256.Sum256(data)
