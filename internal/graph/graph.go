@@ -4,10 +4,8 @@ import (
 	"sync"
 
 	"github.com/naman/qb-context/internal/types"
-	gonumgraph "gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/network"
 	"gonum.org/v1/gonum/graph/simple"
-	"gonum.org/v1/gonum/graph/traverse"
 )
 
 // GraphEngine maintains an in-memory directed graph of code relationships
@@ -98,8 +96,11 @@ func (g *GraphEngine) RemoveNode(hashID string) {
 	delete(g.reverseMap, id)
 }
 
-// BlastRadius performs BFS to find all downstream dependents of a node up to maxDepth.
-// Uses gonum's traverse.BreadthFirst for traversal.
+// BlastRadius performs BFS over incoming edges to find all nodes that depend on
+// (directly or transitively call) the given node, up to maxDepth hops away.
+// Edges represent "A calls B" (source=caller, target=callee), so to find who
+// calls A we must traverse in reverse — following edges that point TO each node.
+// g.dg.To(nodeID) returns the predecessors of nodeID (nodes with edges into it).
 func (g *GraphEngine) BlastRadius(nodeHashID string, maxDepth int) []string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -109,49 +110,42 @@ func (g *GraphEngine) BlastRadius(nodeHashID string, maxDepth int) []string {
 		return nil
 	}
 
-	startNode := g.dg.Node(startID)
-	if startNode == nil {
+	if g.dg.Node(startID) == nil {
 		return nil
 	}
 
+	// BFS traversing incoming edges (who depends on this node)
 	var affected []string
-	depths := make(map[int64]int)
-	depths[startID] = 0
+	visited := map[int64]bool{startID: true}
+	currentLevel := []int64{startID}
 
-	// Use gonum's BreadthFirst traversal.
-	// Traverse is called for each edge considered; returning false prunes that branch.
-	// The visit function is called for each node reached.
-	bf := traverse.BreadthFirst{
-		Traverse: func(e gonumgraph.Edge) bool {
-			fromDepth, ok := depths[e.From().ID()]
-			if !ok {
-				return false
-			}
-			toDepth := fromDepth + 1
-			if toDepth > maxDepth {
-				return false
-			}
-			// Record depth for the destination node so the visit callback can use it.
-			// BreadthFirst calls Traverse before visiting the destination, so this is safe.
-			depths[e.To().ID()] = toDepth
-			return true
-		},
-	}
-
-	bf.Walk(g.dg, startNode, func(n gonumgraph.Node, d int) bool {
-		if n.ID() != startID {
-			if hashID, ok := g.reverseMap[n.ID()]; ok {
-				affected = append(affected, hashID)
+	for depth := 0; depth < maxDepth && len(currentLevel) > 0; depth++ {
+		var nextLevel []int64
+		for _, nodeID := range currentLevel {
+			// g.dg.To(nodeID) returns predecessors — nodes with edges TO this node
+			preds := g.dg.To(nodeID)
+			for preds.Next() {
+				predID := preds.Node().ID()
+				if !visited[predID] {
+					visited[predID] = true
+					nextLevel = append(nextLevel, predID)
+					if hashID, ok := g.reverseMap[predID]; ok {
+						affected = append(affected, hashID)
+					}
+				}
 			}
 		}
-		return false // returning false continues the walk
-	})
+		currentLevel = nextLevel
+	}
 
 	return affected
 }
 
-// PersonalizedPageRank computes PageRank with teleportation biased toward active files.
+// PersonalizedPageRank approximates personalized PageRank by computing standard
+// PageRank and then boosting scores for nodes connected to active files.
 // activeNodeIDs are the hash IDs of nodes in the currently edited files.
+// Note: This is an approximation — true PPR would modify the power iteration's
+// teleportation vector, which gonum's PageRankSparse doesn't support.
 func (g *GraphEngine) PersonalizedPageRank(activeNodeIDs []string) map[string]float64 {
 	g.mu.RLock()
 	defer g.mu.RUnlock()

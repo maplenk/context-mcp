@@ -118,6 +118,10 @@ func (s *Server) handleRequest(req JSONRPCRequest) {
 	case "ping":
 		s.sendResult(req.ID, map[string]string{})
 	default:
+		// Don't respond to notifications (requests without an ID)
+		if req.ID == nil {
+			return
+		}
 		s.sendError(req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil)
 	}
 }
@@ -192,8 +196,12 @@ func (s *Server) handleToolsCall(req JSONRPCRequest) {
 	case string:
 		text = v
 	default:
-		jsonBytes, _ := json.MarshalIndent(v, "", "  ")
-		text = string(jsonBytes)
+		jsonBytes, marshalErr := json.MarshalIndent(v, "", "  ")
+		if marshalErr != nil {
+			text = fmt.Sprintf("Error marshaling result: %v", marshalErr)
+		} else {
+			text = string(jsonBytes)
+		}
 	}
 
 	s.sendResult(req.ID, map[string]interface{}{

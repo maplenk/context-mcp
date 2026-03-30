@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/naman/qb-context/internal/graph"
 	"github.com/naman/qb-context/internal/search"
@@ -190,13 +191,27 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 
 			// Read the exact byte range from the file
 			absPath := filepath.Join(deps.RepoRoot, node.FilePath)
+			// Prevent path traversal
+			absPath, err = filepath.Abs(absPath)
+			if err != nil {
+				return nil, fmt.Errorf("resolving path: %w", err)
+			}
+			if !strings.HasPrefix(absPath, deps.RepoRoot) {
+				return nil, fmt.Errorf("path traversal detected: %s is outside repo root", node.FilePath)
+			}
 			f, err := os.Open(absPath)
 			if err != nil {
 				return nil, fmt.Errorf("opening file %s: %w", node.FilePath, err)
 			}
 			defer f.Close()
 
+			if node.EndByte <= node.StartByte {
+				return nil, fmt.Errorf("invalid byte range for %s: start=%d end=%d", node.SymbolName, node.StartByte, node.EndByte)
+			}
 			length := node.EndByte - node.StartByte
+			if length > 5*1024*1024 { // 5MB safety cap
+				return nil, fmt.Errorf("symbol too large: %d bytes", length)
+			}
 			buf := make([]byte, length)
 			_, err = f.ReadAt(buf, int64(node.StartByte))
 			if err != nil {
