@@ -80,8 +80,10 @@ func (s *Store) runMigrations() error {
 	)`)
 	if err != nil {
 		// sqlite-vec extension not available — log but don't fail
-		// Semantic search will be unavailable
+		// Semantic search will be unavailable; hasVecTable stays false
 		log.Printf("Warning: sqlite-vec not available, semantic search disabled: %v", err)
+	} else {
+		s.hasVecTable = true
 	}
 
 	return nil
