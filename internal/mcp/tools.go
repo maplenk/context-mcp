@@ -3,7 +3,21 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/naman/qb-context/internal/graph"
+	"github.com/naman/qb-context/internal/search"
+	"github.com/naman/qb-context/internal/storage"
 )
+
+// ToolDeps holds dependencies needed by MCP tools
+type ToolDeps struct {
+	Store    *storage.Store
+	Graph    *graph.GraphEngine
+	Search   *search.HybridSearch
+	RepoRoot string
+}
 
 // ContextParams are the parameters for the context tool
 type ContextParams struct {
@@ -32,9 +46,11 @@ type IndexParams struct {
 	Path string `json:"path,omitempty"`
 }
 
-// RegisterDefaultTools registers all 5 MCP tools with stub handlers.
-// These stubs will be replaced with real implementations in Commit 4.
-func RegisterDefaultTools(s *Server) {
+// IndexFunc is the callback for triggering a re-index
+type IndexFunc func(path string) error
+
+// RegisterTools registers all 5 MCP tools with real implementations
+func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	// Tool 1: context — discovers relevant code via hybrid search
 	s.RegisterTool(
 		ToolDefinition{
@@ -64,15 +80,22 @@ func RegisterDefaultTools(s *Server) {
 			if p.Limit == 0 {
 				p.Limit = 10
 			}
-			return fmt.Sprintf("context search stub: query=%q limit=%d", p.Query, p.Limit), nil
+			if deps.Search == nil {
+				return nil, fmt.Errorf("search engine not initialized")
+			}
+			results, err := deps.Search.Search(p.Query, p.Limit, nil)
+			if err != nil {
+				return nil, fmt.Errorf("search failed: %w", err)
+			}
+			return results, nil
 		},
 	)
 
-	// Tool 2: impact — analyzes blast radius of a symbol
+	// Tool 2: impact — analyzes blast radius
 	s.RegisterTool(
 		ToolDefinition{
 			Name:        "impact",
-			Description: "Analyzes the blast radius of a code symbol by tracing all downstream dependents via BFS graph traversal. Shows what would be affected by modifying the given symbol.",
+			Description: "Analyzes the blast radius of a code symbol by tracing all downstream dependents via BFS graph traversal.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -97,15 +120,48 @@ func RegisterDefaultTools(s *Server) {
 			if p.Depth == 0 {
 				p.Depth = 5
 			}
-			return fmt.Sprintf("impact analysis stub: symbol=%q depth=%d", p.SymbolID, p.Depth), nil
+			if deps.Graph == nil {
+				return nil, fmt.Errorf("graph engine not initialized")
+			}
+
+			// Try to resolve symbol name to ID
+			nodeID := p.SymbolID
+			if node, err := deps.Store.GetNodeByName(p.SymbolID); err == nil {
+				nodeID = node.ID
+			}
+
+			affected := deps.Graph.BlastRadius(nodeID, p.Depth)
+
+			// Resolve affected IDs to node details
+			type impactNode struct {
+				ID         string `json:"id"`
+				SymbolName string `json:"symbol_name"`
+				FilePath   string `json:"file_path"`
+			}
+			var nodes []impactNode
+			for _, id := range affected {
+				if node, err := deps.Store.GetNode(id); err == nil {
+					nodes = append(nodes, impactNode{
+						ID:         node.ID,
+						SymbolName: node.SymbolName,
+						FilePath:   node.FilePath,
+					})
+				}
+			}
+			return map[string]interface{}{
+				"symbol":         p.SymbolID,
+				"depth":          p.Depth,
+				"affected_count": len(nodes),
+				"affected":       nodes,
+			}, nil
 		},
 	)
 
-	// Tool 3: read_symbol — retrieves exact source code
+	// Tool 3: read_symbol — retrieves exact source code by byte range
 	s.RegisterTool(
 		ToolDefinition{
 			Name:        "read_symbol",
-			Description: "Retrieves the exact source code of a symbol by reading only the specific byte range from disk. Efficient and precise — no need to load the entire file.",
+			Description: "Retrieves the exact source code of a symbol by reading only the specific byte range from disk.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -122,21 +178,53 @@ func RegisterDefaultTools(s *Server) {
 			if err := json.Unmarshal(params, &p); err != nil {
 				return nil, fmt.Errorf("invalid parameters: %w", err)
 			}
-			return fmt.Sprintf("read_symbol stub: symbol=%q", p.SymbolID), nil
+
+			// Try by name first, then by ID
+			node, err := deps.Store.GetNodeByName(p.SymbolID)
+			if err != nil {
+				node, err = deps.Store.GetNode(p.SymbolID)
+				if err != nil {
+					return nil, fmt.Errorf("symbol not found: %s", p.SymbolID)
+				}
+			}
+
+			// Read the exact byte range from the file
+			absPath := filepath.Join(deps.RepoRoot, node.FilePath)
+			f, err := os.Open(absPath)
+			if err != nil {
+				return nil, fmt.Errorf("opening file %s: %w", node.FilePath, err)
+			}
+			defer f.Close()
+
+			length := node.EndByte - node.StartByte
+			buf := make([]byte, length)
+			_, err = f.ReadAt(buf, int64(node.StartByte))
+			if err != nil {
+				return nil, fmt.Errorf("reading bytes: %w", err)
+			}
+
+			return map[string]interface{}{
+				"symbol_name": node.SymbolName,
+				"file_path":   node.FilePath,
+				"node_type":   node.NodeType.String(),
+				"start_byte":  node.StartByte,
+				"end_byte":    node.EndByte,
+				"source":      string(buf),
+			}, nil
 		},
 	)
 
-	// Tool 4: query — diagnostic database tool
+	// Tool 4: query — diagnostic SQL tool
 	s.RegisterTool(
 		ToolDefinition{
 			Name:        "query",
-			Description: "Executes a read-only SQL query against the structural database. Useful for diagnostic and exploratory queries about the codebase structure.",
+			Description: "Executes a read-only SQL query against the structural database.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"sql": map[string]interface{}{
 						"type":        "string",
-						"description": "SQL query to execute (read-only)",
+						"description": "SQL SELECT query to execute",
 					},
 				},
 				"required": []string{"sql"},
@@ -147,21 +235,25 @@ func RegisterDefaultTools(s *Server) {
 			if err := json.Unmarshal(params, &p); err != nil {
 				return nil, fmt.Errorf("invalid parameters: %w", err)
 			}
-			return fmt.Sprintf("query stub: sql=%q", p.SQL), nil
+			results, err := deps.Store.RawQuery(p.SQL)
+			if err != nil {
+				return nil, fmt.Errorf("query failed: %w", err)
+			}
+			return results, nil
 		},
 	)
 
-	// Tool 5: index — manages daemon state
+	// Tool 5: index — re-index the repository
 	s.RegisterTool(
 		ToolDefinition{
 			Name:        "index",
-			Description: "Triggers a full re-index of the repository. Walks the file tree, parses all source files, generates embeddings, and rebuilds the structural graph.",
+			Description: "Triggers a full re-index of the repository.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"path": map[string]interface{}{
 						"type":        "string",
-						"description": "Optional: specific file or directory path to re-index. Omit to re-index the entire repository.",
+						"description": "Optional: specific path to re-index",
 					},
 				},
 			},
@@ -171,11 +263,13 @@ func RegisterDefaultTools(s *Server) {
 			if err := json.Unmarshal(params, &p); err != nil {
 				return nil, fmt.Errorf("invalid parameters: %w", err)
 			}
-			path := p.Path
-			if path == "" {
-				path = "(entire repository)"
+			if indexFn == nil {
+				return nil, fmt.Errorf("index function not configured")
 			}
-			return fmt.Sprintf("index stub: path=%s", path), nil
+			if err := indexFn(p.Path); err != nil {
+				return nil, fmt.Errorf("indexing failed: %w", err)
+			}
+			return "Indexing completed successfully", nil
 		},
 	)
 }
