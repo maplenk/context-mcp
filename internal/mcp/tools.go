@@ -24,6 +24,7 @@ type ToolDeps struct {
 type ContextParams struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit,omitempty"`
+	Mode  string `json:"mode,omitempty"`
 }
 
 // ImpactParams are the parameters for the impact tool
@@ -69,6 +70,11 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 						"description": "Maximum number of results to return (default: 10)",
 						"default":     10,
 					},
+					"mode": map[string]interface{}{
+						"type":        "string",
+						"description": "Search mode: 'search' (default) for hybrid search, 'architecture' for community detection",
+						"default":     "search",
+					},
 				},
 				"required": []string{"query"},
 			},
@@ -80,6 +86,19 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 			}
 			if p.Limit == 0 {
 				p.Limit = 10
+			}
+			// Architecture mode: return community detection results
+			if p.Mode == "architecture" {
+				if deps.Graph == nil {
+					return nil, fmt.Errorf("graph engine not initialized")
+				}
+				communities, modularity := deps.Graph.DetectCommunities()
+				return map[string]interface{}{
+					"mode":        "architecture",
+					"communities": communities,
+					"modularity":  modularity,
+					"count":       len(communities),
+				}, nil
 			}
 			if deps.Search == nil {
 				return nil, fmt.Errorf("search engine not initialized")

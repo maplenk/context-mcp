@@ -118,3 +118,10 @@ type NodeScore struct {
 	PageRank    float64 `json:"pagerank"`
 	Betweenness float64 `json:"betweenness"`
 }
+
+// Community represents a group of tightly coupled code symbols detected by Louvain
+type Community struct {
+	ID         int      `json:"id"`
+	NodeIDs    []string `json:"node_ids"`
+	Modularity float64  `json:"modularity"`
+}

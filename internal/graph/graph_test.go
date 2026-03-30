@@ -271,6 +271,96 @@ func TestBlastRadiusWithDepth_DepthValues(t *testing.T) {
 	}
 }
 
+// TestDetectCommunities_TwoClusters verifies that two disconnected subgraphs
+// are detected as two separate communities.
+func TestDetectCommunities_TwoClusters(t *testing.T) {
+	g := New()
+	// Cluster 1: A↔B (bidirectional edges make a strong cluster)
+	// Cluster 2: C↔D
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-d", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+	})
+
+	communities, mod := g.DetectCommunities()
+	if len(communities) < 2 {
+		t.Fatalf("expected at least 2 communities, got %d", len(communities))
+	}
+	if mod <= 0 {
+		t.Errorf("expected positive modularity, got %f", mod)
+	}
+
+	// Verify all 4 nodes appear across communities
+	allNodes := make(map[string]bool)
+	for _, c := range communities {
+		for _, id := range c.NodeIDs {
+			allNodes[id] = true
+		}
+	}
+	for _, id := range []string{"node-a", "node-b", "node-c", "node-d"} {
+		if !allNodes[id] {
+			t.Errorf("node %q not found in any community", id)
+		}
+	}
+}
+
+// TestDetectCommunities_CacheInvalidation verifies that rebuilding the graph
+// invalidates the community cache.
+func TestDetectCommunities_CacheInvalidation(t *testing.T) {
+	g := New()
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+	})
+
+	// First call caches
+	c1, _ := g.DetectCommunities()
+
+	// Rebuild graph with different topology
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-x", TargetID: "node-y", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-y", TargetID: "node-z", EdgeType: types.EdgeTypeCalls},
+	})
+
+	// Second call should reflect new topology
+	c2, _ := g.DetectCommunities()
+
+	// Check that results differ: c1 should have a/b nodes, c2 should have x/y/z
+	c1Nodes := make(map[string]bool)
+	for _, c := range c1 {
+		for _, id := range c.NodeIDs {
+			c1Nodes[id] = true
+		}
+	}
+	c2Nodes := make(map[string]bool)
+	for _, c := range c2 {
+		for _, id := range c.NodeIDs {
+			c2Nodes[id] = true
+		}
+	}
+
+	if c2Nodes["node-a"] {
+		t.Error("cache invalidation failed: node-a from old graph found in new results")
+	}
+	if !c2Nodes["node-x"] {
+		t.Error("cache invalidation failed: node-x from new graph not found")
+	}
+}
+
+// TestDetectCommunities_EmptyGraph verifies that community detection on an
+// empty graph returns nil/empty.
+func TestDetectCommunities_EmptyGraph(t *testing.T) {
+	g := New()
+	communities, mod := g.DetectCommunities()
+	if len(communities) != 0 {
+		t.Errorf("expected 0 communities for empty graph, got %d", len(communities))
+	}
+	if mod != 0 {
+		t.Errorf("expected 0 modularity for empty graph, got %f", mod)
+	}
+}
+
 // TestPersonalizedPageRank_DAG verifies PageRank scores on a simple DAG.
 // Graph: A→B, A→C, B→D, C→D (A is a source, D is most-depended-upon).
 // When traversing with PageRank, D receives contributions from both B and C,

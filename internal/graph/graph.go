@@ -4,16 +4,20 @@ import (
 	"sync"
 
 	"github.com/naman/qb-context/internal/types"
+	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/network"
 	"gonum.org/v1/gonum/graph/simple"
 )
 
 // GraphEngine maintains an in-memory directed graph of code relationships
 type GraphEngine struct {
-	mu         sync.RWMutex
-	dg         *simple.DirectedGraph
-	idMap      map[string]int64 // node hash ID → gonum int64 ID
-	reverseMap map[int64]string // gonum int64 ID → node hash ID
+	mu             sync.RWMutex
+	dg             *simple.DirectedGraph
+	idMap          map[string]int64 // node hash ID → gonum int64 ID
+	reverseMap     map[int64]string // gonum int64 ID → node hash ID
+	communities    [][]string       // cached community node hash IDs
+	modularity     float64          // cached Q score
+	communityValid bool             // false after BuildFromEdges
 }
 
 // New creates a new GraphEngine
@@ -48,6 +52,7 @@ func (g *GraphEngine) BuildFromEdges(edges []types.ASTEdge) {
 	g.dg = simple.NewDirectedGraph()
 	g.idMap = make(map[string]int64)
 	g.reverseMap = make(map[int64]string)
+	g.communityValid = false
 
 	for _, edge := range edges {
 		srcID := g.ensureNode(edge.SourceID)
@@ -300,4 +305,81 @@ func (g *GraphEngine) HasNode(hashID string) bool {
 	defer g.mu.RUnlock()
 	_, ok := g.idMap[hashID]
 	return ok
+}
+
+// DetectCommunities uses Louvain community detection to find tightly coupled
+// clusters of code symbols. Results are cached and invalidated on graph rebuild.
+func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.communityValid {
+		// Return cached results
+		var result []types.Community
+		for i, nodeIDs := range g.communities {
+			result = append(result, types.Community{
+				ID:      i,
+				NodeIDs: nodeIDs,
+			})
+		}
+		return result, g.modularity
+	}
+
+	if g.dg.Nodes().Len() == 0 {
+		g.communityValid = true
+		g.communities = nil
+		g.modularity = 0
+		return nil, 0
+	}
+
+	// Use gonum's Louvain community detection (Modularize)
+	// The undirected graph is needed for community detection — build one from edges
+	undirected := simple.NewUndirectedGraph()
+	edges := g.dg.Edges()
+	nodeSet := make(map[int64]bool)
+	for edges.Next() {
+		e := edges.Edge()
+		from := e.From().ID()
+		to := e.To().ID()
+		nodeSet[from] = true
+		nodeSet[to] = true
+		if from != to && !undirected.HasEdgeBetween(from, to) {
+			undirected.SetEdge(undirected.NewEdge(simple.Node(from), simple.Node(to)))
+		}
+	}
+	// Ensure all nodes are in the undirected graph
+	for id := range nodeSet {
+		if undirected.Node(id) == nil {
+			undirected.AddNode(simple.Node(id))
+		}
+	}
+
+	// Run Louvain
+	reduced := community.Modularize(undirected, 1.0, nil)
+	communities := reduced.Communities()
+	mod := community.Q(undirected, communities, 1.0)
+
+	// Convert gonum int64 IDs back to hash IDs
+	g.communities = make([][]string, len(communities))
+	for i, comm := range communities {
+		var nodeIDs []string
+		for _, node := range comm {
+			if hashID, ok := g.reverseMap[node.ID()]; ok {
+				nodeIDs = append(nodeIDs, hashID)
+			}
+		}
+		g.communities[i] = nodeIDs
+	}
+	g.modularity = mod
+	g.communityValid = true
+
+	var result []types.Community
+	for i, nodeIDs := range g.communities {
+		result = append(result, types.Community{
+			ID:      i,
+			NodeIDs: nodeIDs,
+		})
+	}
+
+	return result, mod
 }
