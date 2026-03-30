@@ -22,9 +22,10 @@ type ToolDeps struct {
 
 // ContextParams are the parameters for the context tool
 type ContextParams struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit,omitempty"`
-	Mode  string `json:"mode,omitempty"`
+	Query      string `json:"query"`
+	Limit      int    `json:"limit,omitempty"`
+	Mode       string `json:"mode,omitempty"`
+	MaxPerFile int    `json:"max_per_file,omitempty"`
 }
 
 // ImpactParams are the parameters for the impact tool
@@ -75,6 +76,11 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 						"description": "Search mode: 'search' (default) for hybrid search, 'architecture' for community detection",
 						"default":     "search",
 					},
+					"max_per_file": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum results per unique file path (default: 3)",
+						"default":     3,
+					},
 				},
 				"required": []string{"query"},
 			},
@@ -103,7 +109,7 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 			if deps.Search == nil {
 				return nil, fmt.Errorf("search engine not initialized")
 			}
-			results, err := deps.Search.Search(p.Query, p.Limit, nil)
+			results, err := deps.Search.Search(p.Query, p.Limit, nil, p.MaxPerFile)
 			if err != nil {
 				return nil, fmt.Errorf("search failed: %w", err)
 			}
@@ -346,7 +352,32 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 		},
 	)
 
-	// Tool 5: index — re-index the repository
+	// Tool 5: health — daemon health status and metrics
+	s.RegisterTool(
+		ToolDefinition{
+			Name:        "health",
+			Description: "Returns daemon health status and metrics",
+			InputSchema: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		func(params json.RawMessage) (interface{}, error) {
+			var nodeCount, edgeCount int
+			if deps.Graph != nil {
+				nodeCount = deps.Graph.NodeCount()
+				edgeCount = deps.Graph.EdgeCount()
+			}
+			return map[string]interface{}{
+				"status":  "healthy",
+				"nodes":   nodeCount,
+				"edges":   edgeCount,
+				"version": "0.2.0",
+			}, nil
+		},
+	)
+
+	// Tool 6: index — re-index the repository
 	s.RegisterTool(
 		ToolDefinition{
 			Name:        "index",

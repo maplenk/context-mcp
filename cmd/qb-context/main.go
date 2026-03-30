@@ -92,8 +92,13 @@ func main() {
 	// 9. Set up MCP server
 	server := mcp.NewServer()
 	indexFn := func(path string) error {
-		log.Printf("Re-indexing triggered for: %s", path)
-		indexRepo(cfg, store, p, embedder, graphEngine)
+		if path == "" {
+			log.Printf("Full re-index triggered")
+			indexRepo(cfg, store, p, embedder, graphEngine)
+		} else {
+			log.Printf("Targeted re-index triggered for: %s", path)
+			indexPath(cfg, store, p, embedder, graphEngine, path)
+		}
 		return nil
 	}
 	mcp.RegisterTools(server, mcp.ToolDeps{
@@ -384,6 +389,94 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			}
 		}
 		log.Printf("Discovered %d architecture documents", len(docs))
+	}
+}
+
+// indexPath performs a targeted re-index of files under the given path
+func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine, targetPath string) {
+	absTarget := targetPath
+	if !filepath.IsAbs(absTarget) {
+		absTarget = filepath.Join(cfg.RepoRoot, absTarget)
+	}
+
+	// Determine if path is a file or directory
+	info, err := os.Stat(absTarget)
+	if err != nil {
+		log.Printf("Cannot stat path %s: %v", targetPath, err)
+		return
+	}
+
+	var files []string
+	if info.IsDir() {
+		// Walk the directory to find source files
+		filepath.Walk(absTarget, func(path string, fi os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if fi.IsDir() {
+				return nil
+			}
+			relPath, err := filepath.Rel(cfg.RepoRoot, path)
+			if err != nil {
+				return nil
+			}
+			files = append(files, relPath)
+			return nil
+		})
+	} else {
+		relPath, err := filepath.Rel(cfg.RepoRoot, absTarget)
+		if err != nil {
+			log.Printf("Cannot compute relative path for %s: %v", absTarget, err)
+			return
+		}
+		files = []string{relPath}
+	}
+
+	log.Printf("Targeted re-index: %d files under %s", len(files), targetPath)
+
+	for _, relPath := range files {
+		absPath := filepath.Join(cfg.RepoRoot, relPath)
+
+		// Delete old data for this file
+		if err := store.DeleteByFile(relPath); err != nil {
+			log.Printf("Failed to delete stale data for %s: %v", relPath, err)
+		}
+
+		// Re-parse the file
+		result, err := p.ParseFile(absPath, cfg.RepoRoot)
+		if err != nil {
+			log.Printf("Parse error %s: %v", relPath, err)
+			continue
+		}
+
+		// Store nodes and edges
+		if len(result.Nodes) > 0 {
+			if err := store.UpsertNodes(result.Nodes); err != nil {
+				log.Printf("Failed to store nodes for %s: %v", relPath, err)
+			}
+		}
+		if len(result.Edges) > 0 {
+			if err := store.UpsertEdges(result.Edges); err != nil {
+				log.Printf("Failed to store edges for %s: %v", relPath, err)
+			}
+		}
+
+		// Generate embeddings
+		for _, node := range result.Nodes {
+			vec, err := embedder.Embed(node.ContentSum)
+			if err != nil {
+				log.Printf("Embedding error for %s: %v", node.SymbolName, err)
+				continue
+			}
+			store.UpsertEmbedding(node.ID, vec)
+		}
+	}
+
+	// Rebuild graph after targeted re-index
+	edges, err := store.GetAllEdges()
+	if err == nil {
+		graphEngine.BuildFromEdges(edges)
+		log.Printf("Graph rebuilt with %d nodes, %d edges", graphEngine.NodeCount(), graphEngine.EdgeCount())
 	}
 }
 

@@ -20,10 +20,11 @@ const (
 	weightInDegree    = 0.10
 	weightSemantic    = 0.15
 
-	maxPerFile = 3 // max results per unique file_path
+	defaultMaxPerFile = 3 // default max results per unique file_path
 )
 
-// stopWords are common words filtered from search queries
+// stopWords are common English words filtered from search queries.
+// Override via SetStopWords() to customize for other languages or domains.
 var stopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "is": true, "are": true,
 	"was": true, "were": true, "be": true, "been": true, "being": true,
@@ -40,12 +41,22 @@ var stopWords = map[string]bool{
 	"who": true, "whom": true, "why": true,
 }
 
+// SetStopWords replaces the default stop word list with a custom set.
+// Pass nil or an empty slice to disable stop word filtering entirely.
+func SetStopWords(words []string) {
+	newSet := make(map[string]bool, len(words))
+	for _, w := range words {
+		newSet[w] = true
+	}
+	stopWords = newSet
+}
+
 // camelCaseRe splits CamelCase identifiers into words.
 // Matches: sequences of uppercase+lowercase (e.g. "Read"), all-lowercase runs, or all-uppercase runs.
 var camelCaseRe = regexp.MustCompile(`[A-Z][a-z]*|[a-z]+|[A-Z]+`)
 
 // fts5SpecialRe matches FTS5 special characters that must be sanitized before query construction.
-var fts5SpecialRe = regexp.MustCompile(`[":(){}^+\-]`)
+var fts5SpecialRe = regexp.MustCompile(`[":(){}^+\-*]`)
 
 // sanitizeFTS replaces FTS5 special characters with spaces to prevent query injection.
 func sanitizeFTS(s string) string {
@@ -68,10 +79,16 @@ func New(store *storage.Store, embedder embedding.Embedder, graph *graph.GraphEn
 	}
 }
 
-// Search performs multi-signal composite search
-func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []string) ([]types.SearchResult, error) {
+// Search performs multi-signal composite search.
+// maxPerFile controls how many results per unique file_path are returned (0 uses default of 3).
+func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []string, maxPerFile ...int) ([]types.SearchResult, error) {
 	if limit <= 0 {
 		limit = 10
+	}
+
+	perFileCap := defaultMaxPerFile
+	if len(maxPerFile) > 0 && maxPerFile[0] > 0 {
+		perFileCap = maxPerFile[0]
 	}
 
 	candidateLimit := limit * 5
@@ -169,7 +186,7 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	})
 
 	// Apply per-file cap
-	results = applyPerFileCap(results, maxPerFile)
+	results = applyPerFileCap(results, perFileCap)
 
 	// Trim to limit
 	if len(results) > limit {

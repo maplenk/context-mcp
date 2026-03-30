@@ -122,9 +122,23 @@ func (d *Discoverer) Discover() ([]DiscoveredDoc, error) {
 	return docs, nil
 }
 
-// readDoc reads a single document, truncating to maxContentBytes
+// readDoc reads a single document, truncating to maxContentBytes.
+// It resolves symlinks and verifies the resolved path is within the repo root.
 func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
-	data, err := os.ReadFile(path)
+	// Resolve symlinks and verify the file is within the repo boundary
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(d.repoRoot)
+	if err != nil {
+		resolvedRoot = d.repoRoot
+	}
+	if !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) && resolved != resolvedRoot {
+		return nil, fmt.Errorf("symlink %s resolves to %s which is outside repo root %s", path, resolved, d.repoRoot)
+	}
+
+	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return nil, err
 	}
