@@ -125,3 +125,10 @@ type Community struct {
 	NodeIDs    []string `json:"node_ids"`
 	Modularity float64  `json:"modularity"`
 }
+
+// ProjectSummary represents an architecture decision record or project summary
+type ProjectSummary struct {
+	Project    string `json:"project"`
+	Summary    string `json:"summary"`
+	SourceHash string `json:"source_hash"`
+}

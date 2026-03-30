@@ -10,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/naman/qb-context/internal/adr"
 	"github.com/naman/qb-context/internal/config"
 	"github.com/naman/qb-context/internal/embedding"
 	"github.com/naman/qb-context/internal/graph"
@@ -364,6 +365,25 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		} else {
 			log.Printf("Stored betweenness scores for %d nodes", len(scores))
 		}
+	}
+
+	// Discover and store architecture documents
+	adrDiscoverer := adr.NewDiscoverer(cfg.RepoRoot)
+	docs, adrErr := adrDiscoverer.Discover()
+	if adrErr != nil {
+		log.Printf("ADR discovery error: %v", adrErr)
+	} else if len(docs) > 0 {
+		for _, doc := range docs {
+			summary := types.ProjectSummary{
+				Project:    doc.Path,
+				Summary:    doc.Content,
+				SourceHash: doc.SourceHash,
+			}
+			if err := store.UpsertProjectSummary(summary); err != nil {
+				log.Printf("Failed to store ADR %s: %v", doc.Path, err)
+			}
+		}
+		log.Printf("Discovered %d architecture documents", len(docs))
 	}
 }
 

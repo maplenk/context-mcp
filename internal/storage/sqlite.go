@@ -593,6 +593,58 @@ func (s *Store) GetAllBetweenness() (map[string]float64, error) {
 	return result, rows.Err()
 }
 
+// UpsertProjectSummary inserts or updates a project summary
+func (s *Store) UpsertProjectSummary(summary types.ProjectSummary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		INSERT INTO project_summaries (project, summary, source_hash)
+		VALUES (?, ?, ?)
+		ON CONFLICT(project) DO UPDATE SET
+			summary = excluded.summary,
+			source_hash = excluded.source_hash,
+			updated_at = datetime('now')`,
+		summary.Project, summary.Summary, summary.SourceHash)
+	return err
+}
+
+// GetProjectSummary retrieves a project summary by project name
+func (s *Store) GetProjectSummary(project string) (*types.ProjectSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRow(`SELECT project, summary, source_hash FROM project_summaries WHERE project = ?`, project)
+	var ps types.ProjectSummary
+	err := row.Scan(&ps.Project, &ps.Summary, &ps.SourceHash)
+	if err != nil {
+		return nil, err
+	}
+	return &ps, nil
+}
+
+// GetAllProjectSummaries retrieves all project summaries
+func (s *Store) GetAllProjectSummaries() ([]types.ProjectSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT project, summary, source_hash FROM project_summaries`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []types.ProjectSummary
+	for rows.Next() {
+		var ps types.ProjectSummary
+		if err := rows.Scan(&ps.Project, &ps.Summary, &ps.SourceHash); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, ps)
+	}
+	return summaries, rows.Err()
+}
+
 // serializeFloat32 converts a float32 slice to a little-endian byte slice for sqlite-vec
 func serializeFloat32(v []float32) []byte {
 	buf := make([]byte, len(v)*4)

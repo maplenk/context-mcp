@@ -56,6 +56,15 @@ func (s *Store) runMigrations() error {
 			betweenness REAL NOT NULL DEFAULT 0,
 			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
 		)`,
+
+		// Project summaries table for ADR / architecture documents
+		`CREATE TABLE IF NOT EXISTS project_summaries (
+			project TEXT PRIMARY KEY,
+			summary TEXT NOT NULL DEFAULT '',
+			source_hash TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 
 	for i, m := range migrations {
