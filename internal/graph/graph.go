@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/naman/qb-context/internal/types"
@@ -550,4 +552,486 @@ func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
 	}
 
 	return result, mod
+}
+
+// TraceCallPath performs bidirectional BFS to find call paths between two symbols.
+// It searches forward from the source (outgoing edges) and backward from the target
+// (incoming edges) until the frontiers meet, then reconstructs all found paths.
+// Returns a list of paths (each path is a list of hash IDs) up to maxDepth total hops.
+func (g *GraphEngine) TraceCallPath(fromHash, toHash string, maxDepth int) [][]string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	fromID, fromOk := g.idMap[fromHash]
+	toID, toOk := g.idMap[toHash]
+	if !fromOk || !toOk {
+		return nil
+	}
+	if fromID == toID {
+		return [][]string{{fromHash}}
+	}
+
+	// BFS forward from source (following outgoing edges)
+	// parentFwd maps each visited int64 node to its predecessor on the forward side
+	parentFwd := map[int64][]int64{fromID: nil}
+	frontierFwd := []int64{fromID}
+
+	// BFS backward from target (following incoming edges)
+	parentBwd := map[int64][]int64{toID: nil}
+	frontierBwd := []int64{toID}
+
+	// meetingNodes are nodes found in both forward and backward visited sets
+	var meetingNodes []int64
+
+	for depth := 0; depth < maxDepth && len(meetingNodes) == 0; depth++ {
+		// Expand forward frontier
+		if len(frontierFwd) > 0 {
+			var nextFwd []int64
+			for _, nodeID := range frontierFwd {
+				succs := g.dg.From(nodeID) // outgoing edges: node -> successors
+				for succs.Next() {
+					succID := succs.Node().ID()
+					if _, visited := parentFwd[succID]; !visited {
+						parentFwd[succID] = append(parentFwd[succID], nodeID)
+						nextFwd = append(nextFwd, succID)
+						if _, inBwd := parentBwd[succID]; inBwd {
+							meetingNodes = append(meetingNodes, succID)
+						}
+					}
+				}
+			}
+			frontierFwd = nextFwd
+		}
+
+		if len(meetingNodes) > 0 {
+			break
+		}
+
+		// Expand backward frontier
+		if len(frontierBwd) > 0 {
+			var nextBwd []int64
+			for _, nodeID := range frontierBwd {
+				preds := g.dg.To(nodeID) // incoming edges: predecessors -> node
+				for preds.Next() {
+					predID := preds.Node().ID()
+					if _, visited := parentBwd[predID]; !visited {
+						parentBwd[predID] = append(parentBwd[predID], nodeID)
+						nextBwd = append(nextBwd, predID)
+						if _, inFwd := parentFwd[predID]; inFwd {
+							meetingNodes = append(meetingNodes, predID)
+						}
+					}
+				}
+			}
+			frontierBwd = nextBwd
+		}
+	}
+
+	if len(meetingNodes) == 0 {
+		// Also try a simple forward-only BFS as fallback
+		return g.traceForwardBFS(fromID, toID, maxDepth)
+	}
+
+	// Reconstruct paths through meeting nodes
+	var allPaths [][]string
+	for _, mid := range meetingNodes {
+		// Build forward path from source to meeting node
+		fwdPath := g.reconstructPath(parentFwd, fromID, mid)
+		// Build backward path from meeting node to target
+		bwdPath := g.reconstructPath(parentBwd, toID, mid)
+
+		// Reverse the backward path and combine
+		for i, j := 0, len(bwdPath)-1; i < j; i, j = i+1, j-1 {
+			bwdPath[i], bwdPath[j] = bwdPath[j], bwdPath[i]
+		}
+
+		// Combine: fwdPath ends with mid, bwdPath starts with mid, so skip first of bwd
+		var fullPath []string
+		for _, id := range fwdPath {
+			if h, ok := g.reverseMap[id]; ok {
+				fullPath = append(fullPath, h)
+			}
+		}
+		if len(bwdPath) > 1 {
+			for _, id := range bwdPath[1:] {
+				if h, ok := g.reverseMap[id]; ok {
+					fullPath = append(fullPath, h)
+				}
+			}
+		}
+
+		if len(fullPath) > 0 {
+			allPaths = append(allPaths, fullPath)
+		}
+	}
+
+	// Deduplicate paths
+	seen := make(map[string]bool)
+	var uniquePaths [][]string
+	for _, p := range allPaths {
+		key := fmt.Sprintf("%v", p)
+		if !seen[key] {
+			seen[key] = true
+			uniquePaths = append(uniquePaths, p)
+		}
+	}
+
+	return uniquePaths
+}
+
+// traceForwardBFS performs a simple forward BFS to find a path from source to target.
+func (g *GraphEngine) traceForwardBFS(fromID, toID int64, maxDepth int) [][]string {
+	parent := map[int64]int64{fromID: -1}
+	frontier := []int64{fromID}
+
+	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
+		var next []int64
+		for _, nodeID := range frontier {
+			succs := g.dg.From(nodeID)
+			for succs.Next() {
+				succID := succs.Node().ID()
+				if _, visited := parent[succID]; !visited {
+					parent[succID] = nodeID
+					next = append(next, succID)
+					if succID == toID {
+						// Reconstruct path
+						var path []string
+						cur := toID
+						for cur != -1 {
+							if h, ok := g.reverseMap[cur]; ok {
+								path = append(path, h)
+							}
+							cur = parent[cur]
+						}
+						// Reverse
+						for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+							path[i], path[j] = path[j], path[i]
+						}
+						return [][]string{path}
+					}
+				}
+			}
+		}
+		frontier = next
+	}
+	return nil
+}
+
+// reconstructPath traces back from target to source using the parent map from BFS.
+func (g *GraphEngine) reconstructPath(parentMap map[int64][]int64, source, target int64) []int64 {
+	if source == target {
+		return []int64{source}
+	}
+
+	// BFS backwards through the parent map
+	type state struct {
+		node int64
+		path []int64
+	}
+	queue := []state{{node: target, path: []int64{target}}}
+	visited := map[int64]bool{target: true}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		parents := parentMap[cur.node]
+		for _, p := range parents {
+			newPath := make([]int64, len(cur.path)+1)
+			copy(newPath, cur.path)
+			newPath[len(cur.path)] = p
+
+			if p == source {
+				// Reverse to get source->target order
+				for i, j := 0, len(newPath)-1; i < j; i, j = i+1, j-1 {
+					newPath[i], newPath[j] = newPath[j], newPath[i]
+				}
+				return newPath
+			}
+
+			if !visited[p] {
+				visited[p] = true
+				queue = append(queue, state{node: p, path: newPath})
+			}
+		}
+	}
+
+	return []int64{target}
+}
+
+// PageRank computes standard (non-personalized) PageRank and returns a map of
+// hash ID to score.
+func (g *GraphEngine) PageRank() map[string]float64 {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if g.dg.Nodes().Len() == 0 {
+		return nil
+	}
+
+	ranks := network.PageRankSparse(g.dg, 0.85, 1e-6)
+	result := make(map[string]float64)
+	for id, rank := range ranks {
+		if hashID, ok := g.reverseMap[id]; ok {
+			result[hashID] = rank
+		}
+	}
+	return result
+}
+
+// GetInDegree returns the in-degree (number of incoming edges) for a node.
+func (g *GraphEngine) GetInDegree(hashID string) int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	id, ok := g.idMap[hashID]
+	if !ok {
+		return 0
+	}
+	return g.dg.To(id).Len()
+}
+
+// GetOutDegree returns the out-degree (number of outgoing edges) for a node.
+func (g *GraphEngine) GetOutDegree(hashID string) int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	id, ok := g.idMap[hashID]
+	if !ok {
+		return 0
+	}
+	return g.dg.From(id).Len()
+}
+
+// GetEntryPoints returns nodes with zero in-degree (nobody calls them; they initiate).
+func (g *GraphEngine) GetEntryPoints() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	var entryPoints []string
+	nodes := g.dg.Nodes()
+	for nodes.Next() {
+		id := nodes.Node().ID()
+		if g.dg.To(id).Len() == 0 {
+			if hashID, ok := g.reverseMap[id]; ok {
+				entryPoints = append(entryPoints, hashID)
+			}
+		}
+	}
+	return entryPoints
+}
+
+// GetHubs returns nodes with the highest out-degree (they call many things).
+// Returns up to limit nodes sorted by out-degree descending.
+func (g *GraphEngine) GetHubs(limit int) []struct {
+	HashID    string
+	OutDegree int
+} {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	type hubEntry struct {
+		HashID    string
+		OutDegree int
+	}
+
+	var hubs []hubEntry
+	nodes := g.dg.Nodes()
+	for nodes.Next() {
+		id := nodes.Node().ID()
+		outDeg := g.dg.From(id).Len()
+		if outDeg > 0 {
+			if hashID, ok := g.reverseMap[id]; ok {
+				hubs = append(hubs, hubEntry{HashID: hashID, OutDegree: outDeg})
+			}
+		}
+	}
+
+	// Sort by out-degree descending
+	sort.Slice(hubs, func(i, j int) bool {
+		return hubs[i].OutDegree > hubs[j].OutDegree
+	})
+
+	if limit > 0 && len(hubs) > limit {
+		hubs = hubs[:limit]
+	}
+
+	// Convert to return type
+	result := make([]struct {
+		HashID    string
+		OutDegree int
+	}, len(hubs))
+	for i, h := range hubs {
+		result[i].HashID = h.HashID
+		result[i].OutDegree = h.OutDegree
+	}
+	return result
+}
+
+// GetConnectors returns nodes that bridge communities — they have high betweenness
+// and edges to nodes in multiple communities. Returns hash IDs.
+func (g *GraphEngine) GetConnectors(betweenness map[string]float64, limit int) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	// Build a community membership map
+	communityOf := make(map[string]int)
+	for i, comm := range g.communities {
+		for _, nodeID := range comm {
+			communityOf[nodeID] = i
+		}
+	}
+
+	type connectorEntry struct {
+		HashID          string
+		Betweenness     float64
+		CommunitiesSpan int
+	}
+
+	var connectors []connectorEntry
+	for hashID, btwn := range betweenness {
+		if btwn <= 0 {
+			continue
+		}
+
+		id, ok := g.idMap[hashID]
+		if !ok {
+			continue
+		}
+
+		// Count how many different communities this node's neighbors belong to
+		neighborComms := make(map[int]bool)
+		succs := g.dg.From(id)
+		for succs.Next() {
+			succHash := g.reverseMap[succs.Node().ID()]
+			if c, ok := communityOf[succHash]; ok {
+				neighborComms[c] = true
+			}
+		}
+		preds := g.dg.To(id)
+		for preds.Next() {
+			predHash := g.reverseMap[preds.Node().ID()]
+			if c, ok := communityOf[predHash]; ok {
+				neighborComms[c] = true
+			}
+		}
+
+		if len(neighborComms) >= 2 {
+			connectors = append(connectors, connectorEntry{
+				HashID:          hashID,
+				Betweenness:     btwn,
+				CommunitiesSpan: len(neighborComms),
+			})
+		}
+	}
+
+	sort.Slice(connectors, func(i, j int) bool {
+		return connectors[i].Betweenness > connectors[j].Betweenness
+	})
+
+	if limit > 0 && len(connectors) > limit {
+		connectors = connectors[:limit]
+	}
+
+	result := make([]string, len(connectors))
+	for i, c := range connectors {
+		result[i] = c.HashID
+	}
+	return result
+}
+
+// GetCallees returns the hash IDs of all nodes that the given node calls (outgoing edges).
+func (g *GraphEngine) GetCallees(hashID string) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	id, ok := g.idMap[hashID]
+	if !ok {
+		return nil
+	}
+
+	var callees []string
+	succs := g.dg.From(id)
+	for succs.Next() {
+		if h, ok := g.reverseMap[succs.Node().ID()]; ok {
+			callees = append(callees, h)
+		}
+	}
+	return callees
+}
+
+// GetCallers returns the hash IDs of all nodes that call the given node (incoming edges).
+func (g *GraphEngine) GetCallers(hashID string) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	id, ok := g.idMap[hashID]
+	if !ok {
+		return nil
+	}
+
+	var callers []string
+	preds := g.dg.To(id)
+	for preds.Next() {
+		if h, ok := g.reverseMap[preds.Node().ID()]; ok {
+			callers = append(callers, h)
+		}
+	}
+	return callers
+}
+
+// CollectDeps collects callees (outgoing) and callers (incoming) up to a given depth
+// from a starting node. Returns two sets: dependencies (callees) and dependents (callers).
+func (g *GraphEngine) CollectDeps(hashID string, depth int) (deps []string, dependents []string) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	startID, ok := g.idMap[hashID]
+	if !ok {
+		return nil, nil
+	}
+
+	// BFS forward (callees / dependencies)
+	visitedFwd := map[int64]bool{startID: true}
+	frontierFwd := []int64{startID}
+	for d := 0; d < depth && len(frontierFwd) > 0; d++ {
+		var next []int64
+		for _, nid := range frontierFwd {
+			succs := g.dg.From(nid)
+			for succs.Next() {
+				sid := succs.Node().ID()
+				if !visitedFwd[sid] {
+					visitedFwd[sid] = true
+					next = append(next, sid)
+					if h, ok := g.reverseMap[sid]; ok {
+						deps = append(deps, h)
+					}
+				}
+			}
+		}
+		frontierFwd = next
+	}
+
+	// BFS backward (callers / dependents)
+	visitedBwd := map[int64]bool{startID: true}
+	frontierBwd := []int64{startID}
+	for d := 0; d < depth && len(frontierBwd) > 0; d++ {
+		var next []int64
+		for _, nid := range frontierBwd {
+			preds := g.dg.To(nid)
+			for preds.Next() {
+				pid := preds.Node().ID()
+				if !visitedBwd[pid] {
+					visitedBwd[pid] = true
+					next = append(next, pid)
+					if h, ok := g.reverseMap[pid]; ok {
+						dependents = append(dependents, h)
+					}
+				}
+			}
+		}
+		frontierBwd = next
+	}
+
+	return deps, dependents
 }

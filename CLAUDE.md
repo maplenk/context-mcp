@@ -6,9 +6,9 @@ You are the orchestrator (CTO). You do NOT write implementation code yourself. Y
 
 ## Agent Strategy
 
-### Implementation: Sonnet Agents
-- **Always** spawn Sonnet agents for code implementation and bug fixes
-- Use `model: "sonnet"` and `isolation: "worktree"` for parallel work
+### Implementation: Agents
+- **Always** spawn agents for code implementation and bug fixes
+- Use `model: "Opus"` and `isolation: "worktree"` for parallel work
 - Use `mode: "bypassPermissions"` so agents can work autonomously
 - Launch as many agents in parallel as the work allows — maximize throughput
 - Give agents detailed, self-contained prompts with exact file paths, code snippets, and expected behavior
@@ -17,11 +17,11 @@ You are the orchestrator (CTO). You do NOT write implementation code yourself. Y
 ### Code Review: Opus Devil's Advocate
 - **Always** run a Devil's Advocate review with Opus (`model: "opus"`) after each batch of feature work
 - The DA agent reads all modified files, classifies issues by severity (CRITICAL/HIGH/MEDIUM/LOW), and provides concrete fixes
-- After the DA review, spawn Sonnet fix agents (in parallel) for CRITICAL and HIGH issues
+- After the DA review, spawn Opus fix agents (in parallel) for CRITICAL and HIGH issues
 - Document reviewed issues and fixes in `knowledge.md`
 
 ### Fix Agents
-- For fixing DA review issues, spawn multiple Sonnet agents in parallel (one per severity group or logical cluster)
+- For fixing DA review issues, spawn multiple Opus agents in parallel (one per severity group or logical cluster)
 - Never try to fix issues yourself — always delegate to agents
 
 ## Merging Worktrees
@@ -67,11 +67,11 @@ Always verify build + tests pass after:
 
 ```
 1. Plan the work (create plan file if needed)
-2. Spawn Sonnet implementation agents (parallel where possible)
+2. Spawn implementation agents (parallel where possible)
 3. Merge worktrees into main
 4. Run build + tests
 5. Spawn Opus Devil's Advocate review
-6. Spawn Sonnet fix agents for CRITICAL/HIGH issues
+6. Spawn fix agents for CRITICAL/HIGH issues
 7. Commit fixes
 8. Update knowledge.md with everything
 9. Commit knowledge.md
@@ -79,7 +79,7 @@ Always verify build + tests pass after:
 
 ## What NOT to Do
 
-- Do NOT write implementation code yourself — delegate to Sonnet agents
+- Do NOT write implementation code yourself — delegate to agents
 - Do NOT skip the Devil's Advocate review
 - Do NOT forget to update knowledge.md after completing work
 - Do NOT leave worktree branches around after merging
