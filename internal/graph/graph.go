@@ -18,6 +18,9 @@ type GraphEngine struct {
 	communities    [][]string       // cached community node hash IDs
 	modularity     float64          // cached Q score
 	communityValid bool             // false after BuildFromEdges
+	inDegreeCache  map[string]float64 // cached in-degree scores
+	inDegreeValid  bool               // false after graph mutations
+	changeCount    int                // incremental change counter for betweenness refresh
 }
 
 // New creates a new GraphEngine
@@ -53,6 +56,7 @@ func (g *GraphEngine) BuildFromEdges(edges []types.ASTEdge) {
 	g.idMap = make(map[string]int64)
 	g.reverseMap = make(map[int64]string)
 	g.communityValid = false
+	g.inDegreeValid = false
 
 	for _, edge := range edges {
 		srcID := g.ensureNode(edge.SourceID)
@@ -73,6 +77,8 @@ func (g *GraphEngine) AddEdge(edge types.ASTEdge) {
 	if srcID != tgtID && !g.dg.HasEdgeFromTo(srcID, tgtID) {
 		g.dg.SetEdge(g.dg.NewEdge(g.dg.Node(srcID), g.dg.Node(tgtID)))
 		g.communityValid = false
+		g.inDegreeValid = false
+		g.changeCount++
 	}
 }
 
@@ -86,6 +92,8 @@ func (g *GraphEngine) RemoveEdge(sourceHash, targetHash string) {
 	if srcOk && tgtOk {
 		g.dg.RemoveEdge(srcID, tgtID)
 		g.communityValid = false
+		g.inDegreeValid = false
+		g.changeCount++
 	}
 }
 
@@ -102,6 +110,8 @@ func (g *GraphEngine) RemoveNode(hashID string) {
 	delete(g.idMap, hashID)
 	delete(g.reverseMap, id)
 	g.communityValid = false
+	g.inDegreeValid = false
+	g.changeCount++
 }
 
 // BlastRadius performs BFS over incoming edges to find all nodes that depend on
@@ -149,87 +159,139 @@ func (g *GraphEngine) BlastRadius(nodeHashID string, maxDepth int) []string {
 	return affected
 }
 
-// PersonalizedPageRank approximates personalized PageRank by computing standard
-// PageRank and then boosting scores for nodes connected to active files.
-// activeNodeIDs are the hash IDs of nodes in the currently edited files.
-// Note: This is an approximation — true PPR would modify the power iteration's
-// teleportation vector, which gonum's PageRankSparse doesn't support.
+// PersonalizedPageRank implements true Personalized PageRank via custom power iteration.
+// The teleportation vector is seeded with the active nodes instead of uniform distribution,
+// so random walks that "restart" teleport back to the active context rather than random nodes.
+// activeNodeIDs are the hash IDs of nodes in the currently edited files / top FTS results.
 func (g *GraphEngine) PersonalizedPageRank(activeNodeIDs []string) map[string]float64 {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	if g.dg.Nodes().Len() == 0 {
+	return g.personalizedPageRankLocked(activeNodeIDs)
+}
+
+// personalizedPageRankLocked is the lock-free inner implementation of PPR.
+// Caller must hold at least g.mu.RLock().
+func (g *GraphEngine) personalizedPageRankLocked(activeNodeIDs []string) map[string]float64 {
+	n := g.dg.Nodes().Len()
+	if n == 0 {
 		return nil
 	}
 
-	// Build personalization vector: higher weight for active nodes
-	personalization := make(map[int64]float64)
-	totalNodes := g.dg.Nodes().Len()
+	const (
+		alpha   = 0.85  // damping factor
+		epsilon = 1e-6  // convergence threshold
+		maxIter = 100   // max iterations
+	)
 
+	// Build teleportation vector (personalization)
+	teleport := make(map[int64]float64)
 	if len(activeNodeIDs) > 0 {
-		activeWeight := 0.85 / float64(len(activeNodeIDs))
-		passiveWeight := 0.15 / float64(totalNodes)
-
-		nodes := g.dg.Nodes()
-		for nodes.Next() {
-			personalization[nodes.Node().ID()] = passiveWeight
-		}
+		weight := 1.0 / float64(len(activeNodeIDs))
 		for _, hashID := range activeNodeIDs {
 			if id, ok := g.idMap[hashID]; ok {
-				personalization[id] = activeWeight
+				teleport[id] += weight
 			}
 		}
 	}
-
-	// Run standard PageRank first
-	ranks := network.PageRankSparse(g.dg, 0.85, 1e-6)
-
-	// Apply personalization bias: blend standard ranks with the personalization vector.
-	// For each node, adjust rank proportionally to its personalization weight.
-	if len(personalization) > 0 {
-		for id := range ranks {
-			if w, ok := personalization[id]; ok {
-				ranks[id] = ranks[id]*0.5 + w*0.5
-			}
+	// If no active nodes mapped, fall back to uniform teleportation
+	if len(teleport) == 0 {
+		nodes := g.dg.Nodes()
+		weight := 1.0 / float64(n)
+		for nodes.Next() {
+			teleport[nodes.Node().ID()] = weight
 		}
 	}
 
-	// Convert back to hash IDs
+	// Initialize rank vector uniformly
+	rank := make(map[int64]float64)
+	nodes := g.dg.Nodes()
+	initVal := 1.0 / float64(n)
+	for nodes.Next() {
+		rank[nodes.Node().ID()] = initVal
+	}
+
+	// Power iteration
+	for iter := 0; iter < maxIter; iter++ {
+		newRank := make(map[int64]float64)
+
+		// Teleportation component: (1 - alpha) * teleport[id]
+		for id, t := range teleport {
+			newRank[id] = (1 - alpha) * t
+		}
+
+		// Random walk component
+		allNodes := g.dg.Nodes()
+		for allNodes.Next() {
+			nodeID := allNodes.Node().ID()
+			succs := g.dg.From(nodeID)
+			outDeg := succs.Len()
+			if outDeg == 0 {
+				// Dangling node: distribute its rank to the teleportation vector
+				for id, t := range teleport {
+					newRank[id] += alpha * rank[nodeID] * t
+				}
+			} else {
+				// Distribute rank equally to successors
+				succs.Reset()
+				share := alpha * rank[nodeID] / float64(outDeg)
+				for succs.Next() {
+					succID := succs.Node().ID()
+					newRank[succID] += share
+				}
+			}
+		}
+
+		// Check convergence (L1 norm of difference)
+		diff := 0.0
+		for id, r := range newRank {
+			d := r - rank[id]
+			if d < 0 {
+				d = -d
+			}
+			diff += d
+		}
+		rank = newRank
+		if diff < epsilon {
+			break
+		}
+	}
+
+	// Convert to hash IDs
 	result := make(map[string]float64)
-	for id, rank := range ranks {
+	for id, r := range rank {
 		if hashID, ok := g.reverseMap[id]; ok {
-			result[hashID] = rank
+			result[hashID] = r
 		}
 	}
-
 	return result
 }
 
 // ComputeBetweenness computes betweenness centrality for all nodes using
-// Brandes' algorithm (via gonum), normalized to [0,1].
-// Returns a map of hash ID → betweenness score.
+// Brandes' algorithm (via gonum), normalized to [0,1] using the graph-theoretic
+// maximum for directed graphs: (n-1)*(n-2), where n = number of nodes.
+// This makes scores comparable across different graph states.
 func (g *GraphEngine) ComputeBetweenness() map[string]float64 {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	if g.dg.Nodes().Len() == 0 {
+	n := g.dg.Nodes().Len()
+	if n == 0 {
 		return nil
 	}
 
 	// Brandes' algorithm via gonum
 	raw := network.Betweenness(g.dg)
 
-	// Find max for normalization
-	var maxVal float64
-	for _, v := range raw {
-		if v > maxVal {
-			maxVal = v
-		}
-	}
-
 	result := make(map[string]float64)
-	if maxVal == 0 {
-		// All betweenness is zero — return zeros
+
+	// For directed graphs, the theoretical maximum betweenness is (n-1)*(n-2).
+	// This is the number of ordered pairs (s,t) where s != t != v that could
+	// route through a single node v. Using this instead of max-value normalization
+	// makes scores comparable across different graph sizes/states.
+	theoreticalMax := float64(n-1) * float64(n-2)
+	if theoreticalMax <= 0 {
+		// Graph with 0 or 1 nodes: all betweenness is zero
 		for id := range raw {
 			if hashID, ok := g.reverseMap[id]; ok {
 				result[hashID] = 0
@@ -238,10 +300,15 @@ func (g *GraphEngine) ComputeBetweenness() map[string]float64 {
 		return result
 	}
 
-	// Normalize to [0,1]
+	// Normalize to [0,1] using graph-theoretic maximum
 	for id, v := range raw {
 		if hashID, ok := g.reverseMap[id]; ok {
-			result[hashID] = v / maxVal
+			normalized := v / theoreticalMax
+			// Clamp to [0,1] for safety
+			if normalized > 1.0 {
+				normalized = 1.0
+			}
+			result[hashID] = normalized
 		}
 	}
 
@@ -250,11 +317,29 @@ func (g *GraphEngine) ComputeBetweenness() map[string]float64 {
 
 // ComputeInDegree computes the in-degree authority for all nodes, normalized to [0,1].
 // In-degree counts how many other nodes have edges pointing TO each node.
+// Results are cached and invalidated on graph mutations.
 func (g *GraphEngine) ComputeInDegree() map[string]float64 {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		// Return a copy of the cache to avoid races
+		result := make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			result[k] = v
+		}
+		return result
+	}
+
+	return g.computeInDegreeLocked()
+}
+
+// computeInDegreeLocked computes in-degree and updates the cache.
+// Caller must hold g.mu (write lock).
+func (g *GraphEngine) computeInDegreeLocked() map[string]float64 {
 	if g.dg.Nodes().Len() == 0 {
+		g.inDegreeCache = nil
+		g.inDegreeValid = true
 		return nil
 	}
 
@@ -278,15 +363,16 @@ func (g *GraphEngine) ComputeInDegree() map[string]float64 {
 				result[hashID] = 0
 			}
 		}
-		return result
-	}
-
-	for id, deg := range raw {
-		if hashID, ok := g.reverseMap[id]; ok {
-			result[hashID] = float64(deg) / float64(maxVal)
+	} else {
+		for id, deg := range raw {
+			if hashID, ok := g.reverseMap[id]; ok {
+				result[hashID] = float64(deg) / float64(maxVal)
+			}
 		}
 	}
 
+	g.inDegreeCache = result
+	g.inDegreeValid = true
 	return result
 }
 
@@ -342,6 +428,43 @@ func (g *GraphEngine) EdgeCount() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.dg.Edges().Len()
+}
+
+// ChangeCount returns the number of incremental graph mutations since last reset.
+// Used to decide when to trigger async betweenness recomputation.
+func (g *GraphEngine) ChangeCount() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.changeCount
+}
+
+// ResetChangeCount resets the incremental change counter to zero.
+func (g *GraphEngine) ResetChangeCount() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.changeCount = 0
+}
+
+// ComputeSearchSignals computes PPR and InDegree under a SINGLE lock acquisition
+// to ensure consistency during search. This prevents race conditions where a
+// concurrent graph rebuild could give inconsistent results between the two signals.
+func (g *GraphEngine) ComputeSearchSignals(activeNodeIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	ppr = g.personalizedPageRankLocked(activeNodeIDs)
+
+	// Reuse cached in-degree if valid, otherwise compute and cache
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		inDegree = make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			inDegree[k] = v
+		}
+	} else {
+		inDegree = g.computeInDegreeLocked()
+	}
+
+	return ppr, inDegree
 }
 
 // HasNode checks if a node exists in the graph

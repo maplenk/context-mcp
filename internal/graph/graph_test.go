@@ -430,3 +430,196 @@ func TestPersonalizedPageRank_DAG(t *testing.T) {
 		t.Errorf("expected node-d (score=%f) to rank higher than node-b (score=%f)", scoreD, scoreB)
 	}
 }
+
+// TestPersonalizedPageRank_PersonalizationBias verifies that true PPR actually
+// biases results toward the seeded nodes. When we seed node-a, it should score
+// significantly higher than if we seed node-d on the same graph.
+func TestPersonalizedPageRank_PersonalizationBias(t *testing.T) {
+	g := New()
+	// Star graph: A is the hub, B/C/D are leaves connected to A
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-a", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-a", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-d", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
+	})
+
+	// Run PPR seeded on node-b
+	ranksB := g.PersonalizedPageRank([]string{"node-b"})
+	// Run PPR seeded on node-d
+	ranksD := g.PersonalizedPageRank([]string{"node-d"})
+
+	if ranksB == nil || ranksD == nil {
+		t.Fatal("PersonalizedPageRank returned nil")
+	}
+
+	// When seeded on node-b, node-b should have higher score than node-d
+	if ranksB["node-b"] <= ranksB["node-d"] {
+		t.Errorf("PPR seeded on B: expected B (score=%f) > D (score=%f)",
+			ranksB["node-b"], ranksB["node-d"])
+	}
+
+	// When seeded on node-d, node-d should have higher score than node-b
+	if ranksD["node-d"] <= ranksD["node-b"] {
+		t.Errorf("PPR seeded on D: expected D (score=%f) > B (score=%f)",
+			ranksD["node-d"], ranksD["node-b"])
+	}
+
+	// The scores should be different between the two runs (personalization has effect)
+	if ranksB["node-b"] == ranksD["node-b"] {
+		t.Error("PPR produced identical scores for node-b regardless of seed — personalization has no effect")
+	}
+}
+
+// TestPersonalizedPageRank_NoActiveNodes verifies that PPR with empty active nodes
+// falls back to uniform teleportation (standard PageRank behavior).
+func TestPersonalizedPageRank_NoActiveNodes(t *testing.T) {
+	g := New()
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
+	})
+
+	ranks := g.PersonalizedPageRank(nil)
+	if ranks == nil {
+		t.Fatal("PersonalizedPageRank with nil seeds returned nil")
+	}
+	if len(ranks) != 3 {
+		t.Fatalf("expected 3 nodes, got %d", len(ranks))
+	}
+
+	// All nodes should have positive scores
+	for id, score := range ranks {
+		if score <= 0 {
+			t.Errorf("node %s has non-positive score: %f", id, score)
+		}
+	}
+}
+
+// TestComputeSearchSignals_Consistency verifies that ComputeSearchSignals returns
+// both PPR and InDegree computed under a single lock, producing consistent results.
+func TestComputeSearchSignals_Consistency(t *testing.T) {
+	g := New()
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+	})
+
+	ppr, inDegree := g.ComputeSearchSignals([]string{"node-a"})
+	if ppr == nil {
+		t.Fatal("ComputeSearchSignals returned nil PPR")
+	}
+	if inDegree == nil {
+		t.Fatal("ComputeSearchSignals returned nil InDegree")
+	}
+
+	// Verify PPR has personalization bias
+	if ppr["node-a"] <= 0 {
+		t.Errorf("seeded node-a should have positive PPR score, got %f", ppr["node-a"])
+	}
+
+	// Verify InDegree: node-d has 3 incoming edges, should be normalized to 1.0
+	if inDegree["node-d"] != 1.0 {
+		t.Errorf("node-d in-degree: got %f, want 1.0", inDegree["node-d"])
+	}
+	if inDegree["node-a"] != 0 {
+		t.Errorf("node-a in-degree: got %f, want 0", inDegree["node-a"])
+	}
+}
+
+// TestComputeInDegree_Caching verifies that in-degree results are cached and
+// invalidated correctly on graph mutations.
+func TestComputeInDegree_Caching(t *testing.T) {
+	g := New()
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+	})
+
+	// First call computes fresh
+	deg1 := g.ComputeInDegree()
+	if deg1 == nil {
+		t.Fatal("first ComputeInDegree returned nil")
+	}
+	if deg1["node-b"] != 1.0 {
+		t.Errorf("expected node-b=1.0, got %f", deg1["node-b"])
+	}
+
+	// Second call should return cached result (same values)
+	deg2 := g.ComputeInDegree()
+	if deg2["node-b"] != 1.0 {
+		t.Errorf("cached node-b: expected 1.0, got %f", deg2["node-b"])
+	}
+
+	// Add another edge — cache should be invalidated
+	g.AddEdge(types.ASTEdge{SourceID: "node-c", TargetID: "node-b", EdgeType: types.EdgeTypeCalls})
+	deg3 := g.ComputeInDegree()
+	// node-b still has the max in-degree (2), should still be 1.0
+	if deg3["node-b"] != 1.0 {
+		t.Errorf("after mutation node-b: expected 1.0, got %f", deg3["node-b"])
+	}
+	// But node-c now exists with in-degree 0
+	if _, ok := deg3["node-c"]; !ok {
+		t.Error("node-c should exist in in-degree results after AddEdge")
+	}
+}
+
+// TestChangeCount_IncrementAndReset verifies the change counter for betweenness refresh.
+func TestChangeCount_IncrementAndReset(t *testing.T) {
+	g := New()
+
+	if g.ChangeCount() != 0 {
+		t.Errorf("initial ChangeCount: got %d, want 0", g.ChangeCount())
+	}
+
+	g.AddEdge(types.ASTEdge{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls})
+	if g.ChangeCount() != 1 {
+		t.Errorf("after AddEdge ChangeCount: got %d, want 1", g.ChangeCount())
+	}
+
+	g.RemoveNode("node-a")
+	if g.ChangeCount() != 2 {
+		t.Errorf("after RemoveNode ChangeCount: got %d, want 2", g.ChangeCount())
+	}
+
+	g.ResetChangeCount()
+	if g.ChangeCount() != 0 {
+		t.Errorf("after Reset ChangeCount: got %d, want 0", g.ChangeCount())
+	}
+}
+
+// TestComputeBetweenness_TheoreticalNormalization verifies that betweenness uses
+// graph-theoretic normalization (n-1)*(n-2) instead of max-value normalization.
+func TestComputeBetweenness_TheoreticalNormalization(t *testing.T) {
+	g := New()
+	// Linear chain A→B→C: B is on all shortest paths from A to C.
+	// With n=3, theoretical max = (3-1)*(3-2) = 2.
+	// gonum Betweenness for directed graphs: B should have betweenness = 1
+	// (one shortest path from A to C goes through B).
+	// Normalized: 1/2 = 0.5
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+	})
+
+	btwn := g.ComputeBetweenness()
+	if btwn == nil {
+		t.Fatal("ComputeBetweenness returned nil")
+	}
+
+	// B should have exactly 0.5 with theoretical normalization (1 / (2*1) = 0.5)
+	if btwn["node-b"] != 0.5 {
+		t.Errorf("node-b betweenness: got %f, want 0.5", btwn["node-b"])
+	}
+
+	// A and C are endpoints, should have 0
+	if btwn["node-a"] != 0 {
+		t.Errorf("node-a betweenness: got %f, want 0", btwn["node-a"])
+	}
+	if btwn["node-c"] != 0 {
+		t.Errorf("node-c betweenness: got %f, want 0", btwn["node-c"])
+	}
+}

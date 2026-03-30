@@ -387,7 +387,13 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 	}
 }
 
-// handleFileEvents processes incremental file change events from the watcher
+// betweennessRefreshThreshold is the number of incremental graph changes that
+// trigger an async betweenness centrality recomputation.
+const betweennessRefreshThreshold = 20
+
+// handleFileEvents processes incremental file change events from the watcher.
+// Uses incremental graph updates (H3) instead of full rebuilds, and triggers
+// async betweenness recomputation after a threshold of changes (H4).
 func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) {
 	for event := range w.Events() {
 		absPath := filepath.Join(cfg.RepoRoot, event.Path)
@@ -395,21 +401,39 @@ func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Sto
 		switch event.Action {
 		case types.FileEventDeleted:
 			log.Printf("File deleted: %s", event.Path)
+
+			// Get node IDs for this file BEFORE deleting from storage
+			oldNodeIDs, err := store.GetNodeIDsByFile(event.Path)
+			if err != nil {
+				log.Printf("Failed to get node IDs for %s: %v", event.Path, err)
+			}
+
 			if err := store.DeleteByFile(event.Path); err != nil {
 				log.Printf("Failed to delete file data: %v", err)
 			}
-			// Rebuild graph after deletion
-			edges, err := store.GetAllEdges()
-			if err == nil {
-				graphEngine.BuildFromEdges(edges)
+
+			// Incremental graph update: remove old nodes instead of full rebuild
+			for _, nodeID := range oldNodeIDs {
+				graphEngine.RemoveNode(nodeID)
 			}
 
 		case types.FileEventCreated, types.FileEventModified:
 			log.Printf("File changed: %s", event.Path)
 
+			// Get old node IDs for this file BEFORE deleting from storage
+			oldNodeIDs, err := store.GetNodeIDsByFile(event.Path)
+			if err != nil {
+				log.Printf("Failed to get old node IDs for %s: %v", event.Path, err)
+			}
+
 			// Delete old data for this file
 			if err := store.DeleteByFile(event.Path); err != nil {
 				log.Printf("Failed to delete stale data for %s: %v", event.Path, err)
+			}
+
+			// Remove old nodes from graph incrementally
+			for _, nodeID := range oldNodeIDs {
+				graphEngine.RemoveNode(nodeID)
 			}
 
 			// Re-parse the file
@@ -441,11 +465,34 @@ func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Sto
 				store.UpsertEmbedding(node.ID, vec)
 			}
 
-			// Rebuild graph
-			edges, err := store.GetAllEdges()
-			if err == nil {
-				graphEngine.BuildFromEdges(edges)
+			// Add new edges to graph incrementally (nodes are created automatically
+			// by AddEdge via ensureNode; isolated nodes without edges don't affect
+			// graph signals like PPR/betweenness/in-degree)
+			for _, edge := range result.Edges {
+				graphEngine.AddEdge(edge)
 			}
+		}
+
+		// H4: Trigger async betweenness recomputation after threshold changes
+		if graphEngine.ChangeCount() >= betweennessRefreshThreshold {
+			graphEngine.ResetChangeCount()
+			go func() {
+				betweenness := graphEngine.ComputeBetweenness()
+				if len(betweenness) > 0 {
+					var scores []types.NodeScore
+					for nodeID, btwn := range betweenness {
+						scores = append(scores, types.NodeScore{
+							NodeID:      nodeID,
+							Betweenness: btwn,
+						})
+					}
+					if err := store.UpsertNodeScores(scores); err != nil {
+						log.Printf("Failed to update betweenness scores: %v", err)
+					} else {
+						log.Printf("Async betweenness recomputation complete (%d nodes)", len(scores))
+					}
+				}
+			}()
 		}
 	}
 }

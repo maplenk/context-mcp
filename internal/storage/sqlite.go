@@ -404,6 +404,29 @@ func (s *Store) GetAllNodeIDs() ([]string, error) {
 	return ids, rows.Err()
 }
 
+// GetNodeIDsByFile retrieves all node IDs for a given file path.
+// Used for incremental graph updates: remove old nodes before adding new ones.
+func (s *Store) GetNodeIDsByFile(filePath string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT id FROM nodes WHERE file_path = ?`, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // SearchLexical performs FTS5 BM25 lexical search
 func (s *Store) SearchLexical(query string, limit int) ([]types.SearchResult, error) {
 	s.mu.RLock()
