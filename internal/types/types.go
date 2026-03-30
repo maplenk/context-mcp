@@ -101,3 +101,10 @@ type SearchResult struct {
 	Node  ASTNode `json:"node"`
 	Score float64 `json:"score"`
 }
+
+// Community represents a group of tightly coupled code symbols detected by Louvain
+type Community struct {
+	ID         int      `json:"id"`
+	NodeIDs    []string `json:"node_ids"`
+	Modularity float64  `json:"modularity"`
+}
