@@ -27,6 +27,7 @@ type Watcher struct {
 	// debounce state
 	mu      sync.Mutex
 	pending map[string]*debounceEntry
+	stopped bool
 }
 
 type debounceEntry struct {
@@ -110,8 +111,9 @@ func (w *Watcher) Stop() error {
 	close(w.stopCh)
 	w.wg.Wait()
 
-	// Cancel any pending debounce timers
+	// Set stopped flag and cancel pending timers
 	w.mu.Lock()
+	w.stopped = true
 	for _, entry := range w.pending {
 		entry.timer.Stop()
 	}
@@ -265,9 +267,10 @@ func (w *Watcher) flushEvent(path string) {
 	if exists {
 		delete(w.pending, path)
 	}
+	stopped := w.stopped
 	w.mu.Unlock()
 
-	if exists {
+	if exists && !stopped {
 		w.events <- types.FileEvent{
 			Path:   path,
 			Action: entry.action,

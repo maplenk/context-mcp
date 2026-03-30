@@ -7,11 +7,14 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/naman/qb-context/internal/types"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+const embeddingDim = 384
 
 // Store manages all SQLite database operations
 type Store struct {
@@ -58,27 +61,44 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// UpsertNode inserts or replaces a node in the database
+// UpsertNode inserts or updates a node in the database.
+// Uses ON CONFLICT to avoid DELETE+INSERT which would cascade-delete edges.
 func (s *Store) UpsertNode(node types.ASTNode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			file_path = excluded.file_path,
+			symbol_name = excluded.symbol_name,
+			node_type = excluded.node_type,
+			start_byte = excluded.start_byte,
+			end_byte = excluded.end_byte,
+			content_sum = excluded.content_sum`,
 		node.ID, node.FilePath, node.SymbolName, uint8(node.NodeType),
 		node.StartByte, node.EndByte, node.ContentSum,
 	)
+	if err != nil {
+		return err
+	}
+
+	// Update FTS index (delete old entry then insert new)
+	s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID)
+	_, err = s.db.Exec(
+		"INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
+		node.SymbolName, node.ContentSum, node.ID)
 	return err
 }
 
-// UpsertEdge inserts or replaces an edge in the database
+// UpsertEdge inserts or ignores an edge in the database
 func (s *Store) UpsertEdge(edge types.ASTEdge) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO edges (source_id, target_id, edge_type)
+		INSERT OR IGNORE INTO edges (source_id, target_id, edge_type)
 		VALUES (?, ?, ?)`,
 		edge.SourceID, edge.TargetID, uint8(edge.EdgeType),
 	)
@@ -97,12 +117,25 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT OR REPLACE INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		INSERT INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			file_path = excluded.file_path,
+			symbol_name = excluded.symbol_name,
+			node_type = excluded.node_type,
+			start_byte = excluded.start_byte,
+			end_byte = excluded.end_byte,
+			content_sum = excluded.content_sum`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
+
+	ftsStmt, err := tx.Prepare("INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer ftsStmt.Close()
 
 	for _, node := range nodes {
 		_, err := stmt.Exec(node.ID, node.FilePath, node.SymbolName, uint8(node.NodeType),
@@ -110,6 +143,8 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 		if err != nil {
 			return err
 		}
+		tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID)
+		ftsStmt.Exec(node.SymbolName, node.ContentSum, node.ID)
 	}
 
 	return tx.Commit()
@@ -127,7 +162,7 @@ func (s *Store) UpsertEdges(edges []types.ASTEdge) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT OR REPLACE INTO edges (source_id, target_id, edge_type)
+		INSERT OR IGNORE INTO edges (source_id, target_id, edge_type)
 		VALUES (?, ?, ?)`)
 	if err != nil {
 		return err
@@ -163,9 +198,12 @@ func (s *Store) DeleteByFile(filePath string) error {
 		return err
 	}
 
-	// Delete embeddings for nodes from this file
-	_, err = tx.Exec(`
+	// Delete embeddings (ignore error if vec0 table doesn't exist)
+	_, _ = tx.Exec(`
 		DELETE FROM node_embeddings WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
+
+	// Delete FTS entries for nodes from this file
+	_, err = tx.Exec("DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)", filePath)
 	if err != nil {
 		return err
 	}
@@ -179,15 +217,41 @@ func (s *Store) DeleteByFile(filePath string) error {
 	return tx.Commit()
 }
 
-// UpsertEmbedding stores a vector embedding for a node
+// UpsertEmbedding stores a vector embedding for a node.
+// The embedding must be exactly 384 dimensions.
 func (s *Store) UpsertEmbedding(nodeID string, embedding []float32) error {
+	if len(embedding) != embeddingDim {
+		return fmt.Errorf("embedding dimension mismatch: got %d, want %d", len(embedding), embeddingDim)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Delete then insert for vec0 virtual table compatibility
+	_, _ = s.db.Exec(`DELETE FROM node_embeddings WHERE node_id = ?`, nodeID)
 	blob := serializeFloat32(embedding)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO node_embeddings (node_id, embedding)
+		INSERT INTO node_embeddings (node_id, embedding)
 		VALUES (?, ?)`, nodeID, blob)
+	return err
+}
+
+// UpdateFTS updates the FTS index for a node
+func (s *Store) UpdateFTS(node types.ASTNode) error {
+	// Delete old entry if exists
+	s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID)
+	// Insert new entry
+	_, err := s.db.Exec(
+		"INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
+		node.SymbolName, node.ContentSum, node.ID)
+	return err
+}
+
+// DeleteFTSByFile removes FTS entries for all nodes in a file
+func (s *Store) DeleteFTSByFile(filePath string) error {
+	_, err := s.db.Exec(
+		"DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)",
+		filePath)
 	return err
 }
 
@@ -336,7 +400,7 @@ func (s *Store) SearchLexical(query string, limit int) ([]types.SearchResult, er
 		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
 		       bm25(nodes_fts) as score
 		FROM nodes_fts fts
-		JOIN nodes n ON n.id = fts.rowid_ref
+		JOIN nodes n ON n.id = fts.node_id
 		WHERE nodes_fts MATCH ?
 		ORDER BY score
 		LIMIT ?`, query, limit)
@@ -397,10 +461,17 @@ func (s *Store) SearchSemantic(queryEmbedding []float32, limit int) ([]types.Sea
 	return results, rows.Err()
 }
 
-// RawQuery executes a read-only SQL query and returns results as maps
+// RawQuery executes a read-only SQL query and returns results as maps.
+// Only SELECT statements are allowed to prevent SQL injection.
 func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Enforce read-only: only allow SELECT statements
+	trimmed := strings.TrimSpace(strings.ToUpper(query))
+	if !strings.HasPrefix(trimmed, "SELECT") {
+		return nil, fmt.Errorf("only SELECT queries are allowed, got: %s", strings.SplitN(trimmed, " ", 2)[0])
+	}
 
 	rows, err := s.db.Query(query)
 	if err != nil {

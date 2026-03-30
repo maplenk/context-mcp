@@ -1,6 +1,9 @@
 package storage
 
-import "fmt"
+import (
+	"fmt"
+	"log"
+)
 
 // runMigrations creates all required tables and indexes
 func (s *Store) runMigrations() error {
@@ -37,28 +40,14 @@ func (s *Store) runMigrations() error {
 		`CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)`,
 
 		// FTS5 virtual table for lexical search (BM25)
-		// We use a content-sync approach: external content pointing to nodes table
+		// Regular FTS5 table with content stored; FTS updates are managed in Go code
+		// during UpsertNode and DeleteByFile to avoid content-sync trigger issues.
 		`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
 			symbol_name,
 			content_sum,
-			rowid_ref UNINDEXED,
-			content='',
+			node_id UNINDEXED,
 			tokenize='porter unicode61'
 		)`,
-
-		// Triggers to keep FTS5 in sync with nodes table
-		`CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
-			INSERT INTO nodes_fts(symbol_name, content_sum, rowid_ref) VALUES (new.symbol_name, new.content_sum, new.id);
-		END`,
-
-		`CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
-			INSERT INTO nodes_fts(nodes_fts, symbol_name, content_sum, rowid_ref) VALUES('delete', old.symbol_name, old.content_sum, old.id);
-		END`,
-
-		`CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
-			INSERT INTO nodes_fts(nodes_fts, symbol_name, content_sum, rowid_ref) VALUES('delete', old.symbol_name, old.content_sum, old.id);
-			INSERT INTO nodes_fts(symbol_name, content_sum, rowid_ref) VALUES (new.symbol_name, new.content_sum, new.id);
-		END`,
 	}
 
 	for i, m := range migrations {
@@ -75,7 +64,7 @@ func (s *Store) runMigrations() error {
 	if err != nil {
 		// sqlite-vec extension not available — log but don't fail
 		// Semantic search will be unavailable
-		fmt.Printf("Warning: sqlite-vec not available, semantic search disabled: %v\n", err)
+		log.Printf("Warning: sqlite-vec not available, semantic search disabled: %v", err)
 	}
 
 	return nil

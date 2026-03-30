@@ -29,6 +29,15 @@ type ParseResult struct {
 
 // ParseFile parses a source file and extracts AST nodes and edges
 func (p *Parser) ParseFile(filePath string, repoRoot string) (*ParseResult, error) {
+	// Check file size to prevent memory bloat (skip files > 5MB)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat file %s: %w", filePath, err)
+	}
+	if info.Size() > 5*1024*1024 {
+		return nil, fmt.Errorf("file %s too large (%d bytes), skipping", filePath, info.Size())
+	}
+
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("reading file %s: %w", filePath, err)
@@ -116,7 +125,7 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 
 			// Extract function calls within the body
 			if decl.Body != nil {
-				calls := extractGoCalls(decl.Body, relPath)
+				calls := extractGoCalls(decl.Body)
 				for _, call := range calls {
 					edge := types.ASTEdge{
 						SourceID: node.ID,
@@ -192,7 +201,7 @@ func extractReceiverType(recv *ast.FieldList) string {
 }
 
 // extractGoCalls finds function/method calls within a Go AST block
-func extractGoCalls(body *ast.BlockStmt, filePath string) []string {
+func extractGoCalls(body *ast.BlockStmt) []string {
 	var calls []string
 	ast.Inspect(body, func(n ast.Node) bool {
 		callExpr, ok := n.(*ast.CallExpr)
@@ -217,11 +226,10 @@ func extractGoCalls(body *ast.BlockStmt, filePath string) []string {
 
 // JavaScript/TypeScript regex patterns
 var (
-	jsFuncDeclRe   = regexp.MustCompile(`(?m)^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(`)
-	jsArrowFuncRe  = regexp.MustCompile(`(?m)^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(`)
-	jsClassDeclRe  = regexp.MustCompile(`(?m)^(?:export\s+)?class\s+(\w+)`)
-	jsCallExprRe   = regexp.MustCompile(`(?:^|[^.\w])(\w+)\s*\(`)
-	jsMemberCallRe = regexp.MustCompile(`(\w+)\.(\w+)\s*\(`)
+	jsFuncDeclRe  = regexp.MustCompile(`(?m)^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(`)
+	jsArrowFuncRe = regexp.MustCompile(`(?m)^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(`)
+	jsClassDeclRe = regexp.MustCompile(`(?m)^(?:export\s+)?class\s+(\w+)`)
+	jsCallExprRe  = regexp.MustCompile(`(?:^|[^.\w])(\w+)\s*\(`)
 )
 
 // parseJavaScript uses regex-based extraction for JS/TS files
@@ -318,13 +326,9 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	text := string(content)
 	lines := strings.Split(text, "\n")
 
-	// Track current class for method context
-	var currentClassName string
-
 	// Extract classes
 	for _, match := range phpClassDeclRe.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
-		currentClassName = name
 		startByte := uint32(match[0])
 		endByte := findBlockEnd(content, match[0])
 		contentSum := buildContentSum(lines, match[0], name)
@@ -340,13 +344,20 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		})
 	}
 
-	// Extract methods within classes
+	// Extract methods — determine which class they belong to by byte position
 	for _, match := range phpMethodDeclRe.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
+		methodStart := uint32(match[0])
+
+		// Find the enclosing class by checking byte ranges
 		qualifiedName := name
-		if currentClassName != "" {
-			qualifiedName = currentClassName + "." + name
+		for _, node := range result.Nodes {
+			if node.NodeType == types.NodeTypeClass && methodStart >= node.StartByte && methodStart < node.EndByte {
+				qualifiedName = node.SymbolName + "." + name
+				break
+			}
 		}
+
 		startByte := uint32(match[0])
 		endByte := findBlockEnd(content, match[0])
 		contentSum := buildContentSum(lines, match[0], qualifiedName)
@@ -445,25 +456,25 @@ func buildContentSum(lines []string, byteOffset int, name string) string {
 	return name
 }
 
-// isJSKeyword returns true if the name is a common JS keyword/builtin
-func isJSKeyword(name string) bool {
-	keywords := map[string]bool{
-		"if": true, "else": true, "for": true, "while": true, "do": true,
-		"switch": true, "case": true, "break": true, "continue": true,
-		"return": true, "throw": true, "try": true, "catch": true, "finally": true,
-		"new": true, "delete": true, "typeof": true, "void": true, "instanceof": true,
-		"var": true, "let": true, "const": true, "function": true, "class": true,
-		"import": true, "export": true, "default": true, "from": true,
-		"async": true, "await": true, "yield": true,
-		"true": true, "false": true, "null": true, "undefined": true,
-		"this": true, "super": true, "console": true, "require": true,
-		"setTimeout": true, "setInterval": true, "Promise": true,
-		"Array": true, "Object": true, "String": true, "Number": true,
-		"Math": true, "JSON": true, "Date": true, "Error": true,
-		"Map": true, "Set": true, "RegExp": true,
-	}
-	return keywords[name]
+// jsKeywords is the set of common JS keywords and builtins used to filter call edges.
+var jsKeywords = map[string]bool{
+	"if": true, "else": true, "for": true, "while": true, "do": true,
+	"switch": true, "case": true, "break": true, "continue": true,
+	"return": true, "throw": true, "try": true, "catch": true, "finally": true,
+	"new": true, "delete": true, "typeof": true, "void": true, "instanceof": true,
+	"var": true, "let": true, "const": true, "function": true, "class": true,
+	"import": true, "export": true, "default": true, "from": true,
+	"async": true, "await": true, "yield": true,
+	"true": true, "false": true, "null": true, "undefined": true,
+	"this": true, "super": true, "console": true, "require": true,
+	"setTimeout": true, "setInterval": true, "Promise": true,
+	"Array": true, "Object": true, "String": true, "Number": true,
+	"Math": true, "JSON": true, "Date": true, "Error": true,
+	"Map": true, "Set": true, "RegExp": true,
 }
 
-// Ensure jsMemberCallRe is used to avoid unused variable compile error
-var _ = jsMemberCallRe
+// isJSKeyword returns true if the name is a common JS keyword/builtin
+func isJSKeyword(name string) bool {
+	return jsKeywords[name]
+}
+
