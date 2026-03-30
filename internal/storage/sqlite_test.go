@@ -448,3 +448,78 @@ func TestSearchLexical_RespectsLimit(t *testing.T) {
 		t.Errorf("SearchLexical did not respect limit 2: got %d results", len(results))
 	}
 }
+
+func TestUpsertProjectSummary_Roundtrip(t *testing.T) {
+	s := newTestStore(t)
+
+	summary := types.ProjectSummary{
+		Project:    "ARCHITECTURE.md",
+		Summary:    "This project uses SQLite for storage and gonum for graph analysis.",
+		SourceHash: "abc123",
+	}
+	if err := s.UpsertProjectSummary(summary); err != nil {
+		t.Fatalf("UpsertProjectSummary: %v", err)
+	}
+
+	got, err := s.GetProjectSummary("ARCHITECTURE.md")
+	if err != nil {
+		t.Fatalf("GetProjectSummary: %v", err)
+	}
+	if got.Summary != summary.Summary {
+		t.Errorf("Summary: got %q, want %q", got.Summary, summary.Summary)
+	}
+	if got.SourceHash != summary.SourceHash {
+		t.Errorf("SourceHash: got %q, want %q", got.SourceHash, summary.SourceHash)
+	}
+}
+
+func TestUpsertProjectSummary_UpdateExisting(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert initial
+	if err := s.UpsertProjectSummary(types.ProjectSummary{
+		Project: "ARCHITECTURE.md", Summary: "v1", SourceHash: "hash1",
+	}); err != nil {
+		t.Fatalf("UpsertProjectSummary (initial): %v", err)
+	}
+
+	// Update
+	if err := s.UpsertProjectSummary(types.ProjectSummary{
+		Project: "ARCHITECTURE.md", Summary: "v2", SourceHash: "hash2",
+	}); err != nil {
+		t.Fatalf("UpsertProjectSummary (update): %v", err)
+	}
+
+	got, err := s.GetProjectSummary("ARCHITECTURE.md")
+	if err != nil {
+		t.Fatalf("GetProjectSummary after update: %v", err)
+	}
+	if got.Summary != "v2" {
+		t.Errorf("Summary not updated: got %q, want %q", got.Summary, "v2")
+	}
+	if got.SourceHash != "hash2" {
+		t.Errorf("SourceHash not updated: got %q, want %q", got.SourceHash, "hash2")
+	}
+}
+
+func TestGetAllProjectSummaries(t *testing.T) {
+	s := newTestStore(t)
+
+	summaries := []types.ProjectSummary{
+		{Project: "ARCHITECTURE.md", Summary: "arch doc", SourceHash: "h1"},
+		{Project: "adr/001-use-sqlite.md", Summary: "use sqlite", SourceHash: "h2"},
+	}
+	for _, sum := range summaries {
+		if err := s.UpsertProjectSummary(sum); err != nil {
+			t.Fatalf("UpsertProjectSummary: %v", err)
+		}
+	}
+
+	result, err := s.GetAllProjectSummaries()
+	if err != nil {
+		t.Fatalf("GetAllProjectSummaries: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 summaries, got %d", len(result))
+	}
+}

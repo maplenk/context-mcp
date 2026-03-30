@@ -48,6 +48,15 @@ func (s *Store) runMigrations() error {
 			node_id UNINDEXED,
 			tokenize='porter unicode61'
 		)`,
+
+		// Project summaries table for ADR / architecture documents
+		`CREATE TABLE IF NOT EXISTS project_summaries (
+			project TEXT PRIMARY KEY,
+			summary TEXT NOT NULL DEFAULT '',
+			source_hash TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 
 	for i, m := range migrations {

@@ -88,6 +88,20 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 			if err != nil {
 				return nil, fmt.Errorf("search failed: %w", err)
 			}
+
+			// Load architecture context if available
+			summaries, _ := deps.Store.GetAllProjectSummaries()
+			if len(summaries) > 0 {
+				var adrTexts []string
+				for _, s := range summaries {
+					adrTexts = append(adrTexts, fmt.Sprintf("[%s] %s", s.Project, s.Summary))
+				}
+				return map[string]interface{}{
+					"results":              results,
+					"architecture_context": strings.Join(adrTexts, "\n\n"),
+				}, nil
+			}
+
 			return results, nil
 		},
 	)

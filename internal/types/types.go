@@ -101,3 +101,10 @@ type SearchResult struct {
 	Node  ASTNode `json:"node"`
 	Score float64 `json:"score"`
 }
+
+// ProjectSummary represents an architecture decision record or project summary
+type ProjectSummary struct {
+	Project    string `json:"project"`
+	Summary    string `json:"summary"`
+	SourceHash string `json:"source_hash"`
+}
