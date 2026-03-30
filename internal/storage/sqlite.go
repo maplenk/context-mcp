@@ -658,6 +658,104 @@ func (s *Store) GetAllProjectSummaries() ([]types.ProjectSummary, error) {
 	return summaries, rows.Err()
 }
 
+// GetAllFilePaths returns all unique file paths from the nodes table
+func (s *Store) GetAllFilePaths() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT DISTINCT file_path FROM nodes ORDER BY file_path`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+// SearchNodesByName searches for nodes whose symbol_name contains the given pattern (case-insensitive)
+func (s *Store) SearchNodesByName(pattern string) ([]types.ASTNode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum
+		FROM nodes WHERE symbol_name LIKE ? COLLATE NOCASE`, "%"+pattern+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var nodes []types.ASTNode
+	for rows.Next() {
+		var node types.ASTNode
+		var nt uint8
+		if err := rows.Scan(&node.ID, &node.FilePath, &node.SymbolName, &nt,
+			&node.StartByte, &node.EndByte, &node.ContentSum); err != nil {
+			return nil, err
+		}
+		node.NodeType = types.NodeType(nt)
+		nodes = append(nodes, node)
+	}
+	return nodes, rows.Err()
+}
+
+// GetNodesByFile returns all nodes for a given file path
+func (s *Store) GetNodesByFile(filePath string) ([]types.ASTNode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum
+		FROM nodes WHERE file_path = ?`, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var nodes []types.ASTNode
+	for rows.Next() {
+		var node types.ASTNode
+		var nt uint8
+		if err := rows.Scan(&node.ID, &node.FilePath, &node.SymbolName, &nt,
+			&node.StartByte, &node.EndByte, &node.ContentSum); err != nil {
+			return nil, err
+		}
+		node.NodeType = types.NodeType(nt)
+		nodes = append(nodes, node)
+	}
+	return nodes, rows.Err()
+}
+
+// GetAllNodeScores returns all node scores as a slice
+func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT node_id, pagerank, betweenness FROM node_scores`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var scores []types.NodeScore
+	for rows.Next() {
+		var score types.NodeScore
+		if err := rows.Scan(&score.NodeID, &score.PageRank, &score.Betweenness); err != nil {
+			return nil, err
+		}
+		scores = append(scores, score)
+	}
+	return scores, rows.Err()
+}
+
 // serializeFloat32 converts a float32 slice to a little-endian byte slice for sqlite-vec
 func serializeFloat32(v []float32) []byte {
 	buf := make([]byte, len(v)*4)
