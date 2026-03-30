@@ -1,7 +1,10 @@
 package search
 
 import (
+	"regexp"
 	"sort"
+	"strings"
+	"unicode"
 
 	"github.com/naman/qb-context/internal/embedding"
 	"github.com/naman/qb-context/internal/graph"
@@ -9,9 +12,39 @@ import (
 	"github.com/naman/qb-context/internal/types"
 )
 
-const rrfK = 60 // RRF constant
+// Composite scoring weights
+const (
+	weightPPR         = 0.35
+	weightBM25        = 0.25
+	weightBetweenness = 0.15
+	weightInDegree    = 0.10
+	weightSemantic    = 0.15
 
-// HybridSearch combines lexical, semantic, and structural search
+	maxPerFile = 3 // max results per unique file_path
+)
+
+// stopWords are common words filtered from search queries
+var stopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "is": true, "are": true,
+	"was": true, "were": true, "be": true, "been": true, "being": true,
+	"have": true, "has": true, "had": true, "do": true, "does": true,
+	"did": true, "will": true, "would": true, "could": true, "should": true,
+	"may": true, "might": true, "shall": true, "can": true,
+	"and": true, "but": true, "or": true, "nor": true, "not": true,
+	"to": true, "of": true, "in": true, "for": true, "on": true,
+	"at": true, "by": true, "with": true, "from": true, "as": true,
+	"into": true, "about": true, "between": true, "through": true,
+	"this": true, "that": true, "these": true, "those": true,
+	"it": true, "its": true, "if": true, "then": true, "else": true,
+	"when": true, "where": true, "how": true, "what": true, "which": true,
+	"who": true, "whom": true, "why": true,
+}
+
+// camelCaseRe splits CamelCase identifiers into words.
+// Matches: sequences of uppercase+lowercase (e.g. "Read"), all-lowercase runs, or all-uppercase runs.
+var camelCaseRe = regexp.MustCompile(`[A-Z][a-z]*|[a-z]+|[A-Z]+`)
+
+// HybridSearch combines lexical, semantic, and structural search with composite scoring
 type HybridSearch struct {
 	store    *storage.Store
 	embedder embedding.Embedder
@@ -27,94 +60,263 @@ func New(store *storage.Store, embedder embedding.Embedder, graph *graph.GraphEn
 	}
 }
 
-// Search performs hybrid search combining lexical FTS5, semantic KNN, and PageRank
+// Search performs multi-signal composite search
 func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []string) ([]types.SearchResult, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 
-	// Fetch more candidates than needed for fusion
-	candidateLimit := limit * 3
-	if candidateLimit < 20 {
-		candidateLimit = 20
+	candidateLimit := limit * 5
+	if candidateLimit < 30 {
+		candidateLimit = 30
 	}
+
+	// Enhance query for FTS5
+	ftsQuery := buildFTSQuery(query)
 
 	// Path 1: Lexical search via FTS5 BM25
-	lexicalResults, err := h.store.SearchLexical(query, candidateLimit)
+	lexicalResults, err := h.store.SearchLexical(ftsQuery, candidateLimit)
 	if err != nil {
-		// FTS5 query syntax errors are non-fatal; return empty lexical results
-		lexicalResults = nil
+		// FTS5 query syntax errors — try original query as fallback
+		lexicalResults, err = h.store.SearchLexical(query, candidateLimit)
+		if err != nil {
+			lexicalResults = nil
+		}
 	}
 
-	// Path 2: Semantic search via KNN (if embedder is available)
+	// Path 2: Semantic search via KNN
 	var semanticResults []types.SearchResult
 	if h.embedder != nil {
 		queryVec, err := h.embedder.Embed(query)
 		if err == nil {
 			semanticResults, err = h.store.SearchSemantic(queryVec, candidateLimit)
 			if err != nil {
-				// Semantic search failure is non-fatal
 				semanticResults = nil
 			}
 		}
 	}
 
-	// Reciprocal Rank Fusion
-	fused := reciprocalRankFusion(lexicalResults, semanticResults)
+	// Collect all candidate nodes
+	candidates := collectCandidates(lexicalResults, semanticResults)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
 
-	// Path 3: PageRank boost (if active files provided)
-	if h.graph != nil && len(activeFileNodeIDs) > 0 {
-		ranks := h.graph.PersonalizedPageRank(activeFileNodeIDs)
-		if ranks != nil {
-			applyPageRankBoost(fused, ranks)
+	// Normalize BM25 scores to [0,1]
+	bm25Scores := normalizeScores(lexicalResults)
+
+	// Normalize semantic scores to [0,1]
+	semanticScores := normalizeScores(semanticResults)
+
+	// Query-time PPR seeded from top 10 FTS results
+	var pprScores map[string]float64
+	if h.graph != nil && len(lexicalResults) > 0 {
+		seedCount := 10
+		if seedCount > len(lexicalResults) {
+			seedCount = len(lexicalResults)
 		}
-	}
-
-	// Sort by final score descending
-	sort.Slice(fused, func(i, j int) bool {
-		return fused[i].Score > fused[j].Score
-	})
-
-	// Trim to limit
-	if len(fused) > limit {
-		fused = fused[:limit]
-	}
-
-	return fused, nil
-}
-
-// reciprocalRankFusion merges two ranked result lists using RRF
-// Score = sum of 1/(k + rank) across all lists where the item appears
-func reciprocalRankFusion(lists ...[]types.SearchResult) []types.SearchResult {
-	scores := make(map[string]float64)      // nodeID -> fused score
-	nodes := make(map[string]types.ASTNode) // nodeID -> node data
-
-	for _, list := range lists {
-		for rank, result := range list {
-			id := result.Node.ID
-			scores[id] += 1.0 / float64(rrfK+rank+1) // rank is 0-indexed, RRF uses 1-indexed
-			if _, exists := nodes[id]; !exists {
-				nodes[id] = result.Node
-			}
+		seeds := make([]string, seedCount)
+		for i := 0; i < seedCount; i++ {
+			seeds[i] = lexicalResults[i].Node.ID
 		}
+		// Also include active file nodes as seeds
+		seeds = append(seeds, activeFileNodeIDs...)
+		raw := h.graph.PersonalizedPageRank(seeds)
+		pprScores = normalizeMap(raw)
 	}
 
-	results := make([]types.SearchResult, 0, len(scores))
-	for id, score := range scores {
+	// Load betweenness scores (already [0,1] from index time)
+	betweennessScores, _ := h.store.GetAllBetweenness()
+
+	// Compute in-degree authority
+	var inDegreeScores map[string]float64
+	if h.graph != nil {
+		inDegreeScores = h.graph.ComputeInDegree()
+	}
+
+	// Compute composite scores
+	var results []types.SearchResult
+	for nodeID, node := range candidates {
+		bm25 := bm25Scores[nodeID]
+		semantic := semanticScores[nodeID]
+		ppr := safeGet(pprScores, nodeID)
+		betweenness := safeGet(betweennessScores, nodeID)
+		inDegree := safeGet(inDegreeScores, nodeID)
+
+		composite := weightPPR*ppr +
+			weightBM25*bm25 +
+			weightBetweenness*betweenness +
+			weightInDegree*inDegree +
+			weightSemantic*semantic
+
 		results = append(results, types.SearchResult{
-			Node:  nodes[id],
-			Score: score,
+			Node:  node,
+			Score: composite,
 		})
 	}
 
-	return results
+	// Sort by composite score descending
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	// Apply per-file cap
+	results = applyPerFileCap(results, maxPerFile)
+
+	// Trim to limit
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
 }
 
-// applyPageRankBoost multiplies each result's score by (1 + pagerank_weight)
-func applyPageRankBoost(results []types.SearchResult, ranks map[string]float64) {
-	for i := range results {
-		if rank, ok := ranks[results[i].Node.ID]; ok {
-			results[i].Score *= (1.0 + rank*100) // Scale PageRank up since values are typically very small
+// buildFTSQuery enhances a query for FTS5 with CamelCase splitting, prefix matching, and stop word filtering
+func buildFTSQuery(query string) string {
+	// Split CamelCase tokens
+	words := strings.Fields(query)
+	var expanded []string
+
+	for _, word := range words {
+		// Check if it's CamelCase
+		if isCamelCase(word) {
+			parts := camelCaseRe.FindAllString(word, -1)
+			if len(parts) > 1 {
+				// Add both the original and split parts
+				expanded = append(expanded, word)
+				for _, p := range parts {
+					lower := strings.ToLower(p)
+					if !stopWords[lower] {
+						expanded = append(expanded, p)
+					}
+				}
+				continue
+			}
+		}
+
+		lower := strings.ToLower(word)
+		if stopWords[lower] {
+			continue
+		}
+		expanded = append(expanded, word)
+	}
+
+	if len(expanded) == 0 {
+		return query // fallback to original if everything was filtered
+	}
+
+	// Add prefix matching with *
+	var terms []string
+	for _, term := range expanded {
+		// Only add prefix if term is at least 3 chars
+		if len(term) >= 3 {
+			terms = append(terms, term+"*")
+		} else {
+			terms = append(terms, term)
 		}
 	}
+
+	return strings.Join(terms, " OR ")
+}
+
+// isCamelCase checks if a string contains CamelCase transitions
+func isCamelCase(s string) bool {
+	hasLower := false
+	hasUpper := false
+	for _, r := range s {
+		if unicode.IsLower(r) {
+			hasLower = true
+		}
+		if unicode.IsUpper(r) {
+			hasUpper = true
+		}
+	}
+	return hasLower && hasUpper
+}
+
+// collectCandidates merges all result lists into a single map of unique nodes
+func collectCandidates(lists ...[]types.SearchResult) map[string]types.ASTNode {
+	candidates := make(map[string]types.ASTNode)
+	for _, list := range lists {
+		for _, r := range list {
+			if _, exists := candidates[r.Node.ID]; !exists {
+				candidates[r.Node.ID] = r.Node
+			}
+		}
+	}
+	return candidates
+}
+
+// normalizeScores extracts scores from results and normalizes to [0,1]
+func normalizeScores(results []types.SearchResult) map[string]float64 {
+	if len(results) == 0 {
+		return nil
+	}
+
+	scores := make(map[string]float64)
+	var maxScore float64
+	for _, r := range results {
+		scores[r.Node.ID] = r.Score
+		if r.Score > maxScore {
+			maxScore = r.Score
+		}
+	}
+
+	if maxScore <= 0 {
+		return scores
+	}
+
+	normalized := make(map[string]float64)
+	for id, score := range scores {
+		normalized[id] = score / maxScore
+	}
+	return normalized
+}
+
+// normalizeMap normalizes a map of scores to [0,1]
+func normalizeMap(m map[string]float64) map[string]float64 {
+	if len(m) == 0 {
+		return nil
+	}
+
+	var maxVal float64
+	for _, v := range m {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+
+	if maxVal <= 0 {
+		return m
+	}
+
+	result := make(map[string]float64)
+	for k, v := range m {
+		result[k] = v / maxVal
+	}
+	return result
+}
+
+// safeGet returns the value from a map or 0 if nil or missing
+func safeGet(m map[string]float64, key string) float64 {
+	if m == nil {
+		return 0
+	}
+	return m[key]
+}
+
+// applyPerFileCap limits results to maxPerFile entries per unique file_path
+func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
+	fileCounts := make(map[string]int)
+	var capped []types.SearchResult
+
+	for _, r := range results {
+		count := fileCounts[r.Node.FilePath]
+		if count < maxPerFile {
+			capped = append(capped, r)
+			fileCounts[r.Node.FilePath] = count + 1
+		}
+	}
+
+	return capped
 }

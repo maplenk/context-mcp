@@ -361,6 +361,38 @@ func TestDetectCommunities_EmptyGraph(t *testing.T) {
 	}
 }
 
+func TestComputeInDegree_DAG(t *testing.T) {
+	g := New()
+	// A→D, B→D, C→D: D has in-degree 3, others have less
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+	})
+
+	inDeg := g.ComputeInDegree()
+	if inDeg == nil {
+		t.Fatal("ComputeInDegree returned nil")
+	}
+
+	// D has the most incoming edges, so it should be normalized to 1.0
+	if inDeg["node-d"] != 1.0 {
+		t.Errorf("node-d in-degree: got %f, want 1.0", inDeg["node-d"])
+	}
+	// A, B, C have 0 incoming edges
+	if inDeg["node-a"] != 0 {
+		t.Errorf("node-a in-degree: got %f, want 0", inDeg["node-a"])
+	}
+}
+
+func TestComputeInDegree_EmptyGraph(t *testing.T) {
+	g := New()
+	inDeg := g.ComputeInDegree()
+	if inDeg != nil {
+		t.Errorf("expected nil for empty graph, got %v", inDeg)
+	}
+}
+
 // TestPersonalizedPageRank_DAG verifies PageRank scores on a simple DAG.
 // Graph: A→B, A→C, B→D, C→D (A is a source, D is most-depended-upon).
 // When traversing with PageRank, D receives contributions from both B and C,

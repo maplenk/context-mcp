@@ -245,6 +245,48 @@ func (g *GraphEngine) ComputeBetweenness() map[string]float64 {
 	return result
 }
 
+// ComputeInDegree computes the in-degree authority for all nodes, normalized to [0,1].
+// In-degree counts how many other nodes have edges pointing TO each node.
+func (g *GraphEngine) ComputeInDegree() map[string]float64 {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if g.dg.Nodes().Len() == 0 {
+		return nil
+	}
+
+	raw := make(map[int64]int)
+	var maxVal int
+
+	nodes := g.dg.Nodes()
+	for nodes.Next() {
+		id := nodes.Node().ID()
+		inDeg := g.dg.To(id).Len()
+		raw[id] = inDeg
+		if inDeg > maxVal {
+			maxVal = inDeg
+		}
+	}
+
+	result := make(map[string]float64)
+	if maxVal == 0 {
+		for id := range raw {
+			if hashID, ok := g.reverseMap[id]; ok {
+				result[hashID] = 0
+			}
+		}
+		return result
+	}
+
+	for id, deg := range raw {
+		if hashID, ok := g.reverseMap[id]; ok {
+			result[hashID] = float64(deg) / float64(maxVal)
+		}
+	}
+
+	return result
+}
+
 // BlastRadiusWithDepth performs BFS over incoming edges (same as BlastRadius)
 // but returns a map of hash ID → hop depth instead of a flat list.
 func (g *GraphEngine) BlastRadiusWithDepth(nodeHashID string, maxDepth int) map[string]int {
