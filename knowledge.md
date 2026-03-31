@@ -31,7 +31,7 @@ qb-context/
 │   ├── types/types.go              — ASTNode, ASTEdge, enums, RiskLevel, NodeScore, Community, ProjectSummary
 │   ├── watcher/watcher.go          — Filesystem watcher (fsnotify + debounce + nested gitignore + hot-reload)
 │   ├── watcher/watcher_test.go     — 11 watcher tests (create/modify/delete, debounce, gitignore)
-│   ├── parser/parser.go            — Multi-language parser (Go native AST, tree-sitter for JS/TS/PHP via gotreesitter)
+│   ├── parser/parser.go            — Multi-language parser (Go native AST, tree-sitter for JS/TS/PHP via go-tree-sitter)
 │   ├── parser/queries/*.scm        — Tree-sitter S-expression query files (reference)
 │   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec statically linked, configurable embedding dim)
 │   ├── storage/migrations.go       — Versioned schema migrations (v2: FK removal from edges)
@@ -98,9 +98,11 @@ qb-context/
 ### Parser (`internal/parser`)
 - Go files: uses `go/parser` + `go/ast` (native, accurate), extracts import edges, **type aliases and named types** now captured
 - Go interfaces use `NodeTypeInterface` (not NodeTypeClass)
-- **JS/TS/PHP files: tree-sitter AST parsing** via `gotreesitter` v0.12.2 (replaced regex in Blueprint Alignment)
-  - JS/JSX: `grammars.JavascriptLanguage()`, TS: `grammars.TypescriptLanguage()`, TSX: `grammars.TsxLanguage()`
-  - PHP: `grammars.PhpLanguage()` — classes, methods, functions, use statements, instantiation, call edges
+- **JS/TS/PHP files: tree-sitter AST parsing** via `smacker/go-tree-sitter` (CGO, wraps real C tree-sitter library)
+  - Replaced pure-Go `go-tree-sitter` which stack-overflowed on large PHP files (500KB+) due to Go goroutine stack recursion in GLR parser
+  - C tree-sitter manages its own heap-allocated parse stack — handles any file size
+  - JS/JSX: `javascript.GetLanguage()`, TS: `typescript.GetLanguage()`, TSX: `tsx.GetLanguage()`
+  - PHP: `php.GetLanguage()` — classes, methods, functions, use statements, instantiation, call edges
   - Tree-sitter gives exact byte offsets (StartByte/EndByte) from AST nodes
   - TypeScript-specific: interface→NodeTypeInterface, enum→NodeTypeStruct, type alias→NodeTypeFunction
   - Call edges still use regex on node body text for reliability (jsCallExprRe, phpMethodCallRe etc.)
@@ -243,7 +245,7 @@ qb-context/
 | gonum.org/v1/gonum v0.17.0 | Graph engine, PageRank, Betweenness, Louvain community detection, InDegree |
 | github.com/metoro-io/mcp-golang v0.16.1 | MCP SDK (stdio transport, tool/resource/prompt support) |
 | github.com/shota3506/onnxruntime-purego | ONNX Runtime pure Go bindings (purego, no CGO, build tag: onnx) |
-| github.com/odvcencio/gotreesitter v0.12.2 | Tree-sitter parser for JS/TS/PHP (205 embedded grammars) |
+| github.com/smacker/go-tree-sitter | Tree-sitter CGO bindings for JS/TS/PHP (wraps real C tree-sitter, bundled grammars) |
 | github.com/asg017/sqlite-vec-go-bindings/cgo v0.1.6 | sqlite-vec statically linked (vec0 always available) |
 | golang.org/x/text v0.35.0 | Unicode NFC normalization for BPE tokenizer |
 
@@ -314,7 +316,7 @@ qb-context/
 | 32 | `53e24f7` | Replace yalue/onnxruntime_go (CGO) with shota3506/onnxruntime-purego | Opus (worktree) | Done |
 | 33 | `58a5020` | Consolidate MCP SDK tools from 13 to 5 blueprint tools | Opus (worktree) | Done |
 | 34 | `f8468bd` | Add sqlite-vec CGO bindings for guaranteed vec0 tables | Opus (worktree) | Done |
-| 35 | `0ee152b` | Replace regex JS/TS/PHP parsers with tree-sitter (gotreesitter) | Opus (worktree) | Done |
+| 35 | `0ee152b` | Replace regex JS/TS/PHP parsers with tree-sitter (go-tree-sitter) | Opus (worktree) | Done |
 | 36 | `ede6fcf` | DA review fixes + real-repo integration tests (22 subtests) | Opus (worktree) | Done |
 
 ### Test Coverage (13 packages, all passing — 233 unit tests + 22 real-repo subtests)
@@ -471,7 +473,7 @@ qb-context/
 - 10 files changed, 603 insertions, 70 deletions
 
 ### Feature 13: Blueprint Alignment — 5 Gaps Addressed (Done)
-- **Gap 1: Tree-sitter** (gotreesitter v0.12.2): Replaced regex JS/TS/PHP parsers with proper AST parsing. JS/JSX/TS/TSX/PHP each use their correct tree-sitter grammar. Go parser unchanged (go/ast). All 49 parser tests pass.
+- **Gap 1: Tree-sitter** — Initially used `gotreesitter` (pure-Go reimplementation, v0.12.2) but it stack-overflowed on large PHP files (500KB+) due to Go goroutine stack recursion in GLR parser. Replaced with `smacker/go-tree-sitter` (CGO, wraps real C tree-sitter library). C tree-sitter manages heap-allocated parse stack — handles any file size. Alternative considered: `tree-sitter/go-tree-sitter` (official, modular grammars, more maintenance) but smacker chosen for bundled grammars and simpler API. All parser tests pass.
 - **Gap 2: purego ONNX** (shota3506/onnxruntime-purego): Replaced CGO yalue/onnxruntime_go with pure Go bindings via ebitengine/purego. Eliminates CGO requirement for ONNX inference.
 - **Gap 3: MCP tools 13→5** SDK: Removed RegisterSDKTool for 8 non-blueprint tools. MCP clients see 5 tools (context, impact, read_symbol, query, index). All 13 remain in CLI mode.
 - **Gap 4: sqlite-vec always available** (asg017/sqlite-vec-go-bindings/cgo v0.1.6): Statically linked via CGO. `sqlite_vec.Auto()` via sync.Once. Vec0 creation failure is now fatal.
