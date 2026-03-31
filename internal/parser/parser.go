@@ -658,7 +658,7 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	// Extract call edges using regex on node bodies (M9: deduplicate)
 	callSeen := map[string]bool{}
 	for i, node := range result.Nodes {
-		if node.NodeType == types.NodeTypeFile {
+		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface {
 			continue
 		}
 		if node.EndByte > uint32(len(content)) {
@@ -667,7 +667,7 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		bodyText := string(content[node.StartByte:node.EndByte])
 		for _, callMatch := range jsCallExprRe.FindAllStringSubmatch(bodyText, -1) {
 			target := callMatch[1]
-			if isJSKeyword(target) || target == node.SymbolName {
+			if isJSKeyword(target) || target == node.SymbolName || target == extractBaseName(node.SymbolName) {
 				continue
 			}
 			targetID := types.GenerateNodeID(relPath, target)
@@ -1040,7 +1040,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	// M9: deduplicate call edges
 	callSeen := map[string]bool{}
 	for _, node := range result.Nodes {
-		if node.NodeType == types.NodeTypeFile {
+		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface {
 			continue
 		}
 		if node.EndByte > uint32(len(content)) {
