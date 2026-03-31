@@ -85,52 +85,57 @@ func (c *Config) Validate() error { return nil }
 }
 
 func TestConcurrent_SearchDuringIndex(t *testing.T) {
-	tp := newTestPipeline(t)
+	tp, _ := setupConcurrentEnv(t)
 
-	// Pre-populate with one file so searches can return something
-	writeGoFile(t, tp.repoRoot, "base.go", `package main
-
-// Base type
-type Base struct{}
-
-// Run runs the base
-func (b *Base) Run() {}
-`)
-	tp.indexFile(t, "base.go")
-
+	const iterations = 50
 	var wg sync.WaitGroup
-	errCh := make(chan error, 20)
+	errCh := make(chan error, iterations*3)
 
-	// Goroutine 1: continuously index new files
+	// Goroutine 1: continuously upsert new nodes (write path)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 5; i++ {
-			name := fmt.Sprintf("gen_%d.go", i)
-			content := fmt.Sprintf(`package main
-
-// Gen%d is a generated type
-type Gen%d struct{}
-
-// Do%d does something
-func (g *Gen%d) Do%d() {}
-`, i, i, i, i, i)
-			writeGoFile(t, tp.repoRoot, name, content)
-			tp.indexFile(t, name)
+		for i := 0; i < iterations; i++ {
+			node := types.ASTNode{
+				ID:         types.GenerateNodeID(fmt.Sprintf("concurrent_%d.go", i), fmt.Sprintf("ConcFunc%d", i)),
+				FilePath:   fmt.Sprintf("concurrent_%d.go", i),
+				SymbolName: fmt.Sprintf("ConcFunc%d", i),
+				NodeType:   types.NodeTypeFunction,
+				StartByte:  0,
+				EndByte:    100,
+				ContentSum: fmt.Sprintf("ConcFunc%d handles concurrent processing of data", i),
+			}
+			if err := tp.store.UpsertNodes([]types.ASTNode{node}); err != nil {
+				errCh <- fmt.Errorf("upsert node %d: %w", i, err)
+			}
 		}
 	}()
 
-	// Goroutine 2: continuously run searches
+	// Goroutine 2: continuously run search queries (read path)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		queries := []string{"Base", "Run", "Gen", "struct", "type"}
-		for i := 0; i < 10; i++ {
+		queries := []string{"Server", "Handler", "Repository", "Config", "Start"}
+		for i := 0; i < iterations; i++ {
 			q := queries[i%len(queries)]
 			_, err := tp.search.Search(q, 5, nil)
 			if err != nil {
-				errCh <- fmt.Errorf("search %q: %w", q, err)
+				errCh <- fmt.Errorf("search %q iter %d: %w", q, i, err)
 			}
+		}
+	}()
+
+	// Goroutine 3: continuously rebuild graph from edges (structural write path)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			edges, err := tp.store.GetAllEdges()
+			if err != nil {
+				errCh <- fmt.Errorf("get edges iter %d: %w", i, err)
+				continue
+			}
+			tp.graphEngine.BuildFromEdges(edges)
 		}
 	}()
 
@@ -140,6 +145,17 @@ func (g *Gen%d) Do%d() {}
 	for err := range errCh {
 		t.Errorf("concurrent error: %v", err)
 	}
+
+	// Verify some of the concurrently-inserted nodes are findable
+	nodeIDs, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatalf("GetAllNodeIDs: %v", err)
+	}
+	// We started with nodes from setupConcurrentEnv plus added `iterations` new ones
+	if len(nodeIDs) < iterations {
+		t.Errorf("expected at least %d nodes, got %d", iterations, len(nodeIDs))
+	}
+	t.Logf("Concurrent search-during-index: %d total nodes after test", len(nodeIDs))
 }
 
 func TestConcurrent_MultipleFileChanges(t *testing.T) {
