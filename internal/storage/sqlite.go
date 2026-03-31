@@ -45,7 +45,7 @@ func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
 		return nil, fmt.Errorf("creating db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000&_trusted_schema=off")
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
@@ -66,12 +66,6 @@ func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
 	}
 
 	s := &Store{db: db, embeddingDim: dim}
-
-	// Disable extension loading to prevent load_extension() attacks
-	if _, err := db.Exec("PRAGMA trusted_schema = OFF"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("disabling trusted schema: %w", err)
-	}
 
 	if err := s.runMigrations(); err != nil {
 		db.Close()
@@ -582,8 +576,8 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 
 	// Enforce read-only: only allow SELECT statements
 	trimmed := strings.TrimSpace(strings.ToUpper(query))
-	if !strings.HasPrefix(trimmed, "SELECT") {
-		return nil, fmt.Errorf("only SELECT queries are allowed, got: %s", strings.SplitN(trimmed, " ", 2)[0])
+	if !strings.HasPrefix(trimmed, "SELECT") && !strings.HasPrefix(trimmed, "WITH") {
+		return nil, fmt.Errorf("only SELECT/WITH queries are allowed, got: %s", strings.SplitN(trimmed, " ", 2)[0])
 	}
 
 	// Reject multi-statement queries (semicolons outside string literals).
@@ -867,12 +861,20 @@ func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
 
 // sanitizeFTSStorage strips FTS5 special characters for safe direct queries
 func sanitizeFTSStorage(s string) string {
-	// Remove characters that have special meaning in FTS5 query syntax
 	replacer := strings.NewReplacer(
 		`"`, " ", `(`, " ", `)`, " ", `{`, " ", `}`, " ",
 		`^`, " ", `+`, " ", `-`, " ", `*`, " ", `:`, " ",
 	)
-	return replacer.Replace(s)
+	s = replacer.Replace(s)
+	// Neutralize FTS5 boolean operators by lowercasing them
+	words := strings.Fields(s)
+	for i, w := range words {
+		upper := strings.ToUpper(w)
+		if upper == "OR" || upper == "AND" || upper == "NOT" || upper == "NEAR" {
+			words[i] = strings.ToLower(w)
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // serializeFloat32 converts a float32 slice to a little-endian byte slice for sqlite-vec
