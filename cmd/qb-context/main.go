@@ -28,6 +28,10 @@ import (
 // indexMu prevents concurrent index operations (M8)
 var indexMu sync.Mutex
 
+// asyncScoreWg tracks in-flight async betweenness/PageRank goroutines (H42)
+// so the shutdown path can wait for them before closing the store.
+var asyncScoreWg sync.WaitGroup
+
 func main() {
 	// Route all logging to stderr to avoid corrupting MCP JSON-RPC on stdout
 	log.SetOutput(os.Stderr)
@@ -56,7 +60,7 @@ func main() {
 		}
 		onnxEmb, err := embedding.NewONNXEmbedder(cfg.ONNXModelDir, dim, cfg.ONNXLibPath)
 		if err != nil {
-			log.Printf("ONNX embedder failed, falling back to TFIDF: %v", err)
+			log.Printf("WARNING: ONNX model requested (--onnx-model=%s) but initialization failed: %v. Falling back to TFIDF embeddings — search quality will be significantly degraded.", cfg.ONNXModelDir, err)
 			embedder = embedding.NewEmbedder()
 		} else {
 			embedder = onnxEmb
@@ -88,7 +92,10 @@ func main() {
 			embedder.Close()
 		})
 	}
-	defer cleanup()
+	defer func() {
+		asyncScoreWg.Wait() // H42: wait for in-flight async score goroutines before closing store
+		cleanup()
+	}()
 
 	// 3. Initialize parser
 	p := parser.New()
@@ -101,7 +108,9 @@ func main() {
 
 	// 6. Run initial indexing
 	log.Printf("Starting initial index...")
-	indexRepo(cfg, store, p, embedder, graphEngine)
+	if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+		log.Printf("WARNING: Initial index encountered critical errors: %v", err)
+	}
 	log.Printf("Initial index complete")
 
 	// 7. Initialize filesystem watcher
@@ -150,7 +159,9 @@ func main() {
 		defer indexMu.Unlock()
 		if path == "" {
 			log.Printf("Full re-index triggered")
-			indexRepo(cfg, store, p, embedder, graphEngine)
+			if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+				return fmt.Errorf("full re-index failed: %w", err)
+			}
 		} else {
 			// C9: Validate path is within repo root (prevent path traversal)
 			absPath := path
@@ -191,6 +202,7 @@ func main() {
 		log.Printf("Received signal %v, shutting down...", sig)
 		w.Stop()                // closes Events channel, causing handleFileEvents to return
 		fileEventsWg.Wait()     // H35: wait for handleFileEvents to finish before cleanup
+		asyncScoreWg.Wait()     // H42: wait for in-flight async score goroutines before closing store
 		close(done)
 	}()
 
@@ -303,11 +315,15 @@ func runCLI(cfg *config.Config, args []string) {
 			log.Printf("Loaded %d nodes from existing index (use --reindex to force)", len(nodeIDs))
 		} else {
 			// Empty DB — must index
-			indexRepo(cfg, store, p, embedder, graphEngine)
+			if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: Index encountered critical errors: %v\n", err)
+			}
 		}
 	} else {
 		log.Printf("--reindex flag set, forcing full re-index...")
-		indexRepo(cfg, store, p, embedder, graphEngine)
+		if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Re-index encountered critical errors: %v\n", err)
+		}
 	}
 
 	// Register tools and look up handler
@@ -315,8 +331,7 @@ func runCLI(cfg *config.Config, args []string) {
 	mcp.RegisterTools(server, mcp.ToolDeps{
 		Store: store, Graph: graphEngine, Search: hybridSearch, RepoRoot: cfg.RepoRoot,
 	}, func(path string) error {
-		indexRepo(cfg, store, p, embedder, graphEngine)
-		return nil
+		return indexRepo(cfg, store, p, embedder, graphEngine)
 	})
 
 	handler, ok := server.GetHandler(toolName)
@@ -339,13 +354,15 @@ func runCLI(cfg *config.Config, args []string) {
 	fmt.Println(string(out))
 }
 
-// indexRepo performs a full index of the repository
-func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) {
+// indexRepo performs a full index of the repository.
+// Returns an error for critical failures (walk failure, node storage failure).
+// Non-critical failures (individual file parse/embedding errors) are logged but do not cause an error return.
+func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) error {
 	// L4: Use standalone walk function — no fsnotify watcher allocation needed
 	files, err := watcher.WalkSourceFiles(cfg.RepoRoot, cfg.ExcludedDirs)
 	if err != nil {
 		log.Printf("Failed to walk repository: %v", err)
-		return
+		return fmt.Errorf("failed to walk repository: %w", err)
 	}
 	log.Printf("Found %d source files to index", len(files))
 
@@ -358,11 +375,9 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		edges []types.ASTEdge
 	}
 
-	jobs := make(chan parseJob, len(files))
-	results := make(chan parseResult, len(files))
 	var wg sync.WaitGroup
 
-	// Launch workers
+	// Determine worker count
 	workerCount := cfg.WorkerCount
 	if workerCount > len(files) {
 		workerCount = len(files)
@@ -370,6 +385,14 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 	if workerCount < 1 {
 		workerCount = 1
 	}
+
+	// H50: Cap channel buffers to avoid unbounded memory for large repos.
+	// Workers naturally throttle via channel backpressure.
+	chanBufSize := min(len(files), workerCount*4)
+	jobs := make(chan parseJob, chanBufSize)
+	results := make(chan parseResult, chanBufSize)
+
+	// Launch workers
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -436,13 +459,13 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		}
 	}
 
-	// Store nodes
+	// Store nodes (critical — without stored nodes, the index is useless)
 	if len(allNodes) > 0 {
 		if err := store.UpsertNodes(allNodes); err != nil {
 			log.Printf("Failed to store nodes: %v", err)
-		} else {
-			log.Printf("Stored %d nodes", len(allNodes))
+			return fmt.Errorf("failed to store nodes: %w", err)
 		}
+		log.Printf("Stored %d nodes", len(allNodes))
 	}
 
 	// Store edges
@@ -550,6 +573,8 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		}
 		log.Printf("Discovered %d architecture documents", len(docs))
 	}
+
+	return nil
 }
 
 // indexPath performs a targeted re-index of files under the given path
@@ -742,7 +767,9 @@ func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Sto
 		// H4: Trigger async betweenness + PageRank recomputation after threshold changes (M7)
 		// H12: The async goroutine also acquires indexMu to prevent races with the event loop
 		if shouldRefresh {
+			asyncScoreWg.Add(1)
 			go func() {
+				defer asyncScoreWg.Done()
 				indexMu.Lock()
 				defer indexMu.Unlock()
 
