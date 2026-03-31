@@ -2,6 +2,7 @@ package config
 
 import (
 	"flag"
+	"log"
 	"path/filepath"
 	"time"
 )
@@ -82,6 +83,11 @@ func ParseFlags() *Config {
 
 	if !filepath.IsAbs(cfg.DBPath) {
 		cfg.DBPath = filepath.Join(cfg.RepoRoot, cfg.DBPath)
+	}
+
+	// M20: Validate ONNX settings
+	if cfg.ONNXModelDir != "" && cfg.ONNXLibPath == "" {
+		log.Printf("Warning: --onnx-model specified without --onnx-lib; ONNX may fail to initialize")
 	}
 
 	return cfg

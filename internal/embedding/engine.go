@@ -6,12 +6,27 @@ import (
 	"hash/fnv"
 	"math"
 	"strings"
+	"sync/atomic"
 	"unicode"
 )
 
-// EmbeddingDim is the default embedding dimension.
-// This can be overridden at runtime when using an ONNX model with Matryoshka dims.
-var EmbeddingDim = 384
+// embeddingDim stores the embedding dimension atomically for thread safety (H11).
+// Default is 384 (TFIDF). Set at startup via SetEmbeddingDim() when ONNX is used.
+var embeddingDim atomic.Int32
+
+func init() {
+	embeddingDim.Store(384)
+}
+
+// GetEmbeddingDim returns the current embedding dimension.
+func GetEmbeddingDim() int {
+	return int(embeddingDim.Load())
+}
+
+// SetEmbeddingDim sets the embedding dimension (call before concurrent access).
+func SetEmbeddingDim(dim int) {
+	embeddingDim.Store(int32(dim))
+}
 
 // Embedder is the interface for generating vector embeddings
 type Embedder interface {
@@ -53,15 +68,16 @@ func NewTFIDFEmbedder() *TFIDFEmbedder {
 // Embed generates a 384-dimensional vector from text using TF-IDF n-gram features
 func (e *TFIDFEmbedder) Embed(text string) ([]float32, error) {
 	text = strings.TrimSpace(text)
+	dim := GetEmbeddingDim()
 	if text == "" {
-		vec := make([]float32, EmbeddingDim)
+		vec := make([]float32, dim)
 		// Return a deterministic vector for empty input
 		vec[0] = 1.0
 		normalize(vec)
 		return vec, nil
 	}
 
-	vec := make([]float32, EmbeddingDim)
+	vec := make([]float32, dim)
 
 	// Tokenize: split on whitespace, punctuation, camelCase, underscores
 	tokens := tokenize(text)
@@ -133,9 +149,9 @@ func (e *TFIDFEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	return results, nil
 }
 
-// Dim returns the embedding dimension (384).
+// Dim returns the embedding dimension.
 func (e *TFIDFEmbedder) Dim() int {
-	return EmbeddingDim
+	return GetEmbeddingDim()
 }
 
 // Close is a no-op for the TF-IDF embedder
@@ -149,6 +165,7 @@ func (e *TFIDFEmbedder) Close() error {
 // producing a sparse random projection (similar to random indexing / SimHash).
 func projectToken(vec []float32, token string, weight float32) {
 	// Use 4 independent projections per token for good coverage
+	embDim := uint32(len(vec))
 	for seed := uint32(0); seed < 4; seed++ {
 		h := fnv.New32a()
 		// Mix seed into the hash
@@ -158,7 +175,7 @@ func projectToken(vec []float32, token string, weight float32) {
 		h.Write([]byte(token))
 		hash := h.Sum32()
 
-		dim := hash % uint32(EmbeddingDim)
+		dim := hash % embDim
 		// Use bit 31 to decide sign (random +/- projection)
 		if hash&(1<<31) != 0 {
 			vec[dim] += weight
@@ -247,17 +264,18 @@ func NewHashEmbedder() *HashEmbedder {
 	return &HashEmbedder{}
 }
 
-// Embed generates a 384-dimensional vector from text using deterministic hashing
+// Embed generates a vector from text using deterministic hashing
 func (e *HashEmbedder) Embed(text string) ([]float32, error) {
 	// Normalize input
 	text = strings.ToLower(strings.TrimSpace(text))
+	dim := GetEmbeddingDim()
 
 	// Generate multiple hashes from the text and sliding windows
-	vec := make([]float32, EmbeddingDim)
+	vec := make([]float32, dim)
 
 	// Use the full text hash as the primary signal
 	hash := sha256.Sum256([]byte(text))
-	for i := 0; i < 32 && i < EmbeddingDim; i++ {
+	for i := 0; i < 32 && i < dim; i++ {
 		vec[i] = float32(hash[i])/128.0 - 1.0 // Normalize to [-1, 1]
 	}
 
@@ -266,16 +284,16 @@ func (e *HashEmbedder) Embed(text string) ([]float32, error) {
 	for wi, word := range words {
 		wordHash := sha256.Sum256([]byte(word))
 		offset := 32 + (wi * 32)
-		for i := 0; i < 32 && offset+i < EmbeddingDim; i++ {
+		for i := 0; i < 32 && offset+i < dim; i++ {
 			vec[offset+i] = float32(wordHash[i])/128.0 - 1.0
 		}
 	}
 
 	// Use character n-grams for the rest
-	for i := 0; i < len(text)-2 && i < EmbeddingDim; i++ {
+	for i := 0; i < len(text)-2 && i < dim; i++ {
 		trigram := text[i : i+3]
 		h := sha256.Sum256([]byte(trigram))
-		idx := (256 + i) % EmbeddingDim
+		idx := (256 + i) % dim
 		if vec[idx] == 0 {
 			vec[idx] = float32(h[0])/128.0 - 1.0
 		}
@@ -300,9 +318,9 @@ func (e *HashEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	return results, nil
 }
 
-// Dim returns the embedding dimension (384).
+// Dim returns the embedding dimension.
 func (e *HashEmbedder) Dim() int {
-	return EmbeddingDim
+	return GetEmbeddingDim()
 }
 
 // Close is a no-op for the hash embedder

@@ -29,6 +29,7 @@ type Watcher struct {
 	events        chan types.FileEvent
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
+	stopOnce      sync.Once // C15: prevent double-close panic
 
 	// debounce state
 	mu      sync.Mutex
@@ -102,14 +103,16 @@ func (w *Watcher) Start() error {
 			return filepath.SkipDir
 		}
 
-		// M3: check for nested .gitignore
+		// M3: check for nested .gitignore (H10: protect with mutex)
 		nestedGI := filepath.Join(path, ".gitignore")
 		if _, err := os.Stat(nestedGI); err == nil {
 			rel, relErr := filepath.Rel(w.repoRoot, path)
 			if relErr == nil {
 				gi, parseErr := ignore.CompileIgnoreFile(nestedGI)
 				if parseErr == nil {
+					w.mu.Lock()
 					w.gitignores = append(w.gitignores, gitignoreEntry{matcher: gi, baseDir: rel})
+					w.mu.Unlock()
 				}
 			}
 		}
@@ -127,22 +130,26 @@ func (w *Watcher) Start() error {
 	return nil
 }
 
-// Stop gracefully shuts down the watcher
-// L5: Set stopped flag BEFORE closing stopCh to prevent timer race
+// Stop gracefully shuts down the watcher.
+// It is safe to call Stop() multiple times — only the first call takes effect (C15).
 func (w *Watcher) Stop() error {
-	// Set stopped flag and cancel pending timers FIRST
-	w.mu.Lock()
-	w.stopped = true
-	for _, entry := range w.pending {
-		entry.timer.Stop()
-	}
-	w.pending = nil
-	w.mu.Unlock()
+	var err error
+	w.stopOnce.Do(func() {
+		// L5: Set stopped flag and cancel pending timers BEFORE closing stopCh
+		w.mu.Lock()
+		w.stopped = true
+		for _, entry := range w.pending {
+			entry.timer.Stop()
+		}
+		w.pending = nil
+		w.mu.Unlock()
 
-	close(w.stopCh)
-	w.wg.Wait()
-	close(w.events)
-	return w.fsWatcher.Close()
+		close(w.stopCh)
+		w.wg.Wait()
+		close(w.events)
+		err = w.fsWatcher.Close()
+	})
+	return err
 }
 
 // isExcluded checks if a path should be excluded from watching
@@ -150,7 +157,7 @@ func (w *Watcher) isExcluded(path string) bool {
 	// Get the base name and relative path
 	base := filepath.Base(path)
 
-	// Check hardcoded exclusions
+	// Check hardcoded exclusions (excludedDirs is immutable after construction)
 	if w.excludedDirs[base] {
 		return true
 	}
@@ -160,7 +167,14 @@ func (w *Watcher) isExcluded(path string) bool {
 	if err != nil {
 		return false
 	}
-	for _, gi := range w.gitignores {
+
+	// H10: Take a snapshot of gitignores under lock to avoid races
+	w.mu.Lock()
+	gis := make([]gitignoreEntry, len(w.gitignores))
+	copy(gis, w.gitignores)
+	w.mu.Unlock()
+
+	for _, gi := range gis {
 		if gi.matcher == nil {
 			continue
 		}
@@ -185,7 +199,9 @@ func (w *Watcher) isExcluded(path string) bool {
 	return false
 }
 
-// isWatchableFile returns true if the file extension is one we should parse
+// isWatchableFile returns true if the file extension is one we should parse.
+// Note: .md files are not watched. ADR changes require a full re-index (L18).
+// Future: watch ARCHITECTURE.md, ADR.md, DESIGN.md specifically.
 func isWatchableFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {

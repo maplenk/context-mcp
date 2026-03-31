@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,13 +60,13 @@ func main() {
 			embedder = embedding.NewEmbedder()
 		} else {
 			embedder = onnxEmb
-			embedding.EmbeddingDim = dim
+			embedding.SetEmbeddingDim(dim)
 			cfg.EmbeddingDim = dim
 			log.Printf("ONNX embedder initialized (dim=%d, model=%s)", dim, cfg.ONNXModelDir)
 		}
 	} else {
 		embedder = embedding.NewEmbedder()
-		log.Printf("Embedding engine initialized (TF-IDF, dim=%d)", embedding.EmbeddingDim)
+		log.Printf("Embedding engine initialized (TF-IDF, dim=%d)", embedding.GetEmbeddingDim())
 	}
 
 	// 2. Initialize SQLite storage
@@ -75,10 +76,14 @@ func main() {
 	}
 	log.Printf("Storage initialized at %s", cfg.DBPath)
 
+	// C14: Channel to terminate the memory monitoring goroutine
+	memDone := make(chan struct{})
+
 	// Unified cleanup, safe to call multiple times (signal handler + deferred path).
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
+			close(memDone) // C14: stop memory monitor goroutine
 			store.Close()
 			embedder.Close()
 		})
@@ -110,17 +115,22 @@ func main() {
 	defer w.Stop() // safe: cleanup() above does not touch the watcher
 	log.Printf("Filesystem watcher started")
 
-	// H6: Periodic memory monitoring
+	// H6: Periodic memory monitoring (C14: with cancellation via memDone)
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			log.Printf("Memory: Alloc=%dMB Sys=%dMB NumGC=%d",
-				m.Alloc/1024/1024, m.Sys/1024/1024, m.NumGC)
-			if m.Alloc > 2*1024*1024*1024 {
-				log.Printf("WARNING: memory exceeds 2GB limit")
+		for {
+			select {
+			case <-ticker.C:
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				log.Printf("Memory: Alloc=%dMB Sys=%dMB NumGC=%d",
+					m.Alloc/1024/1024, m.Sys/1024/1024, m.NumGC)
+				if m.Alloc > 2*1024*1024*1024 {
+					log.Printf("WARNING: memory exceeds 2GB limit")
+				}
+			case <-memDone:
+				return
 			}
 		}
 	}()
@@ -137,6 +147,19 @@ func main() {
 			log.Printf("Full re-index triggered")
 			indexRepo(cfg, store, p, embedder, graphEngine)
 		} else {
+			// C9: Validate path is within repo root (prevent path traversal)
+			absPath := path
+			if !filepath.IsAbs(absPath) {
+				absPath = filepath.Join(cfg.RepoRoot, absPath)
+			}
+			absPath, err := filepath.Abs(absPath)
+			if err != nil {
+				return fmt.Errorf("invalid path: %w", err)
+			}
+			absRoot, _ := filepath.Abs(cfg.RepoRoot)
+			if !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) && absPath != absRoot {
+				return fmt.Errorf("path traversal detected: %s is outside repo root", path)
+			}
 			log.Printf("Targeted re-index triggered for: %s", path)
 			indexPath(cfg, store, p, embedder, graphEngine, path)
 		}
@@ -462,12 +485,18 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 
 	var files []string
 	if info.IsDir() {
-		// Walk the directory to find source files
+		// H20: Walk the directory respecting excluded dirs and gitignore
 		filepath.Walk(absTarget, func(path string, fi os.FileInfo, err error) error {
 			if err != nil {
 				return nil
 			}
 			if fi.IsDir() {
+				base := filepath.Base(path)
+				for _, excl := range cfg.ExcludedDirs {
+					if base == excl {
+						return filepath.SkipDir
+					}
+				}
 				return nil
 			}
 			// Only index files with supported extensions
@@ -535,6 +564,32 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 	if err == nil {
 		graphEngine.BuildFromEdges(edges)
 		log.Printf("Graph rebuilt with %d nodes, %d edges", graphEngine.NodeCount(), graphEngine.EdgeCount())
+
+		// M17: Recompute and store betweenness/PageRank after targeted re-index
+		betweenness := graphEngine.ComputeBetweenness()
+		pageranks := graphEngine.PageRank()
+		if len(betweenness) > 0 || len(pageranks) > 0 {
+			nodeIDs := make(map[string]bool)
+			for id := range betweenness {
+				nodeIDs[id] = true
+			}
+			for id := range pageranks {
+				nodeIDs[id] = true
+			}
+			var scores []types.NodeScore
+			for nodeID := range nodeIDs {
+				scores = append(scores, types.NodeScore{
+					NodeID:      nodeID,
+					Betweenness: betweenness[nodeID],
+					PageRank:    pageranks[nodeID],
+				})
+			}
+			if err := store.UpsertNodeScores(scores); err != nil {
+				log.Printf("Failed to store node scores after targeted re-index: %v", err)
+			} else {
+				log.Printf("Stored scores for %d nodes after targeted re-index", len(scores))
+			}
+		}
 	}
 }
 
@@ -545,89 +600,21 @@ const betweennessRefreshThreshold = 20
 // handleFileEvents processes incremental file change events from the watcher.
 // Uses incremental graph updates (H3) instead of full rebuilds, and triggers
 // async betweenness recomputation after a threshold of changes (H4).
+// C16: Acquires indexMu per event to prevent races with the MCP index tool.
 func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) {
 	for event := range w.Events() {
-		absPath := filepath.Join(cfg.RepoRoot, event.Path)
-
-		switch event.Action {
-		case types.FileEventDeleted:
-			log.Printf("File deleted: %s", event.Path)
-
-			// Get node IDs for this file BEFORE deleting from storage
-			oldNodeIDs, err := store.GetNodeIDsByFile(event.Path)
-			if err != nil {
-				log.Printf("Failed to get node IDs for %s: %v", event.Path, err)
-			}
-
-			if err := store.DeleteByFile(event.Path); err != nil {
-				log.Printf("Failed to delete file data: %v", err)
-			}
-
-			// Incremental graph update: remove old nodes instead of full rebuild
-			for _, nodeID := range oldNodeIDs {
-				graphEngine.RemoveNode(nodeID)
-			}
-
-		case types.FileEventCreated, types.FileEventModified:
-			log.Printf("File changed: %s", event.Path)
-
-			// Get old node IDs for this file BEFORE deleting from storage
-			oldNodeIDs, err := store.GetNodeIDsByFile(event.Path)
-			if err != nil {
-				log.Printf("Failed to get old node IDs for %s: %v", event.Path, err)
-			}
-
-			// Delete old data for this file
-			if err := store.DeleteByFile(event.Path); err != nil {
-				log.Printf("Failed to delete stale data for %s: %v", event.Path, err)
-			}
-
-			// Remove old nodes from graph incrementally
-			for _, nodeID := range oldNodeIDs {
-				graphEngine.RemoveNode(nodeID)
-			}
-
-			// Re-parse the file
-			result, err := p.ParseFile(absPath, cfg.RepoRoot)
-			if err != nil {
-				log.Printf("Parse error %s: %v", event.Path, err)
-				continue
-			}
-
-			// Store new nodes and edges
-			if len(result.Nodes) > 0 {
-				if err := store.UpsertNodes(result.Nodes); err != nil {
-					log.Printf("Failed to store nodes: %v", err)
-				}
-			}
-			if len(result.Edges) > 0 {
-				if err := store.UpsertEdges(result.Edges); err != nil {
-					log.Printf("Failed to store edges: %v", err)
-				}
-			}
-
-			// Generate embeddings for new/updated nodes
-			for _, node := range result.Nodes {
-				vec, err := embedder.Embed(node.ContentSum)
-				if err != nil {
-					log.Printf("Embedding error for %s: %v", node.SymbolName, err)
-					continue
-				}
-				store.UpsertEmbedding(node.ID, vec)
-			}
-
-			// Add new edges to graph incrementally (nodes are created automatically
-			// by AddEdge via ensureNode; isolated nodes without edges don't affect
-			// graph signals like PPR/betweenness/in-degree)
-			for _, edge := range result.Edges {
-				graphEngine.AddEdge(edge)
-			}
-		}
+		indexMu.Lock()
+		processFileEvent(event, cfg, store, p, embedder, graphEngine)
+		indexMu.Unlock()
 
 		// H4: Trigger async betweenness + PageRank recomputation after threshold changes (M7)
+		// H12: The async goroutine also acquires indexMu to prevent races with the event loop
 		if graphEngine.ChangeCount() >= betweennessRefreshThreshold {
 			graphEngine.ResetChangeCount()
 			go func() {
+				indexMu.Lock()
+				defer indexMu.Unlock()
+
 				betweenness := graphEngine.ComputeBetweenness()
 				pageranks := graphEngine.PageRank()
 
@@ -655,6 +642,87 @@ func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Sto
 					}
 				}
 			}()
+		}
+	}
+}
+
+// processFileEvent handles a single file event (extracted from handleFileEvents for C16).
+// Caller must hold indexMu.
+func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) {
+	absPath := filepath.Join(cfg.RepoRoot, event.Path)
+
+	switch event.Action {
+	case types.FileEventDeleted:
+		log.Printf("File deleted: %s", event.Path)
+
+		// Get node IDs for this file BEFORE deleting from storage
+		oldNodeIDs, err := store.GetNodeIDsByFile(event.Path)
+		if err != nil {
+			log.Printf("Failed to get node IDs for %s: %v", event.Path, err)
+		}
+
+		if err := store.DeleteByFile(event.Path); err != nil {
+			log.Printf("Failed to delete file data: %v", err)
+		}
+
+		// Incremental graph update: remove old nodes instead of full rebuild
+		for _, nodeID := range oldNodeIDs {
+			graphEngine.RemoveNode(nodeID)
+		}
+
+	case types.FileEventCreated, types.FileEventModified:
+		log.Printf("File changed: %s", event.Path)
+
+		// Get old node IDs for this file BEFORE deleting from storage
+		oldNodeIDs, err := store.GetNodeIDsByFile(event.Path)
+		if err != nil {
+			log.Printf("Failed to get old node IDs for %s: %v", event.Path, err)
+		}
+
+		// Delete old data for this file
+		if err := store.DeleteByFile(event.Path); err != nil {
+			log.Printf("Failed to delete stale data for %s: %v", event.Path, err)
+		}
+
+		// Remove old nodes from graph incrementally
+		for _, nodeID := range oldNodeIDs {
+			graphEngine.RemoveNode(nodeID)
+		}
+
+		// Re-parse the file
+		result, err := p.ParseFile(absPath, cfg.RepoRoot)
+		if err != nil {
+			log.Printf("Parse error %s: %v", event.Path, err)
+			return
+		}
+
+		// Store new nodes and edges
+		if len(result.Nodes) > 0 {
+			if err := store.UpsertNodes(result.Nodes); err != nil {
+				log.Printf("Failed to store nodes: %v", err)
+			}
+		}
+		if len(result.Edges) > 0 {
+			if err := store.UpsertEdges(result.Edges); err != nil {
+				log.Printf("Failed to store edges: %v", err)
+			}
+		}
+
+		// Generate embeddings for new/updated nodes
+		for _, node := range result.Nodes {
+			vec, err := embedder.Embed(node.ContentSum)
+			if err != nil {
+				log.Printf("Embedding error for %s: %v", node.SymbolName, err)
+				continue
+			}
+			store.UpsertEmbedding(node.ID, vec)
+		}
+
+		// Add new edges to graph incrementally (nodes are created automatically
+		// by AddEdge via ensureNode; isolated nodes without edges don't affect
+		// graph signals like PPR/betweenness/in-degree)
+		for _, edge := range result.Edges {
+			graphEngine.AddEdge(edge)
 		}
 	}
 }

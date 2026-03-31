@@ -12,8 +12,8 @@ func TestHashEmbedder_Embed_Dimension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Embed error: %v", err)
 	}
-	if len(vec) != EmbeddingDim {
-		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
@@ -99,8 +99,8 @@ func TestHashEmbedder_EmbedBatch_Count(t *testing.T) {
 		t.Errorf("expected %d vectors, got %d", len(texts), len(vecs))
 	}
 	for i, v := range vecs {
-		if len(v) != EmbeddingDim {
-			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), EmbeddingDim)
+		if len(v) != GetEmbeddingDim() {
+			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), GetEmbeddingDim())
 		}
 	}
 }
@@ -150,8 +150,8 @@ func TestHashEmbedder_EmptyString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
 	}
-	if len(vec) != EmbeddingDim {
-		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
@@ -183,8 +183,8 @@ func TestTFIDFEmbedder_Dimension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Embed error: %v", err)
 	}
-	if len(vec) != EmbeddingDim {
-		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
@@ -271,8 +271,8 @@ func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
 	}
-	if len(vec) != EmbeddingDim {
-		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
@@ -293,8 +293,8 @@ func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
 		t.Errorf("expected %d vectors, got %d", len(texts), len(vecs))
 	}
 	for i, v := range vecs {
-		if len(v) != EmbeddingDim {
-			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), EmbeddingDim)
+		if len(v) != GetEmbeddingDim() {
+			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), GetEmbeddingDim())
 		}
 	}
 }
@@ -324,8 +324,8 @@ func TestNewEmbedder_ReturnsTFIDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if len(vec) != EmbeddingDim {
-		t.Errorf("expected dim %d, got %d", EmbeddingDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
