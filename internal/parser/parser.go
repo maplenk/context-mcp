@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/naman/qb-context/internal/types"
+	"github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 )
 
 // Parser extracts structural nodes and edges from source files
@@ -263,7 +265,7 @@ func extractGoCalls(body *ast.BlockStmt) []string {
 	return calls
 }
 
-// JavaScript/TypeScript regex patterns
+// JavaScript/TypeScript regex patterns (kept for independent helper tests)
 // Note: removed (?m)^ line-start anchoring so indented declarations are found
 var (
 	jsFuncDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*[(<]`)
@@ -275,18 +277,44 @@ var (
 	jsRequireRe     = regexp.MustCompile(`require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
 )
 
-// parseJavaScript uses regex-based extraction for JS/TS files
-// L17: TypeScript-specific regex patterns
+// L17: TypeScript-specific regex patterns (kept for independent helper tests)
 var (
 	tsInterfaceDeclRe = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?interface\s+(\w+)`)
 	tsEnumDeclRe      = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:const\s+)?enum\s+(\w+)`)
 	tsTypeDeclRe      = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?type\s+(\w+)\s*[=<]`)
 )
 
+// parseJavaScript uses tree-sitter for JS/TS file parsing.
+// It falls back to regex if tree-sitter parsing fails.
 func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, error) {
 	result := &ParseResult{}
-	text := string(content)
-	lines := strings.Split(text, "\n")
+	lines := strings.Split(string(content), "\n")
+
+	// Determine if this is a TypeScript file
+	ext := strings.ToLower(filepath.Ext(relPath))
+	isTS := ext == ".ts" || ext == ".tsx"
+
+	// Select the appropriate language grammar
+	var lang *gotreesitter.Language
+	if isTS {
+		if ext == ".tsx" {
+			lang = grammars.TsxLanguage()
+		} else {
+			lang = grammars.TypescriptLanguage()
+		}
+	} else {
+		lang = grammars.JavascriptLanguage()
+	}
+
+	tsParser := gotreesitter.NewParser(lang)
+	tree, err := tsParser.Parse(content)
+	if err != nil {
+		return nil, fmt.Errorf("tree-sitter parse JS/TS: %w", err)
+	}
+	root := tree.RootNode()
+	if root == nil {
+		return nil, fmt.Errorf("tree-sitter returned nil root for %s", relPath)
+	}
 
 	// C1: Create file-level node so import edges have a valid source node
 	fileNode := types.ASTNode{
@@ -303,181 +331,230 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	// Track names already added to avoid duplicates
 	seen := map[string]bool{}
 
-	// Extract function declarations
-	for _, match := range jsFuncDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		if seen[name] {
-			continue
+	// Walk the tree to extract declarations
+	gotreesitter.Walk(root, func(n *gotreesitter.Node, depth int) gotreesitter.WalkAction {
+		if !n.IsNamed() {
+			return gotreesitter.WalkContinue
 		}
-		seen[name] = true
-		// Compute startByte: skip any leading newline captured by the regex
-		rawStart := match[0]
-		startByte := skipLeadingNewline(content, rawStart)
-		endByte := findBlockEnd(content, startByte)
-		contentSum := buildContentSum(lines, startByte, name)
+		nodeType := n.Type(lang)
 
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
-			FilePath:   relPath,
-			SymbolName: name,
-			NodeType:   types.NodeTypeFunction,
-			StartByte:  uint32(startByte),
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	// Extract arrow functions
-	for _, match := range jsArrowFuncRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		rawStart := match[0]
-		startByte := skipLeadingNewline(content, rawStart)
-		endByte := findBlockEnd(content, startByte)
-		contentSum := buildContentSum(lines, startByte, name)
-
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
-			FilePath:   relPath,
-			SymbolName: name,
-			NodeType:   types.NodeTypeFunction,
-			StartByte:  uint32(startByte),
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	// Extract classes and their methods
-	for _, match := range jsClassDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		className := text[match[2]:match[3]]
-		if seen[className] {
-			continue
-		}
-		seen[className] = true
-		rawStart := match[0]
-		startByte := skipLeadingNewline(content, rawStart)
-		endByte := findBlockEnd(content, startByte)
-		contentSum := buildContentSum(lines, startByte, className)
-
-		classNode := types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, className),
-			FilePath:   relPath,
-			SymbolName: className,
-			NodeType:   types.NodeTypeClass,
-			StartByte:  uint32(startByte),
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		}
-		result.Nodes = append(result.Nodes, classNode)
-
-		// Extract methods inside this class body
-		classBody := text[startByte:endByte]
-		for _, methodMatch := range jsMethodDeclRe.FindAllStringSubmatchIndex(classBody, -1) {
-			methodName := classBody[methodMatch[2]:methodMatch[3]]
-			// Skip constructor and keywords
-			if methodName == "constructor" || methodName == "if" || methodName == "for" || methodName == "while" || methodName == "switch" || methodName == "catch" || methodName == "function" {
-				continue
+		switch nodeType {
+		case "function_declaration":
+			// function name(...) { ... }
+			nameNode := n.ChildByFieldName("name", lang)
+			if nameNode == nil {
+				return gotreesitter.WalkContinue
 			}
-			qualifiedName := className + "." + methodName
-			if seen[qualifiedName] {
-				continue
+			name := nameNode.Text(content)
+			if seen[name] {
+				return gotreesitter.WalkContinue
 			}
-			seen[qualifiedName] = true
-
-			methodAbsStart := startByte + methodMatch[0]
-			methodAbsStart = skipLeadingNewline(content, methodAbsStart)
-			methodEndByte := findBlockEnd(content, methodAbsStart)
-			methodContentSum := buildContentSum(lines, methodAbsStart, qualifiedName)
-
+			seen[name] = true
+			startByte := int(n.StartByte())
+			endByte := n.EndByte()
+			contentSum := buildContentSum(lines, startByte, name)
 			result.Nodes = append(result.Nodes, types.ASTNode{
-				ID:         types.GenerateNodeID(relPath, qualifiedName),
+				ID:         types.GenerateNodeID(relPath, name),
 				FilePath:   relPath,
-				SymbolName: qualifiedName,
-				NodeType:   types.NodeTypeMethod,
-				StartByte:  uint32(methodAbsStart),
-				EndByte:    methodEndByte,
-				ContentSum: methodContentSum,
+				SymbolName: name,
+				NodeType:   types.NodeTypeFunction,
+				StartByte:  n.StartByte(),
+				EndByte:    endByte,
+				ContentSum: contentSum,
 			})
+			return gotreesitter.WalkSkipChildren
+
+		case "lexical_declaration", "variable_declaration":
+			// const name = (...) => { ... } — arrow functions
+			for i := 0; i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child == nil || !child.IsNamed() {
+					continue
+				}
+				if child.Type(lang) != "variable_declarator" {
+					continue
+				}
+				nameNode := child.ChildByFieldName("name", lang)
+				valueNode := child.ChildByFieldName("value", lang)
+				if nameNode == nil || valueNode == nil {
+					continue
+				}
+				if valueNode.Type(lang) != "arrow_function" {
+					continue
+				}
+				name := nameNode.Text(content)
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				startByte := int(n.StartByte())
+				endByte := n.EndByte()
+				contentSum := buildContentSum(lines, startByte, name)
+				result.Nodes = append(result.Nodes, types.ASTNode{
+					ID:         types.GenerateNodeID(relPath, name),
+					FilePath:   relPath,
+					SymbolName: name,
+					NodeType:   types.NodeTypeFunction,
+					StartByte:  n.StartByte(),
+					EndByte:    endByte,
+					ContentSum: contentSum,
+				})
+			}
+			return gotreesitter.WalkSkipChildren
+
+		case "class_declaration":
+			// class Name { methods... }
+			nameNode := n.ChildByFieldName("name", lang)
+			if nameNode == nil {
+				return gotreesitter.WalkContinue
+			}
+			className := nameNode.Text(content)
+			if seen[className] {
+				return gotreesitter.WalkSkipChildren
+			}
+			seen[className] = true
+			startByte := int(n.StartByte())
+			endByte := n.EndByte()
+			contentSum := buildContentSum(lines, startByte, className)
+			result.Nodes = append(result.Nodes, types.ASTNode{
+				ID:         types.GenerateNodeID(relPath, className),
+				FilePath:   relPath,
+				SymbolName: className,
+				NodeType:   types.NodeTypeClass,
+				StartByte:  n.StartByte(),
+				EndByte:    endByte,
+				ContentSum: contentSum,
+			})
+
+			// Extract methods from class body
+			bodyNode := n.ChildByFieldName("body", lang)
+			if bodyNode != nil {
+				for i := 0; i < bodyNode.ChildCount(); i++ {
+					methodNode := bodyNode.Child(i)
+					if methodNode == nil || !methodNode.IsNamed() {
+						continue
+					}
+					if methodNode.Type(lang) != "method_definition" {
+						continue
+					}
+					methNameNode := methodNode.ChildByFieldName("name", lang)
+					if methNameNode == nil {
+						continue
+					}
+					methodName := methNameNode.Text(content)
+					// Skip constructor and keywords
+					if methodName == "constructor" || methodName == "if" || methodName == "for" ||
+						methodName == "while" || methodName == "switch" || methodName == "catch" ||
+						methodName == "function" {
+						continue
+					}
+					qualifiedName := className + "." + methodName
+					if seen[qualifiedName] {
+						continue
+					}
+					seen[qualifiedName] = true
+					mStartByte := int(methodNode.StartByte())
+					mEndByte := methodNode.EndByte()
+					mContentSum := buildContentSum(lines, mStartByte, qualifiedName)
+					result.Nodes = append(result.Nodes, types.ASTNode{
+						ID:         types.GenerateNodeID(relPath, qualifiedName),
+						FilePath:   relPath,
+						SymbolName: qualifiedName,
+						NodeType:   types.NodeTypeMethod,
+						StartByte:  methodNode.StartByte(),
+						EndByte:    mEndByte,
+						ContentSum: mContentSum,
+					})
+				}
+			}
+			return gotreesitter.WalkSkipChildren
+
+		case "export_statement":
+			// export class/function/interface/enum/type — recurse into children
+			return gotreesitter.WalkContinue
+
+		// L17: TypeScript-specific constructs
+		case "interface_declaration":
+			nameNode := n.ChildByFieldName("name", lang)
+			if nameNode == nil {
+				return gotreesitter.WalkContinue
+			}
+			name := nameNode.Text(content)
+			if seen[name] {
+				return gotreesitter.WalkSkipChildren
+			}
+			seen[name] = true
+			startByte := int(n.StartByte())
+			endByte := n.EndByte()
+			contentSum := buildContentSum(lines, startByte, name)
+			result.Nodes = append(result.Nodes, types.ASTNode{
+				ID:         types.GenerateNodeID(relPath, name),
+				FilePath:   relPath,
+				SymbolName: name,
+				NodeType:   types.NodeTypeInterface,
+				StartByte:  n.StartByte(),
+				EndByte:    endByte,
+				ContentSum: contentSum,
+			})
+			return gotreesitter.WalkSkipChildren
+
+		case "enum_declaration":
+			nameNode := n.ChildByFieldName("name", lang)
+			if nameNode == nil {
+				return gotreesitter.WalkContinue
+			}
+			name := nameNode.Text(content)
+			if seen[name] {
+				return gotreesitter.WalkSkipChildren
+			}
+			seen[name] = true
+			startByte := int(n.StartByte())
+			endByte := n.EndByte()
+			contentSum := buildContentSum(lines, startByte, name)
+			result.Nodes = append(result.Nodes, types.ASTNode{
+				ID:         types.GenerateNodeID(relPath, name),
+				FilePath:   relPath,
+				SymbolName: name,
+				NodeType:   types.NodeTypeStruct,
+				StartByte:  n.StartByte(),
+				EndByte:    endByte,
+				ContentSum: contentSum,
+			})
+			return gotreesitter.WalkSkipChildren
+
+		case "type_alias_declaration":
+			nameNode := n.ChildByFieldName("name", lang)
+			if nameNode == nil {
+				return gotreesitter.WalkContinue
+			}
+			name := nameNode.Text(content)
+			if seen[name] {
+				return gotreesitter.WalkSkipChildren
+			}
+			seen[name] = true
+			startByte := int(n.StartByte())
+			endByte := n.EndByte()
+			contentSum := buildContentSum(lines, startByte, name)
+			result.Nodes = append(result.Nodes, types.ASTNode{
+				ID:         types.GenerateNodeID(relPath, name),
+				FilePath:   relPath,
+				SymbolName: name,
+				NodeType:   types.NodeTypeFunction,
+				StartByte:  n.StartByte(),
+				EndByte:    endByte,
+				ContentSum: contentSum,
+			})
+			return gotreesitter.WalkSkipChildren
 		}
-	}
 
-	// L17: Extract TypeScript-specific constructs (interfaces, enums, type aliases)
-	for _, match := range tsInterfaceDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		rawStart := match[0]
-		startByte := skipLeadingNewline(content, rawStart)
-		endByte := findBlockEnd(content, startByte)
-		contentSum := buildContentSum(lines, startByte, name)
+		return gotreesitter.WalkContinue
+	})
 
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
-			FilePath:   relPath,
-			SymbolName: name,
-			NodeType:   types.NodeTypeInterface,
-			StartByte:  uint32(startByte),
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	for _, match := range tsEnumDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		rawStart := match[0]
-		startByte := skipLeadingNewline(content, rawStart)
-		endByte := findBlockEnd(content, startByte)
-		contentSum := buildContentSum(lines, startByte, name)
-
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
-			FilePath:   relPath,
-			SymbolName: name,
-			NodeType:   types.NodeTypeStruct,
-			StartByte:  uint32(startByte),
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	for _, match := range tsTypeDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		rawStart := match[0]
-		startByte := skipLeadingNewline(content, rawStart)
-		// Type aliases may not have braces, use a simpler end detection
-		endByte := findBlockEnd(content, startByte)
-		contentSum := buildContentSum(lines, startByte, name)
-
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
-			FilePath:   relPath,
-			SymbolName: name,
-			NodeType:   types.NodeTypeFunction,
-			StartByte:  uint32(startByte),
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	// Extract call edges (connecting nodes found in this file to their calls)
-	// M9: deduplicate call edges
+	// Extract call edges using regex on node bodies (M9: deduplicate)
 	callSeen := map[string]bool{}
 	for i, node := range result.Nodes {
 		if node.NodeType == types.NodeTypeFile {
-			continue // skip file node for call extraction
+			continue
 		}
 		if node.EndByte > uint32(len(content)) {
 			continue
@@ -485,7 +562,6 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		bodyText := string(content[node.StartByte:node.EndByte])
 		for _, callMatch := range jsCallExprRe.FindAllStringSubmatch(bodyText, -1) {
 			target := callMatch[1]
-			// Skip common keywords
 			if isJSKeyword(target) || target == node.SymbolName {
 				continue
 			}
@@ -503,28 +579,107 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		}
 	}
 
-	// H1: Extract import edges
-	// C1: TargetID references the target file's file node
-	// import ... from 'module'
-	for _, match := range jsImportFromRe.FindAllStringSubmatch(text, -1) {
-		modulePath := match[1]
-		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),           // this file
-			TargetID: types.GenerateNodeID(modulePath, modulePath),     // target file's file node
-			EdgeType: types.EdgeTypeImports,
-		})
-	}
-	// require('module')
-	for _, match := range jsRequireRe.FindAllStringSubmatch(text, -1) {
-		modulePath := match[1]
-		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),           // this file
-			TargetID: types.GenerateNodeID(modulePath, modulePath),     // target file's file node
-			EdgeType: types.EdgeTypeImports,
-		})
-	}
+	// H1: Extract import edges from tree-sitter nodes
+	gotreesitter.Walk(root, func(n *gotreesitter.Node, depth int) gotreesitter.WalkAction {
+		if !n.IsNamed() {
+			return gotreesitter.WalkContinue
+		}
+		nodeType := n.Type(lang)
+
+		switch nodeType {
+		case "import_statement":
+			// import ... from 'module' — find the string source child
+			sourceNode := n.ChildByFieldName("source", lang)
+			if sourceNode != nil {
+				modulePath := extractStringContent(sourceNode, content)
+				if modulePath != "" {
+					result.Edges = append(result.Edges, types.ASTEdge{
+						SourceID: types.GenerateNodeID(relPath, relPath),
+						TargetID: types.GenerateNodeID(modulePath, modulePath),
+						EdgeType: types.EdgeTypeImports,
+					})
+				}
+				return gotreesitter.WalkSkipChildren
+			}
+			// Fallback: walk children to find the string node
+			for i := 0; i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child == nil {
+					continue
+				}
+				childType := child.Type(lang)
+				if childType == "string" || childType == "string_fragment" {
+					modulePath := extractStringContent(child, content)
+					if modulePath != "" {
+						result.Edges = append(result.Edges, types.ASTEdge{
+							SourceID: types.GenerateNodeID(relPath, relPath),
+							TargetID: types.GenerateNodeID(modulePath, modulePath),
+							EdgeType: types.EdgeTypeImports,
+						})
+					}
+					break
+				}
+			}
+			return gotreesitter.WalkSkipChildren
+
+		case "call_expression":
+			// require('module')
+			fnNode := n.ChildByFieldName("function", lang)
+			if fnNode != nil && fnNode.Text(content) == "require" {
+				argsNode := n.ChildByFieldName("arguments", lang)
+				if argsNode != nil {
+					for i := 0; i < argsNode.ChildCount(); i++ {
+						argChild := argsNode.Child(i)
+						if argChild == nil || !argChild.IsNamed() {
+							continue
+						}
+						argType := argChild.Type(lang)
+						if argType == "string" || argType == "string_fragment" {
+							modulePath := extractStringContent(argChild, content)
+							if modulePath != "" {
+								result.Edges = append(result.Edges, types.ASTEdge{
+									SourceID: types.GenerateNodeID(relPath, relPath),
+									TargetID: types.GenerateNodeID(modulePath, modulePath),
+									EdgeType: types.EdgeTypeImports,
+								})
+							}
+							break
+						}
+					}
+				}
+			}
+			return gotreesitter.WalkContinue
+		}
+
+		return gotreesitter.WalkContinue
+	})
 
 	return result, nil
+}
+
+// extractStringContent extracts the text content from a string node,
+// stripping quotes if present.
+func extractStringContent(n *gotreesitter.Node, source []byte) string {
+	if n == nil {
+		return ""
+	}
+	text := n.Text(source)
+	// If the node contains a string_fragment child, use that
+	for i := 0; i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child != nil && child.IsNamed() {
+			childText := child.Text(source)
+			if childText != "" {
+				return childText
+			}
+		}
+	}
+	// Otherwise strip quotes from the string literal
+	text = strings.TrimPrefix(text, "'")
+	text = strings.TrimSuffix(text, "'")
+	text = strings.TrimPrefix(text, "\"")
+	text = strings.TrimSuffix(text, "\"")
+	return text
 }
 
 // skipLeadingNewline advances past a leading newline character at pos
@@ -535,7 +690,7 @@ func skipLeadingNewline(content []byte, pos int) int {
 	return pos
 }
 
-// PHP regex patterns
+// PHP regex patterns (kept for edge extraction and independent helper tests)
 var (
 	phpClassDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:abstract\s+)?class\s+(\w+)`)
 	phpMethodDeclRe   = regexp.MustCompile(`(?m)^[ \t]+(?:(?:public|protected|private)\s+)?(?:static\s+)?function\s+(\w+)\s*\(`)
@@ -560,11 +715,21 @@ var phpCallKeywords = map[string]bool{
 	"true": true, "false": true, "null": true, "self": true, "parent": true,
 }
 
-// parsePHP uses regex-based extraction for PHP files
+// parsePHP uses tree-sitter for PHP file parsing.
 func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) {
 	result := &ParseResult{}
-	text := string(content)
-	lines := strings.Split(text, "\n")
+	lines := strings.Split(string(content), "\n")
+
+	phpLang := grammars.PhpLanguage()
+	phpParser := gotreesitter.NewParser(phpLang)
+	tree, err := phpParser.Parse(content)
+	if err != nil {
+		return nil, fmt.Errorf("tree-sitter parse PHP: %w", err)
+	}
+	root := tree.RootNode()
+	if root == nil {
+		return nil, fmt.Errorf("tree-sitter returned nil root for %s", relPath)
+	}
 
 	// C1: Create file-level node so import edges have a valid source node
 	fileNode := types.ASTNode{
@@ -581,109 +746,129 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	// C11: Track seen names to avoid duplicate nodes
 	seen := map[string]bool{}
 
-	// Extract classes
-	for _, match := range phpClassDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		if seen[name] {
-			continue
+	// Walk tree to extract classes, methods, functions, use statements
+	gotreesitter.Walk(root, func(n *gotreesitter.Node, depth int) gotreesitter.WalkAction {
+		if !n.IsNamed() {
+			return gotreesitter.WalkContinue
 		}
-		seen[name] = true
-		rawStart := match[0]
-		startPos := skipLeadingNewline(content, rawStart)
-		startByte := uint32(startPos)
-		endByte := findBlockEnd(content, startPos)
-		contentSum := buildContentSum(lines, startPos, name)
+		nodeType := n.Type(phpLang)
 
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
-			FilePath:   relPath,
-			SymbolName: name,
-			NodeType:   types.NodeTypeClass,
-			StartByte:  startByte,
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	// Extract methods — determine which class they belong to by byte position
-	for _, match := range phpMethodDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		methodStart := uint32(match[0])
-
-		// Find the enclosing class by checking byte ranges
-		qualifiedName := name
-		for _, node := range result.Nodes {
-			if node.NodeType == types.NodeTypeClass && methodStart >= node.StartByte && methodStart < node.EndByte {
-				qualifiedName = node.SymbolName + "." + name
-				break
+		switch nodeType {
+		case "class_declaration":
+			nameNode := n.ChildByFieldName("name", phpLang)
+			if nameNode == nil {
+				return gotreesitter.WalkContinue
 			}
-		}
-
-		// C11: skip duplicates
-		if seen[qualifiedName] {
-			continue
-		}
-		seen[qualifiedName] = true
-
-		startByte := uint32(match[0])
-		endByte := findBlockEnd(content, match[0])
-		contentSum := buildContentSum(lines, match[0], qualifiedName)
-
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, qualifiedName),
-			FilePath:   relPath,
-			SymbolName: qualifiedName,
-			NodeType:   types.NodeTypeMethod,
-			StartByte:  startByte,
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	// Extract standalone functions
-	for _, match := range phpFuncDeclRe.FindAllStringSubmatchIndex(text, -1) {
-		name := text[match[2]:match[3]]
-		rawStart := match[0]
-		startPos := skipLeadingNewline(content, rawStart)
-
-		// C11: Skip if this function is inside a class body (already captured as a method)
-		insideClass := false
-		for _, node := range result.Nodes {
-			if node.NodeType == types.NodeTypeClass && uint32(startPos) >= node.StartByte && uint32(startPos) < node.EndByte {
-				insideClass = true
-				break
+			className := nameNode.Text(content)
+			if seen[className] {
+				return gotreesitter.WalkSkipChildren
 			}
+			seen[className] = true
+			startByte := int(n.StartByte())
+			endByte := n.EndByte()
+			contentSum := buildContentSum(lines, startByte, className)
+
+			result.Nodes = append(result.Nodes, types.ASTNode{
+				ID:         types.GenerateNodeID(relPath, className),
+				FilePath:   relPath,
+				SymbolName: className,
+				NodeType:   types.NodeTypeClass,
+				StartByte:  n.StartByte(),
+				EndByte:    endByte,
+				ContentSum: contentSum,
+			})
+
+			// Extract methods from declaration_list body
+			bodyNode := n.ChildByFieldName("body", phpLang)
+			if bodyNode != nil {
+				for i := 0; i < bodyNode.ChildCount(); i++ {
+					methodNode := bodyNode.Child(i)
+					if methodNode == nil || !methodNode.IsNamed() {
+						continue
+					}
+					if methodNode.Type(phpLang) != "method_declaration" {
+						continue
+					}
+					methNameNode := methodNode.ChildByFieldName("name", phpLang)
+					if methNameNode == nil {
+						continue
+					}
+					methodName := methNameNode.Text(content)
+					qualifiedName := className + "." + methodName
+					if seen[qualifiedName] {
+						continue
+					}
+					seen[qualifiedName] = true
+					mStartByte := int(methodNode.StartByte())
+					mEndByte := methodNode.EndByte()
+					mContentSum := buildContentSum(lines, mStartByte, qualifiedName)
+					result.Nodes = append(result.Nodes, types.ASTNode{
+						ID:         types.GenerateNodeID(relPath, qualifiedName),
+						FilePath:   relPath,
+						SymbolName: qualifiedName,
+						NodeType:   types.NodeTypeMethod,
+						StartByte:  methodNode.StartByte(),
+						EndByte:    mEndByte,
+						ContentSum: mContentSum,
+					})
+				}
+			}
+			return gotreesitter.WalkSkipChildren
+
+		case "function_definition":
+			nameNode := n.ChildByFieldName("name", phpLang)
+			if nameNode == nil {
+				return gotreesitter.WalkContinue
+			}
+			name := nameNode.Text(content)
+			if seen[name] {
+				return gotreesitter.WalkSkipChildren
+			}
+			seen[name] = true
+			startByte := int(n.StartByte())
+			endByte := n.EndByte()
+			contentSum := buildContentSum(lines, startByte, name)
+			result.Nodes = append(result.Nodes, types.ASTNode{
+				ID:         types.GenerateNodeID(relPath, name),
+				FilePath:   relPath,
+				SymbolName: name,
+				NodeType:   types.NodeTypeFunction,
+				StartByte:  n.StartByte(),
+				EndByte:    endByte,
+				ContentSum: contentSum,
+			})
+			return gotreesitter.WalkSkipChildren
+
+		case "namespace_use_declaration":
+			// use App\Models\User;
+			for i := 0; i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child == nil || !child.IsNamed() {
+					continue
+				}
+				if child.Type(phpLang) == "namespace_use_clause" {
+					usePath := child.Text(content)
+					if usePath != "" {
+						result.Edges = append(result.Edges, types.ASTEdge{
+							SourceID: types.GenerateNodeID(relPath, relPath),
+							TargetID: types.GenerateNodeID(usePath, usePath),
+							EdgeType: types.EdgeTypeImports,
+						})
+					}
+				}
+			}
+			return gotreesitter.WalkSkipChildren
 		}
-		if insideClass {
-			continue
-		}
 
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
+		return gotreesitter.WalkContinue
+	})
 
-		startByte := uint32(startPos)
-		endByte := findBlockEnd(content, startPos)
-		contentSum := buildContentSum(lines, startPos, name)
-
-		result.Nodes = append(result.Nodes, types.ASTNode{
-			ID:         types.GenerateNodeID(relPath, name),
-			FilePath:   relPath,
-			SymbolName: name,
-			NodeType:   types.NodeTypeFunction,
-			StartByte:  startByte,
-			EndByte:    endByte,
-			ContentSum: contentSum,
-		})
-	}
-
-	// Extract instantiation edges (new ClassName) and call edges
+	// Extract instantiation edges and call edges using regex on node bodies
 	// M9: deduplicate call edges
 	callSeen := map[string]bool{}
 	for _, node := range result.Nodes {
 		if node.NodeType == types.NodeTypeFile {
-			continue // skip file node for call extraction
+			continue
 		}
 		if node.EndByte > uint32(len(content)) {
 			continue
@@ -762,17 +947,6 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				})
 			}
 		}
-	}
-
-	// H1: Extract PHP import (use) edges
-	// C1: TargetID references the target file's file node
-	for _, match := range phpUseRe.FindAllStringSubmatch(text, -1) {
-		usePath := match[1]
-		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),       // this file
-			TargetID: types.GenerateNodeID(usePath, usePath),       // target file's file node
-			EdgeType: types.EdgeTypeImports,
-		})
 	}
 
 	return result, nil
