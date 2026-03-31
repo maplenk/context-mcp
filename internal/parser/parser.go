@@ -1,10 +1,12 @@
 package parser
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"log"
 	"os"
@@ -99,6 +101,16 @@ func IsSupported(filePath string) bool {
 	return false
 }
 
+// exprToString renders a Go AST expression as source text using go/printer.
+// Falls back to fmt.Sprintf if printing fails.
+func exprToString(fset *token.FileSet, expr ast.Expr) string {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, expr); err != nil {
+		return fmt.Sprintf("%v", expr)
+	}
+	return buf.String()
+}
+
 // parseGo uses Go's native AST parser for accurate Go file parsing
 func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 	fset := token.NewFileSet()
@@ -155,7 +167,7 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 			if decl.Type != nil && decl.Type.Params != nil {
 				var params []string
 				for _, param := range decl.Type.Params.List {
-					params = append(params, fmt.Sprintf("%v", param.Type))
+					params = append(params, exprToString(fset, param.Type))
 				}
 				contentSum = name + "(" + strings.Join(params, ", ") + ")"
 			}
@@ -804,7 +816,7 @@ var (
 	phpFuncDeclRe     = regexp.MustCompile(`(?m)(?:^|\n)\s*function\s+(\w+)\s*\(`)
 	phpNewExprRe      = regexp.MustCompile(`new\s+(\w+)\s*\(`)
 	phpUseRe          = regexp.MustCompile(`(?m)^use\s+([\w\\]+)`)
-	phpMethodCallRe   = regexp.MustCompile(`(?:\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
+	phpMethodCallRe   = regexp.MustCompile(`(\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
 	phpStaticCallRe   = regexp.MustCompile(`([A-Z]\w+)\s*::\s*(\w+)\s*\(`)
 	phpFuncCallRe     = regexp.MustCompile(`(?:^|[^>\w])(\w+)\s*\(`)
 )
@@ -1069,21 +1081,42 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		}
 
 		// M5: Method call edges — $this->method(), $obj->method(), self::method()
-		for _, callMatch := range phpMethodCallRe.FindAllStringSubmatch(bodyText, -1) {
-			target := callMatch[1]
-			if !phpCallKeywords[target] {
-				targetID := types.GenerateNodeID(relPath, target)
-				edgeKey := node.ID + ":" + targetID
-				if callSeen[edgeKey] {
-					continue
-				}
-				callSeen[edgeKey] = true
-				result.Edges = append(result.Edges, types.ASTEdge{
-					SourceID: node.ID,
-					TargetID: targetID,
-					EdgeType: types.EdgeTypeCalls,
-				})
+		// Determine enclosing class from the node's SymbolName (e.g., "User.save" -> "User")
+		var enclosingClass string
+		if node.NodeType == types.NodeTypeMethod {
+			if dotIdx := strings.Index(node.SymbolName, "."); dotIdx >= 0 {
+				enclosingClass = node.SymbolName[:dotIdx]
 			}
+		}
+		for _, callMatch := range phpMethodCallRe.FindAllStringSubmatch(bodyText, -1) {
+			caller := callMatch[1]  // "$this", "$obj", "self", "static", "parent"
+			methodName := callMatch[2] // bare method name
+			if phpCallKeywords[methodName] {
+				continue
+			}
+			isSelfCall := caller == "$this" || caller == "self" || caller == "static" || caller == "parent"
+			var target string
+			var targetSymbol string
+			if isSelfCall && enclosingClass != "" {
+				// $this->method() / self::method() — qualify with enclosing class
+				target = enclosingClass + "." + methodName
+			} else {
+				// $obj->method() — use bare name for local lookup, TargetSymbol for cross-file
+				target = methodName
+				targetSymbol = methodName
+			}
+			targetID := types.GenerateNodeID(relPath, target)
+			edgeKey := node.ID + ":" + targetID
+			if callSeen[edgeKey] {
+				continue
+			}
+			callSeen[edgeKey] = true
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID:     node.ID,
+				TargetID:     targetID,
+				EdgeType:     types.EdgeTypeCalls,
+				TargetSymbol: targetSymbol,
+			})
 		}
 
 		// M5: Static call edges — ClassName::method()

@@ -177,19 +177,30 @@ func main() {
 	log.Printf("MCP server ready on stdio")
 
 	// 10. Handle graceful shutdown
+	// C7: Use a done channel instead of os.Exit(0) so deferred cleanup runs naturally.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
 	go func() {
 		sig := <-sigCh
 		log.Printf("Received signal %v, shutting down...", sig)
 		w.Stop()
-		cleanup()
-		os.Exit(0)
+		close(done)
 	}()
 
-	// 11. Start serving MCP requests (blocks until stdin closes)
-	if err := server.Serve(); err != nil {
-		log.Fatalf("MCP server error: %v", err)
+	// 11. Start serving MCP requests (blocks until stdin closes or signal received)
+	serveCh := make(chan error, 1)
+	go func() {
+		serveCh <- server.Serve()
+	}()
+
+	select {
+	case err := <-serveCh:
+		if err != nil {
+			log.Printf("MCP server error: %v", err)
+		}
+	case <-done:
+		log.Printf("Shutdown complete")
 	}
 }
 
@@ -667,12 +678,19 @@ func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Sto
 	for event := range w.Events() {
 		indexMu.Lock()
 		processFileEvent(event, cfg, store, p, embedder, graphEngine)
+
+		// C6: Check threshold while still holding indexMu to prevent lost-update race.
+		// Two rapid events could both see threshold exceeded, both reset, and both spawn
+		// redundant betweenness goroutines if this check were outside the lock.
+		shouldRefresh := graphEngine.ChangeCount() >= betweennessRefreshThreshold
+		if shouldRefresh {
+			graphEngine.ResetChangeCount()
+		}
 		indexMu.Unlock()
 
 		// H4: Trigger async betweenness + PageRank recomputation after threshold changes (M7)
 		// H12: The async goroutine also acquires indexMu to prevent races with the event loop
-		if graphEngine.ChangeCount() >= betweennessRefreshThreshold {
-			graphEngine.ResetChangeCount()
+		if shouldRefresh {
 			go func() {
 				indexMu.Lock()
 				defer indexMu.Unlock()
