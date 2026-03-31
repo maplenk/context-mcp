@@ -223,6 +223,11 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 			weightInDegree*inDegree +
 			weightSemantic*semantic
 
+		// Penalize auto-generated/helper files to prevent them dominating results
+		if isHelperFile(node.FilePath) {
+			composite *= 0.3
+		}
+
 		results = append(results, types.SearchResult{
 			Node:  node,
 			Score: composite,

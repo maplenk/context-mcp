@@ -33,9 +33,13 @@ var skipDirs = []string{
 
 // shouldSkip returns true if the relative path is within a directory we want to skip.
 func shouldSkip(rel string) bool {
-	for _, prefix := range skipDirs {
-		if strings.HasPrefix(rel, prefix) {
-			return true
+	parts := strings.Split(rel, "/")
+	for _, part := range parts {
+		for _, skip := range skipDirs {
+			trimmed := strings.TrimSuffix(skip, "/")
+			if part == trimmed {
+				return true
+			}
 		}
 	}
 	return false
