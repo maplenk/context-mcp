@@ -529,6 +529,43 @@ func (s *Store) SearchLexical(query string, limit int) ([]types.SearchResult, er
 	return results, rows.Err()
 }
 
+// SearchLexicalRaw performs FTS5 BM25 lexical search without sanitizing the query.
+// Use this when the caller has already constructed a valid FTS5 query (e.g., with
+// boolean operators like OR and prefix wildcards like *). For untrusted user input,
+// use SearchLexical instead which sanitizes automatically.
+func (s *Store) SearchLexicalRaw(query string, limit int) ([]types.SearchResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
+		       bm25(nodes_fts, 10.0, 1.0, 0.0) as score
+		FROM nodes_fts fts
+		JOIN nodes n ON n.id = fts.node_id
+		WHERE nodes_fts MATCH ?
+		ORDER BY score
+		LIMIT ?`, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []types.SearchResult
+	for rows.Next() {
+		var r types.SearchResult
+		var nt uint8
+		if err := rows.Scan(&r.Node.ID, &r.Node.FilePath, &r.Node.SymbolName, &nt,
+			&r.Node.StartByte, &r.Node.EndByte, &r.Node.ContentSum, &r.Score); err != nil {
+			return nil, err
+		}
+		r.Node.NodeType = types.NodeType(nt)
+		// BM25 returns negative scores (lower is better), negate for consistency
+		r.Score = -r.Score
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 // HasVecTable returns whether the sqlite-vec virtual table is available
 func (s *Store) HasVecTable() bool {
 	return s.hasVecTable

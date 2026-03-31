@@ -83,8 +83,58 @@ func GetStopWords() []string {
 }
 
 // camelCaseRe splits CamelCase identifiers into words.
-// Matches: sequences of uppercase+lowercase (e.g. "Read"), all-lowercase runs, or all-uppercase runs.
+// Matches: sequences of uppercase+lowercase (e.g. "Read"), all-lowercase runs, or digit runs.
+// Note: [A-Z]+ is unreachable because [A-Z][a-z0-9]* matches single uppercase letters first.
+// The splitCamelCase function compensates by merging consecutive single-uppercase tokens.
 var camelCaseRe = regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z][a-z0-9]*|[A-Z]+|[0-9]+`)
+
+// splitCamelCase splits a CamelCase identifier into words, correctly handling
+// consecutive uppercase runs like "HTTPClient" → ["HTTP", "Client"].
+// Go's RE2 lacks lookaheads, so we use a two-pass approach:
+//  1. Split with camelCaseRe (which yields ["H","T","T","P","Client"] for "HTTPClient")
+//  2. Merge consecutive single-uppercase-letter tokens into one string
+func splitCamelCase(s string) []string {
+	parts := camelCaseRe.FindAllString(s, -1)
+	if len(parts) <= 1 {
+		return parts
+	}
+
+	var merged []string
+	i := 0
+	for i < len(parts) {
+		// Check if this is a single uppercase letter that starts a run
+		if len(parts[i]) == 1 && parts[i][0] >= 'A' && parts[i][0] <= 'Z' {
+			// Collect consecutive single-uppercase-letter tokens
+			run := parts[i]
+			j := i + 1
+			for j < len(parts) && len(parts[j]) == 1 && parts[j][0] >= 'A' && parts[j][0] <= 'Z' {
+				run += parts[j]
+				j++
+			}
+			// If the next token starts with lowercase, the last uppercase letter
+			// belongs to that token (e.g., "HTTP" + "Client" from "H","T","T","P","Client")
+			if j < len(parts) && len(parts[j]) > 0 && parts[j][0] >= 'a' && parts[j][0] <= 'z' {
+				// Only peel off the last letter if the run has more than 1 char
+				if len(run) > 1 {
+					merged = append(merged, run[:len(run)-1])
+					// Prepend the last uppercase letter to the next token
+					parts[j] = string(run[len(run)-1]) + parts[j]
+				} else {
+					// Single letter followed by lowercase token — let regex result stand
+					merged = append(merged, run+parts[j])
+					j++
+				}
+			} else {
+				merged = append(merged, run)
+			}
+			i = j
+		} else {
+			merged = append(merged, parts[i])
+			i++
+		}
+	}
+	return merged
+}
 
 // fts5SpecialRe matches FTS5 special characters that must be sanitized before query construction.
 var fts5SpecialRe = regexp.MustCompile("[\"':(){}^+\\-*/`]")
@@ -143,11 +193,14 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	ftsQuery := buildFTSQuery(query)
 
 	// Path 1: Lexical search via FTS5 BM25
-	lexicalResults, err := h.store.SearchLexical(ftsQuery, candidateLimit)
+	// Use SearchLexicalRaw because buildFTSQuery already sanitizes via sanitizeFTS
+	// and constructs valid FTS5 syntax (OR operators, * prefix wildcards).
+	// SearchLexical would double-sanitize, destroying OR→or and stripping *.
+	lexicalResults, err := h.store.SearchLexicalRaw(ftsQuery, candidateLimit)
 	if err != nil {
 		// FTS5 query syntax errors — try sanitized original as fallback
 		sanitizedFallback := sanitizeFTS(query)
-		lexicalResults, err = h.store.SearchLexical(sanitizedFallback, candidateLimit)
+		lexicalResults, err = h.store.SearchLexicalRaw(sanitizedFallback, candidateLimit)
 		if err != nil {
 			lexicalResults = nil
 		}
@@ -211,9 +264,11 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 
 		rawPPR, rawInDegree := h.graph.ComputeSearchSignalsSubgraph(seeds, candidateIDs)
 		pprScores = normalizeMap(rawPPR)
-		inDegreeScores = rawInDegree // already [0,1] normalized
+		// Normalize InDegree within the candidate set (same as PPR) so that
+		// scores reflect relevance among candidates, not full-graph popularity.
+		inDegreeScores = normalizeMap(rawInDegree)
 	} else if h.graph != nil {
-		inDegreeScores = h.graph.ComputeInDegree()
+		inDegreeScores = normalizeMap(h.graph.ComputeInDegree())
 	}
 
 	// Load betweenness scores (already [0,1] from index time)
@@ -278,7 +333,7 @@ func buildFTSQuery(query string) string {
 	for _, word := range words {
 		// Check if it's CamelCase
 		if isCamelCase(word) {
-			parts := camelCaseRe.FindAllString(word, -1)
+			parts := splitCamelCase(word)
 			if len(parts) > 1 {
 				// Add both the original and split parts
 				expanded = append(expanded, word)
