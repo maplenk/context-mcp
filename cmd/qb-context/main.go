@@ -156,7 +156,10 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("invalid path: %w", err)
 			}
-			absRoot, _ := filepath.Abs(cfg.RepoRoot)
+			absRoot, absRootErr := filepath.Abs(cfg.RepoRoot)
+			if absRootErr != nil {
+				return fmt.Errorf("resolving repo root: %w", absRootErr)
+			}
 			if !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) && absPath != absRoot {
 				return fmt.Errorf("path traversal detected: %s is outside repo root", path)
 			}
