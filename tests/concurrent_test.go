@@ -476,3 +476,81 @@ func NewFunc%d() {}
 
 	t.Logf("After concurrent index+delete: %d nodes, %d edges", len(nodeIDs), len(edges))
 }
+
+// TestConcurrent_GraphRebuildDuringSearch exercises concurrent graph rebuilds,
+// ComputeSearchSignals, and hybrid search to surface application-level race
+// conditions that simple mutex-serialized tests would not catch.
+// Best run with: go test -tags fts5 -race ./tests/...
+func TestConcurrent_GraphRebuildDuringSearch(t *testing.T) {
+	tp := newTestPipeline(t)
+
+	// Create initial data so graph has substance
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("concurrent_graph_%d.go", i)
+		content := fmt.Sprintf(`package main
+
+type CG%d struct{}
+func (c *CG%d) Run%d() {}
+func (c *CG%d) Init%d() {}
+func (c *CG%d) Process%d() {}
+`, i, i, i, i, i, i, i)
+		writeGoFile(t, tp.repoRoot, name, content)
+		tp.indexFile(t, name)
+	}
+
+	const iterations = 100
+	var wg sync.WaitGroup
+
+	// Goroutine 1: repeatedly rebuild graph from store edges
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			edges, err := tp.store.GetAllEdges()
+			if err == nil {
+				tp.graphEngine.BuildFromEdges(edges)
+			}
+		}
+	}()
+
+	// Goroutine 2: repeatedly call ComputeSearchSignals
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			nodeIDs, err := tp.store.GetAllNodeIDs()
+			if err == nil && len(nodeIDs) > 0 {
+				// Use a subset of node IDs as seeds
+				seeds := nodeIDs
+				if len(seeds) > 3 {
+					seeds = seeds[:3]
+				}
+				tp.graphEngine.ComputeSearchSignals(seeds)
+			}
+		}
+	}()
+
+	// Goroutine 3: repeatedly run hybrid search
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		queries := []string{"CG", "Run", "Init", "Process", "struct"}
+		for i := 0; i < iterations; i++ {
+			tp.search.Search(queries[i%len(queries)], 5, nil)
+		}
+	}()
+
+	// Goroutine 4: repeatedly read graph metrics during rebuilds
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			tp.graphEngine.NodeCount()
+			tp.graphEngine.EdgeCount()
+			tp.graphEngine.PageRank()
+		}
+	}()
+
+	wg.Wait()
+	t.Log("Concurrent graph rebuild + search + signals test completed without panics")
+}
