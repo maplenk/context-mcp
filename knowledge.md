@@ -114,12 +114,13 @@ qb-context/
 - Debounce with configurable window (default 500ms) + improved coalescing (CREATE+WRITE→CREATE, DELETE always wins)
 - **Nested .gitignore** support via go-gitignore (root + discovered during walk)
 - **Hot-reload** of .gitignore files on modification (M10)
-- `stopped` flag set BEFORE closing `stopCh` to prevent timer race (L5)
+- `Stop()` is **idempotent** via `sync.Once` — safe to call multiple times
+- **Gitignores slice** protected by mutex in `Start()` and `isExcluded()` — prevents race on concurrent access
 - `WalkSourceFiles()` standalone function — no fsnotify allocation needed (L4)
 
 ### Embedding (`internal/embedding`)
 - `Embedder` interface: `Embed(text) → []float32`, `EmbedBatch`, `Dim() int`, `Close`
-- `EmbeddingDim` is now a **variable** (default 384, set at runtime when ONNX is used)
+- `EmbeddingDim` is an **atomic variable** (`sync/atomic.Int32`) with `GetEmbeddingDim()`/`SetEmbeddingDim()` accessors — thread-safe
 - `TFIDFEmbedder` (default): word/subword tokenization with CamelCase splitting, TF-IDF weighting, random projection to 384-dim. Provides real semantic locality (similar code → similar vectors)
 - `HashEmbedder`: deterministic hash-based pseudo-embeddings (last-resort fallback, stateless)
 - **`ONNXEmbedder`** (build tag: `onnx`): Runs quantized Qwen2 model via ONNX Runtime
@@ -132,6 +133,10 @@ qb-context/
   - Semantic quality: `sim(ReadFile, ReadFileContents) = 0.69`, `sim(ReadFile, SQL) = 0.17`
   - Model: `/Users/naman/Documents/coindex/quantized_model` (473MB, INT8, Qwen2ForCausalLM)
 - `NewEmbedder()` factory returns TFIDFEmbedder; main.go tries ONNX first if `--onnx-model` configured
+- **Trigram/bigram generation** operates on `[]rune` (not `[]byte`) for correct Unicode handling
+- BPE tokenizer tracks **unknown token drops** with atomic counter + periodic warning log (every 1000th)
+- ONNX session: **tensor leak fix** — partially allocated output tensors cleaned up on error paths
+- ONNX hidden dimension **derived at runtime** from output shape (fallback to 896)
 - Utility: SerializeFloat32, DeserializeFloat32, CosineSimilarity
 - **Build**: `go build -tags "fts5,onnx" ./...` for ONNX support; `go build -tags "fts5" ./...` for TFIDF only
 
@@ -143,8 +148,9 @@ qb-context/
 - `PageRank`: standard (non-personalized) PageRank via power iteration
 - `ComputeBetweenness`: Brandes' algorithm via `network.Betweenness()`, normalized using **graph-theoretic maximum** `(n-1)*(n-2)` for directed graphs (comparable across graph sizes)
 - `DetectCommunities`: Louvain via `community.Modularize()`, cached with invalidation on any graph mutation
-- `ComputeInDegree`: in-degree authority per node, normalized to [0,1], **cached with invalidation** on mutations
-- `ComputeSearchSignals`: computes PPR + InDegree under **single lock** for search consistency (prevents race conditions)
+- `ComputeInDegree`: in-degree authority per node, normalized to [0,1], **cached with invalidation** on mutations. **Returns copy on cache miss** (not live reference)
+- `ComputeSearchSignals`: computes PPR + InDegree using **RLock with upgrade-to-Lock** pattern for search consistency
+- `GetConnectors`: checks `communityValid` flag before reading community data — prevents stale results
 - `TraceCallPath`: bidirectional BFS path finding between two symbols
 - `GetEntryPoints`, `GetHubs`, `GetConnectors`: architecture analysis helpers
 - `GetCallers`, `GetCallees`, `CollectDeps`: dependency traversal helpers
@@ -165,7 +171,10 @@ qb-context/
 - All signals normalized to [0,1] before weighting
 - **Snapshot-based signal fetching**: PPR + InDegree computed under single lock via `ComputeSearchSignals()` (no race conditions)
 - PPR seeded from top 10 FTS results + active file nodes (query-time, not index-time)
-- FTS5 enhancements: prefix matching (`term*`), CamelCase splitting, stop word filtering, FTS5 special char sanitization (includes `*` wildcard)
+- FTS5 enhancements: prefix matching (`term*`), CamelCase splitting, stop word filtering, FTS5 special char sanitization (includes `*` wildcard), **boolean operator neutralization** (OR/AND/NOT/NEAR lowercased)
+- **Min-max normalization** for all scores (handles negative cosine similarity correctly)
+- PPR seeds **deduplicated** before computation
+- CamelCase regex includes **digits** (`[0-9]+`) for identifiers like `HTTP2Client`
 - Per-file cap: configurable via `max_per_file` parameter (default 3)
 - Stop words: configurable via `SetStopWords()` function
 
@@ -190,6 +199,10 @@ qb-context/
 - `explore` → multi-search with dependency/dependent/hotspot analysis
 - `understand` → 3-tier symbol resolution (exact → fuzzy → FTS) with callers/callees/PageRank/community
 - `health` → daemon status (node count, edge count, version)
+- **Tool registration**: errors logged (not silently discarded), duplicate names prevented
+- **Response size cap**: 1MB limit on `toToolResponse` marshaled output
+- **PageRank caching**: `understand` and `get_key_symbols` use stored scores, fall back to recomputation
+- **detect_changes**: includes `status` field (file_modified/deleted/new_file) per symbol, tightened git ref regex
 
 ### CLI Tool (`cmd/qb-context/main.go`)
 - `qb-context cli <tool_name> [json_args]` — direct tool invocation for testing/benchmarking
@@ -203,10 +216,13 @@ qb-context/
 - Betweenness centrality computed and stored in `node_scores` at index time
 - ADR documents discovered and stored in `project_summaries` at index time
 - **Incremental graph updates** via filesystem watcher: RemoveNode/AddEdge instead of full rebuild
-- **Async betweenness refresh** after 20 incremental changes
+- **Async betweenness refresh** after 20 incremental changes, acquires `indexMu`
 - **Batch embedding recovery**: falls back to per-item embedding on batch failure
-- `indexPath()` for targeted re-indexing of specific files/directories
+- `indexPath()` for targeted re-indexing — **path traversal protection**, skips excluded dirs, recomputes betweenness/PageRank
+- `handleFileEvents()` acquires `indexMu` per event via `processFileEvent` helper — prevents concurrent index corruption
+- **Memory monitor** goroutine uses `memDone` channel for clean shutdown (no goroutine leak)
 - Graceful shutdown on SIGINT/SIGTERM with sync.Once cleanup
+- ONNX config validation: warns on invalid settings at startup
 
 ---
 
@@ -272,19 +288,31 @@ qb-context/
 | 24 | `03ed37b` | DA Review Wave 1 — 22 fixes (C4, H1-H7, M1, M3-M10, L2-L5) | Done |
 | 25 | `afc28f7` | ONNX embedder with Qwen2 model support (C2) | Done |
 
-### Test Coverage (13 packages, all passing — 194+ tests)
-- `internal/types` — 10 tests (ID generation, enum values)
-- `internal/storage` — 10 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT)
-- `internal/parser` — 11 tests (Go/JS/TS/PHP parsing, edge extraction, import edges, class methods, findBlockEnd states, docblocks, indented PHP classes)
-- `internal/embedding` — 34 tests (hash embedder, TFIDF embedder, semantic locality, CamelCase similarity, tokenization, serialization, BPE tokenizer load/encode/roundtrip, ONNX embedder basic/similarity/invalidDim)
-- `internal/graph` — 37 tests (BFS, cycles, depth limits, true PPR, PPR personalization bias, DAG, betweenness theoretical normalization, blast radius depth, communities, in-degree caching, search signals, change counter, trace call path)
-- `internal/search` — 25 tests (composite scoring, per-file cap, custom max_per_file, CamelCase, stop words, FTS sanitization, limits, concurrent SetStopWords)
-- `internal/mcp` — 35 tests (CLI handlers, SDK protocol, initialize, tools/list, tools/call, all 13 tools, concurrent registration)
+### Phase 5: DA Review #7 Full Fix Sprint (Commits 26-31)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 26 | `3126a83` | Parser + Types — 16 issues (C1, C11, H2-H5, H21-H22, M9-M15, L17) | Agent A (Opus) | Done |
+| 27 | `38b4ea9` | Storage Security — 15 issues (C7-C8, C10, H6-H8, M1-M8, M32) | Agent B (Opus) | Done |
+| 28 | `3facd0c` | Race Conditions + Main — 15 issues (C9, C14-C16, H10-H12, H20, M17, M20-M21, L18-L19) | Agent C (Opus) | Done |
+| 29 | `896e919` | Search + Hybrid + Graph — 14 issues (C12-C13, C18, H1, H19, M27-M30, L4, L21) | Agent D (Opus) | Done |
+| 30 | `664112d` | Tools + Server — 22 issues (H13-H18, H23-H24, M22-M26, M31, L14-L16, L23) | Agent E (Opus) | Done |
+| 31 | `5241fd0` | Test Improvements — 13 issues (L1-L3, L5-L13, L22) | Agent F (Opus) | Done |
+
+### Test Coverage (13 packages, all passing — 233 tests)
+- `internal/types` — 12 tests (ID generation, enum values, null byte separator collision, hex format validation)
+- `internal/storage` — 14 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT, write rejection, transactional upsert)
+- `internal/parser` — 15 tests (Go/JS/TS/PHP parsing, edge extraction, import edges, class methods, findBlockEnd states, docblocks, indented PHP classes, file-level nodes, cross-file edges)
+- `internal/embedding` — 36 tests (hash embedder, TFIDF embedder, semantic locality, CamelCase similarity, tokenization, serialization, BPE tokenizer load/encode/roundtrip/unknown tokens, ONNX embedder basic/similarity/invalidDim/OS-portable)
+- `internal/graph` — 42 tests (BFS, cycles, depth limits, true PPR, PPR personalization bias, DAG, betweenness theoretical normalization, blast radius depth/multi-edge, communities, in-degree caching/copy, search signals, change counter, trace call path, graph connectivity)
+- `internal/search` — 25 tests (composite scoring, per-file cap, custom max_per_file, CamelCase, stop words, FTS sanitization, limits, concurrent SetStopWords, boolean operator neutralization)
+- `internal/mcp` — 40 tests (CLI handlers, SDK protocol, initialize, tools/list, tools/call, all 13 tools, concurrent registration, data race fix, 5 core blueprint tool handler tests)
 - `internal/adr` — 20 tests (discover files, ADR directory, empty repo, max chars truncation, symlink boundary validation)
 - `internal/watcher` — 11 tests (create/modify/delete events, debounce, gitignore, excluded dirs, stop safety, walk existing, subdirectory events)
-- `tests/integration_test.go` — full pipeline (parse → store → embed → graph → search → delete)
+- `tests/integration_test.go` — full pipeline (parse → store → embed → graph → search → delete → graph connectivity assertion)
 - `tests/incremental_test.go` — 5 tests (add/modify/delete/consistency/full cycle)
 - `tests/concurrent_test.go` — 5 tests (search during index, multi-file changes, search consistency, race conditions)
+- Benchmark tests added for parser, graph, and search packages
 
 ### Devil's Advocate Reviews (4 completed)
 - **Review #1** (after Commits 1-3): 9 issues found — SQL injection, FTS5 schema, CASCADE deletes, watcher race, PHP bugs, file size check. All fixed.
@@ -302,6 +330,14 @@ qb-context/
   - MEDIUM: M1 debounce coalescing docs, M3 nested .gitignore, M4 stopwords thread safety, M5 file filter path matching, M6 RawQuery LIMIT, M7 PageRank storage, M8 indexMu mutex, M9 resources+prompts, M10 gitignore hot-reload. All fixed.
   - LOW: L2 community loop break, L3 CLI subcommand detection, L4 WalkSourceFiles, L5 watcher stop race. All fixed.
   - **Remaining**: C1 tree-sitter (future), C3 ncruces/go-sqlite3 (future), C5 sqlite-vec (future), L1 structured logging (future).
+- **Review #7 (REVIEW-3.md)**: 97 issues found (18 CRITICAL, 24 HIGH, 32 MEDIUM, 23 LOW). **86 fixed across 6 parallel Opus agents** (5 deferred as architectural decisions, 1 false positive, 5 duplicate/already-handled):
+  - **Agent A (Parser+Types, 16 issues)**: C1 file-level nodes for graph connectivity, C11 PHP dedup, H2/H3 cross-package call edges, H4 template literal interpolation, H5 PHP visibility, H21 Go type aliases, H22 NodeTypeInterface, M9 call edge dedup, M10 findBlockEnd fallback, M11-M12 JS regex, M13-M14 ContentSum, M15 null byte separator, L17 TypeScript constructs.
+  - **Agent B (Storage, 15 issues)**: C7 transactional UpsertNode, C8/M4 readfile/edit blocklist, C10 configurable embedding dim, H6 DeleteByFile node_scores, H7 UpdateFTS error propagation, H8 transactional UpsertEmbedding, M1-M8 various storage hardening, M32 migration safety.
+  - **Agent C (Race Conditions, 15 issues)**: C9 path traversal protection, C14 memory monitor leak, C15 signal handler race, C16 handleFileEvents indexMu, H10 gitignores mutex, H11 atomic EmbeddingDim, H12 async betweenness locking, H20 .gitignore in indexPath, M17 recompute graph metrics, M20 ONNX validation, M21 git ref regex, L18-L19 watcher safety.
+  - **Agent D (Search+Graph, 14 issues)**: C12 FTS5 boolean injection, C13/C18 min-max normalization, H1 InDegree cache copy, H19 sanitized FTS fallback, M27 rune trigrams, M28 community staleness, M29 RLock optimization, M30 seed dedup, L4 stop words test, L21 digit CamelCase.
+  - **Agent E (Tools+Server, 22 issues)**: H13 registration error logging, H14 active_files InputSchema, H15-H16 read_symbol/search_code fixes, H17 PageRank caching, H18 BPE unknown tokens, H23 detect_changes status, H24 ONNX tensor leak, M22-M26 server/tool fixes, M31 configurable ONNX dim, L14-L16 response cap/filter/BFS, L23 duplicate prevention.
+  - **Agent F (Tests, 13 issues)**: L1 5 core tool tests, L2 cross-file edges, L3 graph connectivity, L5-L12 test improvements, L22 write rejection, L13 deps.
+  - **Deferred**: C2 tree-sitter, C3 ONNX library, C4 model choice, C5 model not embedded, C6 sqlite-vec. **False positive**: C17 Go 1.25.0 (valid).
 
 ---
 
@@ -445,7 +481,7 @@ qb-context --onnx-model /path/to/model --onnx-lib /path/to/libonnxruntime.dylib 
 
 ### Known Limitations
 - Parser uses improved regex for JS/TS/PHP (not tree-sitter) — state-machine findBlockEnd handles most cases but regex heuristics can still miss edge cases
-- Go call edges only resolve within same file (cross-package calls create edges to non-existent nodes)
+- Go call edges resolve cross-package via file-level nodes, but symbol-level cross-package resolution is approximate
 - sqlite-vec extension needed for vector KNN search — gracefully degrades to keyword-only when unavailable
 - gonum Betweenness doesn't support sampling (O(V*E) for large graphs)
 - Index operations serialized via `indexMu` mutex, but concurrent search during index is safe
@@ -453,3 +489,4 @@ qb-context --onnx-model /path/to/model --onnx-lib /path/to/libonnxruntime.dylib 
 - BPE tokenizer pre-tokenization regex simplified for Go RE2 (no negative lookahead) — functionally equivalent for embedding
 - Embedding dim change requires re-indexing all embeddings (no automatic migration)
 - mattn/go-sqlite3 requires CGO; ncruces/go-sqlite3 (pure Go WASM) is a future replacement target
+- ONNX model file not embedded in binary — must be provided via `--onnx-model` path
