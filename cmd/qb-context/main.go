@@ -46,16 +46,34 @@ func main() {
 
 	log.Printf("qb-context daemon starting — repo: %s", cfg.RepoRoot)
 
-	// 1. Initialize SQLite storage
-	store, err := storage.NewStore(cfg.DBPath)
+	// 1. Initialize embedding engine — ONNX if configured, TFIDF fallback
+	var embedder embedding.Embedder
+	if cfg.ONNXModelDir != "" {
+		dim := cfg.EmbeddingDim
+		if dim == storage.DefaultEmbeddingDim {
+			dim = 256 // default Matryoshka dim for ONNX
+		}
+		onnxEmb, err := embedding.NewONNXEmbedder(cfg.ONNXModelDir, dim, cfg.ONNXLibPath)
+		if err != nil {
+			log.Printf("ONNX embedder failed, falling back to TFIDF: %v", err)
+			embedder = embedding.NewEmbedder()
+		} else {
+			embedder = onnxEmb
+			embedding.EmbeddingDim = dim
+			cfg.EmbeddingDim = dim
+			log.Printf("ONNX embedder initialized (dim=%d, model=%s)", dim, cfg.ONNXModelDir)
+		}
+	} else {
+		embedder = embedding.NewEmbedder()
+		log.Printf("Embedding engine initialized (TF-IDF, dim=%d)", embedding.EmbeddingDim)
+	}
+
+	// 2. Initialize SQLite storage
+	store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
 	if err != nil {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
 	log.Printf("Storage initialized at %s", cfg.DBPath)
-
-	// 2. Initialize embedding engine (TF-IDF based with real semantic locality)
-	embedder := embedding.NewEmbedder()
-	log.Printf("Embedding engine initialized (TF-IDF embedder)")
 
 	// Unified cleanup, safe to call multiple times (signal handler + deferred path).
 	var cleanupOnce sync.Once
@@ -155,7 +173,7 @@ func runCLI(cfg *config.Config, args []string) {
 
 	// Handle --list flag
 	if len(args) > 0 && args[0] == "--list" {
-		store, err := storage.NewStore(cfg.DBPath)
+		store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
 			os.Exit(1)
@@ -197,7 +215,7 @@ func runCLI(cfg *config.Config, args []string) {
 	}
 
 	// Boot pipeline
-	store, err := storage.NewStore(cfg.DBPath)
+	store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
 		os.Exit(1)

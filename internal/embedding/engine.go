@@ -9,12 +9,15 @@ import (
 	"unicode"
 )
 
-const EmbeddingDim = 384
+// EmbeddingDim is the default embedding dimension.
+// This can be overridden at runtime when using an ONNX model with Matryoshka dims.
+var EmbeddingDim = 384
 
 // Embedder is the interface for generating vector embeddings
 type Embedder interface {
 	Embed(text string) ([]float32, error)
 	EmbedBatch(texts []string) ([][]float32, error)
+	Dim() int
 	Close() error
 }
 
@@ -128,6 +131,11 @@ func (e *TFIDFEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 		results[i] = vec
 	}
 	return results, nil
+}
+
+// Dim returns the embedding dimension (384).
+func (e *TFIDFEmbedder) Dim() int {
+	return EmbeddingDim
 }
 
 // Close is a no-op for the TF-IDF embedder
@@ -290,6 +298,11 @@ func (e *HashEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 		results[i] = vec
 	}
 	return results, nil
+}
+
+// Dim returns the embedding dimension (384).
+func (e *HashEmbedder) Dim() int {
+	return EmbeddingDim
 }
 
 // Close is a no-op for the hash embedder

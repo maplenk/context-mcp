@@ -15,17 +15,20 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const embeddingDim = 384
+// DefaultEmbeddingDim is the default embedding dimension (TFIDF fallback).
+const DefaultEmbeddingDim = 384
 
 // Store manages all SQLite database operations
 type Store struct {
-	db          *sql.DB
-	mu          sync.RWMutex
-	hasVecTable bool // true if sqlite-vec vec0 table was created successfully
+	db           *sql.DB
+	mu           sync.RWMutex
+	hasVecTable  bool // true if sqlite-vec vec0 table was created successfully
+	embeddingDim int  // configurable embedding dimension
 }
 
-// NewStore opens (or creates) a SQLite database at the given path and runs migrations
-func NewStore(dbPath string) (*Store, error) {
+// NewStore opens (or creates) a SQLite database at the given path and runs migrations.
+// embeddingDim sets the expected embedding vector dimension (0 uses DefaultEmbeddingDim).
+func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
 	// Ensure parent directory exists
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -43,7 +46,12 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	s := &Store{db: db}
+	dim := DefaultEmbeddingDim
+	if len(embeddingDim) > 0 && embeddingDim[0] > 0 {
+		dim = embeddingDim[0]
+	}
+
+	s := &Store{db: db, embeddingDim: dim}
 
 	// Disable extension loading to prevent load_extension() attacks
 	if _, err := db.Exec("PRAGMA trusted_schema = OFF"); err != nil {
@@ -232,14 +240,14 @@ func (s *Store) DeleteByFile(filePath string) error {
 }
 
 // UpsertEmbedding stores a vector embedding for a node.
-// The embedding must be exactly 384 dimensions.
+// The embedding dimension must match the configured store dimension.
 // Returns nil (no-op) if sqlite-vec is not available, enabling graceful degradation.
 func (s *Store) UpsertEmbedding(nodeID string, embedding []float32) error {
 	if !s.hasVecTable {
 		return nil // graceful degradation: sqlite-vec not available
 	}
-	if len(embedding) != embeddingDim {
-		return fmt.Errorf("embedding dimension mismatch: got %d, want %d", len(embedding), embeddingDim)
+	if len(embedding) != s.embeddingDim {
+		return fmt.Errorf("embedding dimension mismatch: got %d, want %d", len(embedding), s.embeddingDim)
 	}
 
 	s.mu.Lock()

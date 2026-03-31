@@ -28,6 +28,19 @@ type Config struct {
 
 	// ExcludedDirs are additional directories to exclude beyond .gitignore
 	ExcludedDirs []string
+
+	// ONNXModelDir is the path to the ONNX model directory (contains model_quantized.onnx + tokenizer.json).
+	// Empty string disables ONNX and uses the TFIDF fallback embedder.
+	ONNXModelDir string
+
+	// ONNXLibPath is the path to the ONNX Runtime shared library (libonnxruntime.dylib/.so/.dll).
+	// Required when ONNXModelDir is set.
+	ONNXLibPath string
+
+	// EmbeddingDim is the embedding vector dimension. For ONNX models with
+	// Matryoshka support, valid values are 64, 128, 256, 512, 896.
+	// Defaults to 384 (TFIDF) or 256 (ONNX).
+	EmbeddingDim int
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -40,6 +53,7 @@ func DefaultConfig() *Config {
 		EmbeddingBatchSize: 32,
 		WorkerCount:        4,
 		ExcludedDirs:       []string{".git", ".qb-context"},
+		EmbeddingDim:       384,
 	}
 }
 
@@ -53,6 +67,9 @@ func ParseFlags() *Config {
 	flag.IntVar(&cfg.MaxBFSDepth, "max-depth", cfg.MaxBFSDepth, "Maximum BFS traversal depth for impact analysis")
 	flag.IntVar(&cfg.EmbeddingBatchSize, "batch-size", cfg.EmbeddingBatchSize, "Embedding batch size")
 	flag.IntVar(&cfg.WorkerCount, "workers", cfg.WorkerCount, "Number of parallel parsing workers")
+	flag.StringVar(&cfg.ONNXModelDir, "onnx-model", cfg.ONNXModelDir, "Path to ONNX model directory (enables neural embeddings)")
+	flag.StringVar(&cfg.ONNXLibPath, "onnx-lib", cfg.ONNXLibPath, "Path to ONNX Runtime shared library")
+	flag.IntVar(&cfg.EmbeddingDim, "embedding-dim", cfg.EmbeddingDim, "Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896)")
 	flag.Parse()
 
 	// Resolve absolute paths

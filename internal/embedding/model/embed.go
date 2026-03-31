@@ -1,20 +1,15 @@
 package model
 
-// This package will contain the embedded ONNX model and tokenizer vocabulary
-// when the ONNX-based embedder is implemented.
-//
-// Usage (future):
-//
-//	//go:embed all-MiniLM-L6-v2-int8.onnx
-//	var ModelData []byte
-//
-//	//go:embed vocab.txt
-//	var VocabData []byte
-//
-// For now, the HashEmbedder in the parent package provides a functional
-// fallback that generates deterministic pseudo-embeddings.
+// Model metadata for the Qwen2-based code embedding model.
+// The ONNX model and tokenizer are loaded from disk at runtime via
+// --onnx-model flag; they are NOT embedded in the binary.
 
-// Placeholder to ensure the package compiles
-const ModelName = "all-MiniLM-L6-v2"
-const ModelDimension = 384
-const ModelQuantization = "INT8"
+const ModelName = "qwen2-code-embedding"
+const ModelFullDim = 896        // full hidden_size of the Qwen2 model
+const ModelQuantization = "INT8" // quantization format (QOperator)
+
+// MatryoshkaDims lists the supported Matryoshka embedding dimensions.
+var MatryoshkaDims = []int{64, 128, 256, 512, 896}
+
+// DefaultMatryoshkaDim is the recommended dimension balancing quality vs storage.
+const DefaultMatryoshkaDim = 256
