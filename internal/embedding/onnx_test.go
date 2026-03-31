@@ -8,7 +8,15 @@ import (
 	"testing"
 )
 
-const onnxLibPath = "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.1.24.4.dylib"
+func getONNXLibPath() string {
+	if p := os.Getenv("ONNX_LIB_PATH"); p != "" {
+		return p
+	}
+	// Default macOS path
+	return "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.1.24.4.dylib"
+}
+
+var onnxLibPath = getONNXLibPath()
 
 func hasONNXRuntime() bool {
 	_, err := os.Stat(onnxLibPath)

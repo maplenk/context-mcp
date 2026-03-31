@@ -162,6 +162,11 @@ class UserService {
 	graphEngine.BuildFromEdges(edges)
 	t.Logf("Graph: %d nodes, %d edges", graphEngine.NodeCount(), graphEngine.EdgeCount())
 
+	// L3: Verify graph has edges (connectivity)
+	if graphEngine.EdgeCount() == 0 {
+		t.Error("expected graph to have edges (connectivity)")
+	}
+
 	// 7. Test hybrid search
 	hybridSearch := search.New(store, embedder, graphEngine)
 	results, err := hybridSearch.Search("calculator add", 5, nil)
@@ -193,13 +198,14 @@ class UserService {
 	}
 
 	// 10. Test blast radius (if we have edges)
+	// L5: Test multiple edges (removed the break) and verify blast radius doesn't panic
 	// BlastRadius traverses INCOMING edges (who calls the given node), so we test
 	// on the target (callee) to properly validate that callers are found.
 	if graphEngine.EdgeCount() > 0 {
 		for _, edge := range edges {
 			affected := graphEngine.BlastRadius(edge.TargetID, 3)
 			t.Logf("BlastRadius for target %s: %d affected nodes", edge.TargetID[:8], len(affected))
-			break
+			// Just verifying it doesn't panic for each edge
 		}
 	}
 
@@ -217,4 +223,38 @@ class UserService {
 	t.Log("DeleteByFile verified — Go nodes removed")
 
 	t.Log("Integration test passed!")
+}
+
+// TestCrossFileEdges verifies that parsing a Go file produces import edges (L2).
+func TestCrossFileEdges(t *testing.T) {
+	p := parser.New()
+
+	dir := t.TempDir()
+
+	// File with import statement
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("hello")
+}
+`), 0644)
+
+	result, err := p.ParseFile(filepath.Join(dir, "main.go"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have import edges
+	hasImportEdge := false
+	for _, edge := range result.Edges {
+		if edge.EdgeType == types.EdgeTypeImports {
+			hasImportEdge = true
+			break
+		}
+	}
+	if !hasImportEdge {
+		t.Error("expected import edges from Go file")
+	}
 }

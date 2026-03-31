@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/naman/qb-context/internal/types"
@@ -621,5 +622,71 @@ func TestComputeBetweenness_TheoreticalNormalization(t *testing.T) {
 	}
 	if btwn["node-c"] != 0 {
 		t.Errorf("node-c betweenness: got %f, want 0", btwn["node-c"])
+	}
+}
+
+// ---- L8: Benchmark tests ----
+
+func BenchmarkPageRank(b *testing.B) {
+	g := New()
+	// Build a graph with 100 nodes, each with 3 outgoing edges
+	var edges []types.ASTEdge
+	for i := 0; i < 100; i++ {
+		for j := 0; j < 3; j++ {
+			target := (i + j + 1) % 100
+			edges = append(edges, types.ASTEdge{
+				SourceID: fmt.Sprintf("node%d", i),
+				TargetID: fmt.Sprintf("node%d", target),
+				EdgeType: types.EdgeTypeCalls,
+			})
+		}
+	}
+	g.BuildFromEdges(edges)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.PageRank()
+	}
+}
+
+func BenchmarkBlastRadius(b *testing.B) {
+	g := New()
+	var edges []types.ASTEdge
+	for i := 0; i < 100; i++ {
+		for j := 0; j < 3; j++ {
+			target := (i + j + 1) % 100
+			edges = append(edges, types.ASTEdge{
+				SourceID: fmt.Sprintf("node%d", i),
+				TargetID: fmt.Sprintf("node%d", target),
+				EdgeType: types.EdgeTypeCalls,
+			})
+		}
+	}
+	g.BuildFromEdges(edges)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.BlastRadius("node0", 5)
+	}
+}
+
+func BenchmarkComputeBetweenness(b *testing.B) {
+	g := New()
+	var edges []types.ASTEdge
+	for i := 0; i < 100; i++ {
+		for j := 0; j < 3; j++ {
+			target := (i + j + 1) % 100
+			edges = append(edges, types.ASTEdge{
+				SourceID: fmt.Sprintf("node%d", i),
+				TargetID: fmt.Sprintf("node%d", target),
+				EdgeType: types.EdgeTypeCalls,
+			})
+		}
+	}
+	g.BuildFromEdges(edges)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.ComputeBetweenness()
 	}
 }

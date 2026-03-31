@@ -2,13 +2,21 @@ package embedding
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
-const testModelDir = "/Users/naman/Documents/coindex/quantized_model"
+func getModelDir() string {
+	if p := os.Getenv("ONNX_MODEL_DIR"); p != "" {
+		return p
+	}
+	return "/Users/naman/Documents/coindex/quantized_model"
+}
+
+var testModelDir = getModelDir()
 
 func hasTestModel() bool {
-	_, err := os.Stat(testModelDir + "/tokenizer.json")
+	_, err := os.Stat(filepath.Join(testModelDir, "tokenizer.json"))
 	return err == nil
 }
 

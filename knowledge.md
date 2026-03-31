@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-03-31 (post-Phase 4 — DA Review #6 Wave 1 + ONNX Embedder).
+> Living document for team reference. Last updated: 2026-03-31 (post-Phase 5 — DA Review #7 full fix sprint, 86 issues fixed).
 
 ---
 
@@ -57,9 +57,9 @@ qb-context/
 ```
 
 ### Core Types (`internal/types`)
-- `NodeType` uint8: Function(1), Class(2), Struct(3), Method(4)
+- `NodeType` uint8: Function(1), Class(2), Struct(3), Method(4), Interface(5), File(6)
 - `EdgeType` uint8: Calls(1), Imports(2), Implements(3), Instantiates(4)
-- `ASTNode`: ID (SHA-256 of path:symbol), FilePath, SymbolName, NodeType, StartByte, EndByte, ContentSum
+- `ASTNode`: ID (SHA-256 of path + null byte + symbol), FilePath, SymbolName, NodeType, StartByte, EndByte, ContentSum
 - `ASTEdge`: SourceID, TargetID, EdgeType
 - `FileEvent`: Path, Action (Created/Modified/Deleted)
 - `SearchResult`: Node, Score
@@ -81,18 +81,31 @@ qb-context/
 - `GetNodeIDsByFile`, `GetAllFilePaths`, `SearchNodesByName`, `GetNodesByFile`, `GetAllNodeScores` helpers added
 - Uses `ON CONFLICT DO UPDATE` for nodes (not INSERT OR REPLACE which cascades deletes)
 - Uses `INSERT OR IGNORE` for edges
-- `RawQuery`: SELECT-only, rejects `;` (multi-statement), blocks load_extension/writefile/fts3_tokenizer/attach, uses `BeginTx(ReadOnly: true)` for proper transaction isolation
+- `RawQuery`: SELECT-only, rejects `;` (multi-statement), blocks load_extension/writefile/readfile/edit/fts3_tokenizer/attach, uses `BeginTx(ReadOnly: true)` for proper transaction isolation, word-boundary LIMIT injection
+- `UpsertNode`: **transactional** (INSERT + FTS DELETE + FTS INSERT wrapped in tx)
+- `UpsertEmbedding`: **transactional** with proper error handling on DELETE
+- `UpdateFTS`: DELETE error no longer swallowed
+- `DeleteByFile`: explicitly deletes `node_scores` before nodes
+- `SearchLexical`: FTS5 input sanitized at storage layer
+- Connection pool configured: `SetMaxOpenConns(4)`, `SetMaxIdleConns(2)` for SQLite WAL
+- Migration vec0 table uses **configurable embedding dim** (not hardcoded 384)
 - **Build tag**: Requires `-tags "fts5"` for FTS5 support with go-sqlite3
 
 ### Parser (`internal/parser`)
-- Go files: uses `go/parser` + `go/ast` (native, accurate), extracts import edges
+- Go files: uses `go/parser` + `go/ast` (native, accurate), extracts import edges, **type aliases and named types** now captured
+- Go interfaces use `NodeTypeInterface` (not NodeTypeClass)
 - JS/TS files: improved regex extraction (functions, arrow functions, classes, class methods, calls, imports/require)
+- **TypeScript-specific**: interface, enum, type alias declarations extracted
 - PHP files: improved regex extraction (classes, methods, functions, instantiation, method calls, static calls, use statements)
-- `findBlockEnd()`: state-machine tracking 7 states (code, single-quote, double-quote, backtick, line-comment, block-comment, regex) — no longer breaks on braces in strings/comments
-- `buildContentSum()`: captures full multi-line JSDoc/PHPDoc blocks (walks backwards from declaration)
-- Import/dependency edge extraction for all 3 languages (Go imports, JS import/require, PHP use)
-- JS/TS class method extraction as `ClassName.methodName`
-- Regex patterns no longer require line-start anchoring (indented declarations found)
+- PHP methods without visibility keywords now detected (defaults to public)
+- PHP deduplication via `seen` map — standalone function regex no longer duplicates class methods
+- **File-level nodes** (NodeTypeFile) created for every parsed file — import edges now have valid source/target nodes in the graph, fixing graph connectivity
+- Import edge TargetIDs use `GenerateNodeID(importPath, importPath)` — points to target file's file node
+- **Call edge deduplication** via `callSeen` maps in Go, JS, and PHP parsers
+- `findBlockEnd()`: state-machine tracking 7 states, **template literal `${...}` interpolation** handled with nested brace tracking
+- `findBlockEnd()` fallback returns `len(content)` instead of arbitrary `startPos + 5000`
+- `buildContentSum()`: blank-line check prevents capturing unrelated doc blocks; Go functions include param types
+- `GenerateNodeID()` uses **null byte separator** (prevents `"a:b" + "c"` == `"a" + "b:c"` collisions)
 - File size check: skips files > 5MB
 - Tree-sitter .scm query files kept as reference for future integration
 

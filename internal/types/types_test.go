@@ -47,21 +47,37 @@ func TestGenerateNodeID_DifferentInputs(t *testing.T) {
 	}
 }
 
-// TestGenerateNodeID_KnownValue pins the SHA-256 output for a known input so we catch
-// any accidental changes to the hashing logic.
+// TestGenerateNodeID_KnownValue verifies determinism, collision resistance,
+// and that the output is a valid 64-char hex SHA-256 digest.
 func TestGenerateNodeID_KnownValue(t *testing.T) {
 	// M15: Uses null byte separator: sha256("file.go" + \x00 + "MyFunc")
 	id := GenerateNodeID("file.go", "MyFunc")
+	if id == "" {
+		t.Fatal("GenerateNodeID returned empty string")
+	}
 	// Verify determinism with repeated call
 	idAgain := GenerateNodeID("file.go", "MyFunc")
 	if id != idAgain {
 		t.Error("same inputs produced different IDs on repeated call")
 	}
 	// Verify the null byte separator prevents collisions that a colon separator wouldn't.
-	// "file.go" + \0 + "MyFunc" must differ from "file.go\x00My" + \0 + "Func"
 	id2 := GenerateNodeID("file.go\x00My", "Func")
 	if id == id2 {
 		t.Error("null byte separator did not prevent collision")
+	}
+	// Different inputs = different output
+	id3 := GenerateNodeID("file.go", "other")
+	if id == id3 {
+		t.Errorf("GenerateNodeID collision: %s == %s for different symbols", id, id3)
+	}
+	// Verify it's a valid hex string of expected length (SHA-256 = 64 hex chars)
+	if len(id) != 64 {
+		t.Errorf("expected 64-char hex string, got %d chars: %s", len(id), id)
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("non-hex character %q in ID %q", c, id)
+		}
 	}
 }
 
