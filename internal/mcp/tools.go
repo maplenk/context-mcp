@@ -416,7 +416,7 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 	if resolvedRoot == "" {
 		resolvedRoot = deps.RepoRoot
 	}
-	if !strings.HasPrefix(absPath, resolvedRoot) {
+	if !strings.HasPrefix(absPath, resolvedRoot+string(filepath.Separator)) && absPath != resolvedRoot {
 		return nil, fmt.Errorf("path traversal detected: %s is outside repo root", node.FilePath)
 	}
 	f, err := os.Open(absPath)
@@ -887,7 +887,7 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 		if err != nil {
 			continue
 		}
-		if !strings.HasPrefix(absPath, resolvedRoot) {
+		if !strings.HasPrefix(absPath, resolvedRoot+string(filepath.Separator)) && absPath != resolvedRoot {
 			continue // path traversal attempt
 		}
 
