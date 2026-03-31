@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -12,28 +13,26 @@ import (
 	"strings"
 
 	"github.com/naman/qb-context/internal/types"
-	"github.com/odvcencio/gotreesitter"
-	"github.com/odvcencio/gotreesitter/grammars"
+	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/javascript"
+	"github.com/smacker/go-tree-sitter/php"
+	"github.com/smacker/go-tree-sitter/typescript/tsx"
+	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
 
-// maxTreeSitterFileSize is the maximum file size (in bytes) for tree-sitter parsing.
-// Files exceeding this limit are skipped to prevent stack overflows in recursive
-// GLR parsers (e.g., PHP's stackEntryNodesEquivalentFrontierWithScratch).
-const maxTreeSitterFileSize = 500 * 1024
-
-// treeSitterParseSafe wraps a tree-sitter Parse call with panic recovery.
-// Some tree-sitter grammars (notably PHP's GLR parser) can cause stack overflows
-// on large or deeply nested files. This function catches such panics and returns
-// them as errors instead of crashing the process.
-func treeSitterParseSafe(tsParser *gotreesitter.Parser, content []byte) (tree *gotreesitter.Tree, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			tree = nil
-			err = fmt.Errorf("tree-sitter panic during parse: %v", r)
-		}
-	}()
-	tree, err = tsParser.Parse(content)
-	return
+// walkTree recursively walks a tree-sitter node tree, calling fn for each named node.
+// If fn returns true, the walker recurses into children; if false, it skips them.
+func walkTree(node *sitter.Node, fn func(n *sitter.Node) bool) {
+	if node == nil {
+		return
+	}
+	if !fn(node) {
+		return // skip children
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(int(i))
+		walkTree(child, fn)
+	}
 }
 
 // Parser extracts structural nodes and edges from source files
@@ -323,30 +322,25 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	}
 	result.Nodes = append(result.Nodes, fileNode)
 
-	// Skip tree-sitter for very large files to prevent stack overflows
-	if len(content) > maxTreeSitterFileSize {
-		log.Printf("parser: skipping tree-sitter for %s (%d bytes exceeds %d byte limit)", relPath, len(content), maxTreeSitterFileSize)
-		return result, nil
-	}
-
 	// Determine if this is a TypeScript file
 	ext := strings.ToLower(filepath.Ext(relPath))
 	isTS := ext == ".ts" || ext == ".tsx"
 
 	// Select the appropriate language grammar
-	var lang *gotreesitter.Language
+	var lang *sitter.Language
 	if isTS {
 		if ext == ".tsx" {
-			lang = grammars.TsxLanguage()
+			lang = tsx.GetLanguage()
 		} else {
-			lang = grammars.TypescriptLanguage()
+			lang = typescript.GetLanguage()
 		}
 	} else {
-		lang = grammars.JavascriptLanguage()
+		lang = javascript.GetLanguage()
 	}
 
-	tsParser := gotreesitter.NewParser(lang)
-	tree, err := treeSitterParseSafe(tsParser, content)
+	tsParser := sitter.NewParser()
+	tsParser.SetLanguage(lang)
+	tree, err := tsParser.ParseCtx(context.Background(), nil, content)
 	if err != nil {
 		log.Printf("parser: tree-sitter failed for %s: %v — returning file-level node only", relPath, err)
 		return result, nil
@@ -361,22 +355,22 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	seen := map[string]bool{}
 
 	// Walk the tree to extract declarations
-	gotreesitter.Walk(root, func(n *gotreesitter.Node, depth int) gotreesitter.WalkAction {
+	walkTree(root, func(n *sitter.Node) bool {
 		if !n.IsNamed() {
-			return gotreesitter.WalkContinue
+			return true // continue
 		}
-		nodeType := n.Type(lang)
+		nodeType := n.Type()
 
 		switch nodeType {
 		case "function_declaration":
 			// function name(...) { ... }
-			nameNode := n.ChildByFieldName("name", lang)
+			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
-			name := nameNode.Text(content)
+			name := nameNode.Content(content)
 			if seen[name] {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
 			seen[name] = true
 			startByte := int(n.StartByte())
@@ -391,27 +385,27 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "lexical_declaration", "variable_declaration":
 			// const name = (...) => { ... } — arrow functions
-			for i := 0; i < n.ChildCount(); i++ {
+			for i := 0; i < int(n.ChildCount()); i++ {
 				child := n.Child(i)
 				if child == nil || !child.IsNamed() {
 					continue
 				}
-				if child.Type(lang) != "variable_declarator" {
+				if child.Type() != "variable_declarator" {
 					continue
 				}
-				nameNode := child.ChildByFieldName("name", lang)
-				valueNode := child.ChildByFieldName("value", lang)
+				nameNode := child.ChildByFieldName("name")
+				valueNode := child.ChildByFieldName("value")
 				if nameNode == nil || valueNode == nil {
 					continue
 				}
-				if valueNode.Type(lang) != "arrow_function" {
+				if valueNode.Type() != "arrow_function" {
 					continue
 				}
-				name := nameNode.Text(content)
+				name := nameNode.Content(content)
 				if seen[name] {
 					continue
 				}
@@ -429,17 +423,17 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 					ContentSum: contentSum,
 				})
 			}
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "class_declaration":
 			// class Name { methods... }
-			nameNode := n.ChildByFieldName("name", lang)
+			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
-			className := nameNode.Text(content)
+			className := nameNode.Content(content)
 			if seen[className] {
-				return gotreesitter.WalkSkipChildren
+				return false // skip children
 			}
 			seen[className] = true
 			startByte := int(n.StartByte())
@@ -456,21 +450,21 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 			})
 
 			// Extract methods from class body
-			bodyNode := n.ChildByFieldName("body", lang)
+			bodyNode := n.ChildByFieldName("body")
 			if bodyNode != nil {
-				for i := 0; i < bodyNode.ChildCount(); i++ {
+				for i := 0; i < int(bodyNode.ChildCount()); i++ {
 					methodNode := bodyNode.Child(i)
 					if methodNode == nil || !methodNode.IsNamed() {
 						continue
 					}
-					if methodNode.Type(lang) != "method_definition" {
+					if methodNode.Type() != "method_definition" {
 						continue
 					}
-					methNameNode := methodNode.ChildByFieldName("name", lang)
+					methNameNode := methodNode.ChildByFieldName("name")
 					if methNameNode == nil {
 						continue
 					}
-					methodName := methNameNode.Text(content)
+					methodName := methNameNode.Content(content)
 					// Skip constructor and keywords
 					if methodName == "constructor" || methodName == "if" || methodName == "for" ||
 						methodName == "while" || methodName == "switch" || methodName == "catch" ||
@@ -496,21 +490,21 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 					})
 				}
 			}
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "export_statement":
 			// export class/function/interface/enum/type — recurse into children
-			return gotreesitter.WalkContinue
+			return true // continue
 
 		// L17: TypeScript-specific constructs
 		case "interface_declaration":
-			nameNode := n.ChildByFieldName("name", lang)
+			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
-			name := nameNode.Text(content)
+			name := nameNode.Content(content)
 			if seen[name] {
-				return gotreesitter.WalkSkipChildren
+				return false // skip children
 			}
 			seen[name] = true
 			startByte := int(n.StartByte())
@@ -525,16 +519,16 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "enum_declaration":
-			nameNode := n.ChildByFieldName("name", lang)
+			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
-			name := nameNode.Text(content)
+			name := nameNode.Content(content)
 			if seen[name] {
-				return gotreesitter.WalkSkipChildren
+				return false // skip children
 			}
 			seen[name] = true
 			startByte := int(n.StartByte())
@@ -549,16 +543,16 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "type_alias_declaration":
-			nameNode := n.ChildByFieldName("name", lang)
+			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
-			name := nameNode.Text(content)
+			name := nameNode.Content(content)
 			if seen[name] {
-				return gotreesitter.WalkSkipChildren
+				return false // skip children
 			}
 			seen[name] = true
 			startByte := int(n.StartByte())
@@ -573,10 +567,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 		}
 
-		return gotreesitter.WalkContinue
+		return true // continue
 	})
 
 	// Extract call edges using regex on node bodies (M9: deduplicate)
@@ -609,16 +603,16 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	}
 
 	// H1: Extract import edges from tree-sitter nodes
-	gotreesitter.Walk(root, func(n *gotreesitter.Node, depth int) gotreesitter.WalkAction {
+	walkTree(root, func(n *sitter.Node) bool {
 		if !n.IsNamed() {
-			return gotreesitter.WalkContinue
+			return true // continue
 		}
-		nodeType := n.Type(lang)
+		nodeType := n.Type()
 
 		switch nodeType {
 		case "import_statement":
 			// import ... from 'module' — find the string source child
-			sourceNode := n.ChildByFieldName("source", lang)
+			sourceNode := n.ChildByFieldName("source")
 			if sourceNode != nil {
 				modulePath := extractStringContent(sourceNode, content)
 				if modulePath != "" {
@@ -628,15 +622,15 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 						EdgeType: types.EdgeTypeImports,
 					})
 				}
-				return gotreesitter.WalkSkipChildren
+				return false // skip children
 			}
 			// Fallback: walk children to find the string node
-			for i := 0; i < n.ChildCount(); i++ {
+			for i := 0; i < int(n.ChildCount()); i++ {
 				child := n.Child(i)
 				if child == nil {
 					continue
 				}
-				childType := child.Type(lang)
+				childType := child.Type()
 				if childType == "string" || childType == "string_fragment" {
 					modulePath := extractStringContent(child, content)
 					if modulePath != "" {
@@ -649,20 +643,20 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 					break
 				}
 			}
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "call_expression":
 			// require('module')
-			fnNode := n.ChildByFieldName("function", lang)
-			if fnNode != nil && fnNode.Text(content) == "require" {
-				argsNode := n.ChildByFieldName("arguments", lang)
+			fnNode := n.ChildByFieldName("function")
+			if fnNode != nil && fnNode.Content(content) == "require" {
+				argsNode := n.ChildByFieldName("arguments")
 				if argsNode != nil {
-					for i := 0; i < argsNode.ChildCount(); i++ {
+					for i := 0; i < int(argsNode.ChildCount()); i++ {
 						argChild := argsNode.Child(i)
 						if argChild == nil || !argChild.IsNamed() {
 							continue
 						}
-						argType := argChild.Type(lang)
+						argType := argChild.Type()
 						if argType == "string" || argType == "string_fragment" {
 							modulePath := extractStringContent(argChild, content)
 							if modulePath != "" {
@@ -677,10 +671,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 					}
 				}
 			}
-			return gotreesitter.WalkContinue
+			return true // continue
 		}
 
-		return gotreesitter.WalkContinue
+		return true // continue
 	})
 
 	return result, nil
@@ -688,16 +682,16 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 
 // extractStringContent extracts the text content from a string node,
 // stripping quotes if present.
-func extractStringContent(n *gotreesitter.Node, source []byte) string {
+func extractStringContent(n *sitter.Node, source []byte) string {
 	if n == nil {
 		return ""
 	}
-	text := n.Text(source)
+	text := n.Content(source)
 	// If the node contains a string_fragment child, use that
-	for i := 0; i < n.ChildCount(); i++ {
+	for i := 0; i < int(n.ChildCount()); i++ {
 		child := n.Child(i)
 		if child != nil && child.IsNamed() {
-			childText := child.Text(source)
+			childText := child.Content(source)
 			if childText != "" {
 				return childText
 			}
@@ -761,16 +755,10 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	}
 	result.Nodes = append(result.Nodes, fileNode)
 
-	// Skip tree-sitter for very large files to prevent stack overflows
-	// in the PHP GLR parser (stackEntryNodesEquivalentFrontierWithScratch)
-	if len(content) > maxTreeSitterFileSize {
-		log.Printf("parser: skipping tree-sitter for %s (%d bytes exceeds %d byte limit)", relPath, len(content), maxTreeSitterFileSize)
-		return result, nil
-	}
-
-	phpLang := grammars.PhpLanguage()
-	phpParser := gotreesitter.NewParser(phpLang)
-	tree, err := treeSitterParseSafe(phpParser, content)
+	phpLang := php.GetLanguage()
+	phpParser := sitter.NewParser()
+	phpParser.SetLanguage(phpLang)
+	tree, err := phpParser.ParseCtx(context.Background(), nil, content)
 	if err != nil {
 		log.Printf("parser: tree-sitter failed for %s: %v — returning file-level node only", relPath, err)
 		return result, nil
@@ -785,21 +773,21 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	seen := map[string]bool{}
 
 	// Walk tree to extract classes, methods, functions, use statements
-	gotreesitter.Walk(root, func(n *gotreesitter.Node, depth int) gotreesitter.WalkAction {
+	walkTree(root, func(n *sitter.Node) bool {
 		if !n.IsNamed() {
-			return gotreesitter.WalkContinue
+			return true // continue
 		}
-		nodeType := n.Type(phpLang)
+		nodeType := n.Type()
 
 		switch nodeType {
 		case "class_declaration":
-			nameNode := n.ChildByFieldName("name", phpLang)
+			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
-			className := nameNode.Text(content)
+			className := nameNode.Content(content)
 			if seen[className] {
-				return gotreesitter.WalkSkipChildren
+				return false // skip children
 			}
 			seen[className] = true
 			startByte := int(n.StartByte())
@@ -817,21 +805,21 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 			})
 
 			// Extract methods from declaration_list body
-			bodyNode := n.ChildByFieldName("body", phpLang)
+			bodyNode := n.ChildByFieldName("body")
 			if bodyNode != nil {
-				for i := 0; i < bodyNode.ChildCount(); i++ {
+				for i := 0; i < int(bodyNode.ChildCount()); i++ {
 					methodNode := bodyNode.Child(i)
 					if methodNode == nil || !methodNode.IsNamed() {
 						continue
 					}
-					if methodNode.Type(phpLang) != "method_declaration" {
+					if methodNode.Type() != "method_declaration" {
 						continue
 					}
-					methNameNode := methodNode.ChildByFieldName("name", phpLang)
+					methNameNode := methodNode.ChildByFieldName("name")
 					if methNameNode == nil {
 						continue
 					}
-					methodName := methNameNode.Text(content)
+					methodName := methNameNode.Content(content)
 					qualifiedName := className + "." + methodName
 					if seen[qualifiedName] {
 						continue
@@ -851,16 +839,16 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 					})
 				}
 			}
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "function_definition":
-			nameNode := n.ChildByFieldName("name", phpLang)
+			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
-				return gotreesitter.WalkContinue
+				return true // continue
 			}
-			name := nameNode.Text(content)
+			name := nameNode.Content(content)
 			if seen[name] {
-				return gotreesitter.WalkSkipChildren
+				return false // skip children
 			}
 			seen[name] = true
 			startByte := int(n.StartByte())
@@ -875,17 +863,17 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 
 		case "namespace_use_declaration":
 			// use App\Models\User;
-			for i := 0; i < n.ChildCount(); i++ {
+			for i := 0; i < int(n.ChildCount()); i++ {
 				child := n.Child(i)
 				if child == nil || !child.IsNamed() {
 					continue
 				}
-				if child.Type(phpLang) == "namespace_use_clause" {
-					usePath := child.Text(content)
+				if child.Type() == "namespace_use_clause" {
+					usePath := child.Content(content)
 					if usePath != "" {
 						result.Edges = append(result.Edges, types.ASTEdge{
 							SourceID: types.GenerateNodeID(relPath, relPath),
@@ -895,10 +883,10 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 					}
 				}
 			}
-			return gotreesitter.WalkSkipChildren
+			return false // skip children
 		}
 
-		return gotreesitter.WalkContinue
+		return true // continue
 	})
 
 	// Extract instantiation edges and call edges using regex on node bodies

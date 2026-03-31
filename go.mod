@@ -8,8 +8,8 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/mattn/go-sqlite3 v1.14.38
 	github.com/metoro-io/mcp-golang v0.16.1
-	github.com/odvcencio/gotreesitter v0.12.2
 	github.com/shota3506/onnxruntime-purego v0.0.0-20260315223538-8db8bd7424b2
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	golang.org/x/text v0.35.0
 	gonum.org/v1/gonum v0.17.0
 )
