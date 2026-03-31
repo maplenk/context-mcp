@@ -221,9 +221,23 @@ func runCLI(cfg *config.Config, args []string) {
 		return
 	}
 
+	// Check for --reindex flag before arg count validation
+	forceReindex := false
+	var filteredArgs []string
+	for _, a := range args {
+		if a == "--reindex" {
+			forceReindex = true
+		} else {
+			filteredArgs = append(filteredArgs, a)
+		}
+	}
+	args = filteredArgs
+
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: qb-context cli <tool_name> [json_args]\n")
+		fmt.Fprintf(os.Stderr, "Usage: qb-context cli [--reindex] <tool_name> [json_args]\n")
 		fmt.Fprintf(os.Stderr, "       qb-context cli --list\n")
+		fmt.Fprintf(os.Stderr, "\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "  --reindex   Force full re-parse and re-index of the repository\n")
 		os.Exit(1)
 	}
 
@@ -251,8 +265,26 @@ func runCLI(cfg *config.Config, args []string) {
 	graphEngine := graph.New()
 	hybridSearch := search.New(store, embedder, graphEngine)
 
-	// Index repo
-	indexRepo(cfg, store, p, embedder, graphEngine)
+	// Skip full indexing if DB already has data (use --reindex to force)
+	if !forceReindex {
+		nodeIDs, _ := store.GetAllNodeIDs()
+		if len(nodeIDs) > 0 {
+			// Rebuild in-memory graph from stored edges
+			edges, edgeErr := store.GetAllEdges()
+			if edgeErr != nil {
+				log.Printf("Failed to load edges from DB: %v", edgeErr)
+			} else {
+				graphEngine.BuildFromEdges(edges)
+			}
+			log.Printf("Loaded %d nodes from existing index (use --reindex to force)", len(nodeIDs))
+		} else {
+			// Empty DB — must index
+			indexRepo(cfg, store, p, embedder, graphEngine)
+		}
+	} else {
+		log.Printf("--reindex flag set, forcing full re-index...")
+		indexRepo(cfg, store, p, embedder, graphEngine)
+	}
 
 	// Register tools and look up handler
 	server := mcp.NewServer()
