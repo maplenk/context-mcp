@@ -160,6 +160,9 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 	// Output shape is [1, seqLen, hiddenDim], so hiddenDim = len(data) / seqLen.
 	hiddenDim := 896 // default fallback for Qwen2 model
 	if seqLen > 0 && len(hiddenData) > 0 {
+		if len(hiddenData)%int(seqLen) != 0 {
+			return nil, fmt.Errorf("hidden state size %d not divisible by sequence length %d", len(hiddenData), seqLen)
+		}
 		computed := len(hiddenData) / int(seqLen)
 		if computed > 0 {
 			hiddenDim = computed

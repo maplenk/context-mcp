@@ -42,7 +42,7 @@ type Embedder interface {
 // word and character n-gram features projected to 384 dimensions.
 // Falls back to HashEmbedder only if explicitly requested via NewHashEmbedder.
 func NewEmbedder() Embedder {
-	return NewTFIDFEmbedder()
+	return NewTFIDFEmbedder(384)
 }
 
 // ---------------------------------------------------------------------------
@@ -53,22 +53,25 @@ func NewEmbedder() Embedder {
 //  1. Tokenizing input into words and subword pieces (camelCase split, underscore split)
 //  2. Generating character trigrams for subword coverage
 //  3. Using TF-IDF-like weighting: rare/long tokens get more weight
-//  4. Projecting token hashes into a fixed 384-dim space using multiple hash functions
+//  4. Projecting token hashes into a fixed dim-dimensional space using multiple hash functions
 //  5. L2 normalizing the result
 //
 // This gives real semantic locality: "ReadFile" and "ReadFileContents" will
 // produce similar vectors because they share tokens and trigrams.
-type TFIDFEmbedder struct{}
-
-// NewTFIDFEmbedder creates a new TF-IDF based embedder
-func NewTFIDFEmbedder() *TFIDFEmbedder {
-	return &TFIDFEmbedder{}
+type TFIDFEmbedder struct {
+	dim int // embedding dimension (independent of global embeddingDim)
 }
 
-// Embed generates a 384-dimensional vector from text using TF-IDF n-gram features
+// NewTFIDFEmbedder creates a new TF-IDF based embedder with the given dimension.
+func NewTFIDFEmbedder(dim int) *TFIDFEmbedder {
+	return &TFIDFEmbedder{dim: dim}
+}
+
+// Embed generates an embedding vector from text using TF-IDF n-gram features.
+// The dimension is determined by the embedder's own dim field, not the global embeddingDim.
 func (e *TFIDFEmbedder) Embed(text string) ([]float32, error) {
 	text = strings.TrimSpace(text)
-	dim := GetEmbeddingDim()
+	dim := e.dim
 	if text == "" {
 		vec := make([]float32, dim)
 		// Return a deterministic vector for empty input
@@ -152,7 +155,7 @@ func (e *TFIDFEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 
 // Dim returns the embedding dimension.
 func (e *TFIDFEmbedder) Dim() int {
-	return GetEmbeddingDim()
+	return e.dim
 }
 
 // Close is a no-op for the TF-IDF embedder

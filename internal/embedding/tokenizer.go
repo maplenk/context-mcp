@@ -177,12 +177,15 @@ func (t *BPETokenizer) Encode(text string) []int {
 }
 
 // EncodeWithSpecial tokenizes text and wraps with model-appropriate special tokens.
-// For this causal embedding model, no BOS is used; we just return the raw tokens.
+// For this causal embedding model, no BOS is used. EOS is always appended because
+// the Qwen2 model produces embeddings at the EOS position during last-token pooling.
 func (t *BPETokenizer) EncodeWithSpecial(text string) (inputIDs, attentionMask []int64) {
 	ids := t.Encode(text)
 	if len(ids) == 0 {
-		// Return at least one token
+		// Return at least one token (EOS only)
 		ids = []int{t.eosID}
+	} else {
+		ids = append(ids, t.eosID) // Append EOS for last-token pooling
 	}
 
 	inputIDs = make([]int64, len(ids))
@@ -368,9 +371,9 @@ func (t *BPETokenizer) DecodeTokenIDs(ids []int) string {
 		}
 	}
 
-	// Validate UTF-8
-	if utf8.Valid(buf) {
-		return string(buf)
+	// Validate UTF-8; replace invalid bytes with U+FFFD replacement character
+	if !utf8.Valid(buf) {
+		return strings.ToValidUTF8(string(buf), "\uFFFD")
 	}
 	return string(buf)
 }
