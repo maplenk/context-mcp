@@ -272,6 +272,9 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 
 	// Get affected nodes with their hop depths
 	affectedWithDepth := deps.Graph.BlastRadiusWithDepth(nodeID, p.Depth)
+	if affectedWithDepth == nil {
+		return nil, fmt.Errorf("symbol not found in graph: %s", p.SymbolID)
+	}
 
 	// Get betweenness score for the target node
 	var riskScore float64
@@ -1281,7 +1284,7 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 
 	// Also try FTS search
 	if deps.Search != nil && len(matches) < 10 {
-		ftsResults, err := deps.Search.Search(p.Symbol, 10, nil)
+		ftsResults, err := deps.Search.Search(p.Symbol, 10, nil, 5)
 		if err == nil {
 			existingIDs := make(map[string]bool)
 			for _, m := range matches {
