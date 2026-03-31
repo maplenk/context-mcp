@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-03-31 (post-Blueprint Alignment — 5 gaps addressed, DA review, real-repo tests).
+> Living document for team reference. Last updated: 2026-03-31 (post-Search Quality & Speed — subgraph PPR, structural edges, BM25 weights, DA review #9).
 
 ---
 
@@ -40,8 +40,8 @@ qb-context/
 │   ├── embedding/onnx.go           — ONNXEmbedder (build tag: onnx) — purego ONNX Runtime (no CGO), Qwen2 model, last-token pooling, Matryoshka
 │   ├── embedding/onnx_stub.go      — Stub for non-ONNX builds
 │   ├── embedding/model/embed.go    — Model metadata (Qwen2, Matryoshka dims, INT8)
-│   ├── graph/graph.go              — gonum directed graph (true PPR, BFS, Betweenness, Louvain, InDegree cache, TraceCallPath)
-│   ├── search/hybrid.go            — Multi-signal composite search with snapshot-based consistency
+│   ├── graph/graph.go              — gonum directed graph (true PPR, subgraph PPR, BFS, Betweenness, Louvain, InDegree cache, TraceCallPath)
+│   ├── search/hybrid.go            — Multi-signal composite search (subgraph PPR, BM25 10x name weight, domain stop words, helper file cap)
 │   ├── adr/adr.go                  — ADR discoverer (with symlink boundary validation)
 │   └── mcp/
 │       ├── server.go               — mcp-golang SDK server over stdio
@@ -319,6 +319,12 @@ qb-context/
 | 35 | `0ee152b` | Replace regex JS/TS/PHP parsers with tree-sitter (go-tree-sitter) | Opus (worktree) | Done |
 | 36 | `ede6fcf` | DA review fixes + real-repo integration tests (22 subtests) | Opus (worktree) | Done |
 
+### Phase 7: Search Quality & Speed (Commit 37)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 37 | `caf8d0f` | Subgraph PPR, structural edges (DEFINES/DEFINES_METHOD/INHERITS), BM25 10x name weight, domain stop words, helper file cap, JS extends, DA fixes | 4 Opus agents | Done |
+
 ### Test Coverage (13 packages, all passing — 233 unit tests + 22 real-repo subtests)
 - `internal/types` — 12 tests (ID generation, enum values, null byte separator collision, hex format validation)
 - `internal/storage` — 14 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT, write rejection, transactional upsert)
@@ -360,6 +366,10 @@ qb-context/
   - **Agent F (Tests, 13 issues)**: L1 5 core tool tests, L2 cross-file edges, L3 graph connectivity, L5-L12 test improvements, L22 write rejection, L13 deps.
   - **Deferred**: C2 tree-sitter, C3 ONNX library, C4 model choice, C5 model not embedded, C6 sqlite-vec. **False positive**: C17 Go 1.25.0 (valid).
 - **Review #8 (Blueprint Alignment DA)**: Quick review of Phase 1+2 changes. Found 6 issues (bounds check in ONNX, output tensor cleanup, nil-on-close, hidden dim derivation). All fixed in commit `ede6fcf`.
+- **Review #9 (Search Quality DA)**: 13 issues found (0 CRITICAL, 2 HIGH, 5 MEDIUM, 6 LOW). **2 HIGH + 2 MEDIUM fixed**:
+  - HIGH: `isHelperFile` false positives (path-component matching), over-aggressive domain stop words (removed "get", "class", "method", "code", etc.).
+  - MEDIUM: Added test coverage for 3 new EdgeType values, JS/TS extends detection for INHERITS edges.
+  - LOW (accepted): PPR subgraph parameter differences (intentional speed trade-off), Go DEFINES_METHOD file-local resolution, PHP namespaced extends, methods double-counted in-degree (intentional — both edges are semantically correct).
 
 ---
 
@@ -513,6 +523,7 @@ qb-context --onnx-model /path/to/model --onnx-lib /path/to/libonnxruntime.dylib 
 
 ### Known Limitations
 - Tree-sitter JS/TS/PHP parsers extract symbol definitions via AST; call edges still use regex on node body text for reliability
+- DEFINES_METHOD, INHERITS, IMPLEMENTS edges use file-local ID resolution — cross-file targets create dangling edges (connected via import edges)
 - Go call edges resolve cross-package via file-level nodes, but symbol-level cross-package resolution is approximate
 - gonum Betweenness doesn't support sampling (O(V*E) for large graphs)
 - Index operations serialized via `indexMu` mutex, but concurrent search during index is safe
