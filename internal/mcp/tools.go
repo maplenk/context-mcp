@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,6 +133,9 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 // ----- Tool 1: context -----
 
 func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
+	if p.Query == "" && p.Mode != "architecture" {
+		return nil, fmt.Errorf("query is required (use mode='architecture' for community detection)")
+	}
 	if p.Limit == 0 {
 		p.Limit = 10
 	}
@@ -227,19 +231,28 @@ func registerContextTool(s *Server, deps ToolDeps) {
 					"description": "Maximum results per unique file path (default: 3)",
 					"default":     3,
 				},
+				"active_files": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "string",
+					},
+					"description": "File paths the developer is currently editing for PPR personalization",
+				},
 			},
 			"required": []string{"query"},
 		},
 	}, cliHandler)
 
 	// SDK handler (typed struct)
-	_ = s.RegisterSDKTool("context", desc, func(p ContextParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("context", desc, func(p ContextParams) (*mcp_golang.ToolResponse, error) {
 		result, err := contextHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'context': %v", err)
+	}
 }
 
 // ----- Tool 2: impact -----
@@ -299,6 +312,8 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 
 		// Group by risk level
 		switch depth {
+		case 0:
+			direct = append(direct, n) // Source node itself
 		case 1:
 			direct = append(direct, n)
 		case 2:
@@ -363,13 +378,15 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("impact", desc, func(p ImpactParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("impact", desc, func(p ImpactParams) (*mcp_golang.ToolResponse, error) {
 		result, err := impactHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'impact': %v", err)
+	}
 }
 
 // ----- Tool 3: read_symbol -----
@@ -460,13 +477,15 @@ func registerReadSymbolTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("read_symbol", desc, func(p ReadSymbolParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("read_symbol", desc, func(p ReadSymbolParams) (*mcp_golang.ToolResponse, error) {
 		result, err := readSymbolHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'read_symbol': %v", err)
+	}
 }
 
 // ----- Tool 4: query -----
@@ -507,13 +526,15 @@ func registerQueryTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("query", desc, func(p QueryParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("query", desc, func(p QueryParams) (*mcp_golang.ToolResponse, error) {
 		result, err := queryHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'query': %v", err)
+	}
 }
 
 // ----- Tool 5: health -----
@@ -550,13 +571,15 @@ func registerHealthTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("health", desc, func(p HealthParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("health", desc, func(p HealthParams) (*mcp_golang.ToolResponse, error) {
 		result, err := healthHandler(deps)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'health': %v", err)
+	}
 }
 
 // ----- Tool 6: index -----
@@ -598,13 +621,15 @@ func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("index", desc, func(p IndexParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("index", desc, func(p IndexParams) (*mcp_golang.ToolResponse, error) {
 		result, err := indexHandler(indexFn, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'index': %v", err)
+	}
 }
 
 // ----- Tool 6: trace_call_path -----
@@ -709,13 +734,15 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("trace_call_path", desc, func(p TraceCallPathParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("trace_call_path", desc, func(p TraceCallPathParams) (*mcp_golang.ToolResponse, error) {
 		result, err := traceCallPathHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'trace_call_path': %v", err)
+	}
 }
 
 // ----- Tool 7: get_key_symbols -----
@@ -728,9 +755,19 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 		return nil, fmt.Errorf("graph engine not initialized")
 	}
 
-	// Compute PageRank
-	pageranks := deps.Graph.PageRank()
-	if pageranks == nil {
+	// Use stored PageRank scores instead of recomputing O(V * iterations)
+	pageranks := make(map[string]float64)
+	allScores, err := deps.Store.GetAllNodeScores()
+	if err == nil && len(allScores) > 0 {
+		for _, s := range allScores {
+			pageranks[s.NodeID] = s.PageRank
+		}
+	}
+	// Fallback to computing if no stored scores
+	if len(pageranks) == 0 {
+		pageranks = deps.Graph.PageRank()
+	}
+	if len(pageranks) == 0 {
 		return map[string]interface{}{
 			"symbols": []interface{}{},
 			"count":   0,
@@ -753,7 +790,7 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 			continue
 		}
 
-		// Apply file filter if specified
+		// Apply file filter if specified (prefix match)
 		if p.FileFilter != "" && !strings.HasPrefix(node.FilePath, p.FileFilter) {
 			continue
 		}
@@ -815,13 +852,15 @@ func registerGetKeySymbolsTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("get_key_symbols", desc, func(p GetKeySymbolsParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("get_key_symbols", desc, func(p GetKeySymbolsParams) (*mcp_golang.ToolResponse, error) {
 		result, err := getKeySymbolsHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'get_key_symbols': %v", err)
+	}
 }
 
 // ----- Tool 8: search_code -----
@@ -886,31 +925,35 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 			continue // path traversal attempt
 		}
 
-		f, err := os.Open(absPath)
-		if err != nil {
-			continue
-		}
+		limitReached := func() bool {
+			f, err := os.Open(absPath)
+			if err != nil {
+				return false
+			}
+			defer f.Close()
 
-		scanner := bufio.NewScanner(f)
-		lineNum := 0
-		for scanner.Scan() {
-			lineNum++
-			line := scanner.Text()
-			if re.MatchString(line) {
-				matches = append(matches, codeMatch{
-					File:    relPath,
-					Line:    lineNum,
-					Content: strings.TrimSpace(line),
-				})
-				if len(matches) >= p.Limit {
-					f.Close()
-					goto done
+			scanner := bufio.NewScanner(f)
+			lineNum := 0
+			for scanner.Scan() {
+				lineNum++
+				line := scanner.Text()
+				if re.MatchString(line) {
+					matches = append(matches, codeMatch{
+						File:    relPath,
+						Line:    lineNum,
+						Content: strings.TrimSpace(line),
+					})
+					if len(matches) >= p.Limit {
+						return true
+					}
 				}
 			}
+			return false
+		}()
+		if limitReached {
+			break
 		}
-		f.Close()
 	}
-done:
 
 	return map[string]interface{}{
 		"matches": matches,
@@ -920,7 +963,7 @@ done:
 }
 
 func registerSearchCodeTool(s *Server, deps ToolDeps) {
-	desc := "Searches for a regex pattern across all indexed source files. Returns matching lines with file paths and line numbers."
+	desc := "Searches for a regex pattern across indexed source files. Only files that have been indexed (with supported extensions) are searched. Returns matching lines with file paths and line numbers."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -943,7 +986,7 @@ func registerSearchCodeTool(s *Server, deps ToolDeps) {
 				},
 				"file_filter": map[string]interface{}{
 					"type":        "string",
-					"description": "Optional glob pattern to filter files (e.g., '*.go', '*.js')",
+					"description": "Optional glob pattern to filter files by name (e.g., '*.go', '*.js'). Matched against both full path and basename.",
 				},
 				"limit": map[string]interface{}{
 					"type":        "integer",
@@ -956,13 +999,15 @@ func registerSearchCodeTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("search_code", desc, func(p SearchCodeParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("search_code", desc, func(p SearchCodeParams) (*mcp_golang.ToolResponse, error) {
 		result, err := searchCodeHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'search_code': %v", err)
+	}
 }
 
 // ----- Tool 9: detect_changes -----
@@ -973,8 +1018,9 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 	}
 
 	// Validate the git ref to prevent command injection
-	// Only allow alphanumeric, ~, ^, ., -, /, @
-	validRef := regexp.MustCompile(`^[a-zA-Z0-9~^.\-/@{}]+$`)
+	// Only allow alphanumeric, ~, ^, ., -, /
+	// Explicitly exclude @{} to prevent triggering git network access (e.g., @{upstream})
+	validRef := regexp.MustCompile(`^[a-zA-Z0-9~^.\-/]+$`)
 	if !validRef.MatchString(p.Since) {
 		return nil, fmt.Errorf("invalid git ref: %s", p.Since)
 	}
@@ -1007,11 +1053,12 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 	}
 	changedFiles = validFiles
 
-	// For each changed file, compare stored symbols with current state
+	// For each changed file, categorize: deleted, new, or modified
 	type symbolChange struct {
 		Name     string `json:"name"`
 		FilePath string `json:"file_path"`
 		ID       string `json:"id"`
+		Status   string `json:"status"` // "file_modified", "deleted", "new_file"
 	}
 
 	var changedSymbols []symbolChange
@@ -1034,17 +1081,19 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 					Name:     n.SymbolName,
 					FilePath: n.FilePath,
 					ID:       n.ID,
+					Status:   "deleted",
 				})
 			}
 			continue
 		}
 
-		// File exists but changed — stored symbols might be modified
+		// File exists but changed — symbols are potentially modified (needs re-index to confirm)
 		for _, n := range storedNodes {
 			changedSymbols = append(changedSymbols, symbolChange{
 				Name:     n.SymbolName,
 				FilePath: n.FilePath,
 				ID:       n.ID,
+				Status:   "file_modified",
 			})
 		}
 
@@ -1053,6 +1102,7 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 			newSymbols = append(newSymbols, symbolChange{
 				Name:     "(new file)",
 				FilePath: filePath,
+				Status:   "new_file",
 			})
 		}
 	}
@@ -1062,7 +1112,8 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		"changed_symbols": changedSymbols,
 		"new_symbols":     newSymbols,
 		"deleted_symbols": deletedSymbols,
-		"summary": fmt.Sprintf("%d files changed, %d symbols modified, %d new, %d deleted",
+		"note":            "Symbols in modified files are listed as 'file_modified'. Re-index to detect precise symbol-level changes.",
+		"summary": fmt.Sprintf("%d files changed, %d symbols in modified files, %d new files, %d deleted symbols",
 			len(changedFiles), len(changedSymbols), len(newSymbols), len(deletedSymbols)),
 	}, nil
 }
@@ -1099,13 +1150,15 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("detect_changes", desc, func(p DetectChangesParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("detect_changes", desc, func(p DetectChangesParams) (*mcp_golang.ToolResponse, error) {
 		result, err := detectChangesHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'detect_changes': %v", err)
+	}
 }
 
 // ----- Tool 10: get_architecture_summary -----
@@ -1236,13 +1289,15 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("get_architecture_summary", desc, func(p ArchitectureSummaryParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("get_architecture_summary", desc, func(p ArchitectureSummaryParams) (*mcp_golang.ToolResponse, error) {
 		result, err := architectureSummaryHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'get_architecture_summary': %v", err)
+	}
 }
 
 // ----- Tool 11: explore -----
@@ -1424,13 +1479,15 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("explore", desc, func(p ExploreParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("explore", desc, func(p ExploreParams) (*mcp_golang.ToolResponse, error) {
 		result, err := exploreHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'explore': %v", err)
+	}
 }
 
 // ----- Tool 12: understand -----
@@ -1535,10 +1592,15 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 		result["callers"] = callers
 		result["callees"] = callees
 
-		// PageRank score
-		pageranks := deps.Graph.PageRank()
-		if pageranks != nil {
-			result["pagerank"] = pageranks[resolvedID]
+		// PageRank score — use stored scores to avoid O(V * iterations) recomputation
+		if score, err := deps.Store.GetNodeScore(resolvedID); err == nil {
+			result["pagerank"] = score.PageRank
+		} else {
+			// Fallback to computing if no stored score
+			pageranks := deps.Graph.PageRank()
+			if pageranks != nil {
+				result["pagerank"] = pageranks[resolvedID]
+			}
 		}
 
 		// Community membership (with early exit)
@@ -1589,13 +1651,15 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 	}, cliHandler)
 
 	// SDK handler
-	_ = s.RegisterSDKTool("understand", desc, func(p UnderstandParams) (*mcp_golang.ToolResponse, error) {
+	if err := s.RegisterSDKTool("understand", desc, func(p UnderstandParams) (*mcp_golang.ToolResponse, error) {
 		result, err := understandHandler(deps, p)
 		if err != nil {
 			return nil, err
 		}
 		return toToolResponse(result)
-	})
+	}); err != nil {
+		log.Printf("Warning: failed to register SDK tool 'understand': %v", err)
+	}
 }
 
 // ----- Helpers -----
@@ -1664,6 +1728,9 @@ func registerPrompts(s *Server, deps ToolDeps) {
 // toToolResponse converts a generic result (string or anything JSON-serializable)
 // into the SDK's ToolResponse format.
 func toToolResponse(result interface{}) (*mcp_golang.ToolResponse, error) {
+	// Cap response size at 1MB to prevent memory issues
+	const maxResponseSize = 1024 * 1024
+
 	var text string
 	switch v := result.(type) {
 	case string:
@@ -1674,6 +1741,9 @@ func toToolResponse(result interface{}) (*mcp_golang.ToolResponse, error) {
 			return nil, fmt.Errorf("failed to marshal result: %w", err)
 		}
 		text = string(jsonBytes)
+	}
+	if len(text) > maxResponseSize {
+		return nil, fmt.Errorf("response too large: %d bytes (max %d)", len(text), maxResponseSize)
 	}
 	return mcp_golang.NewToolResponse(mcp_golang.NewTextContent(text)), nil
 }
