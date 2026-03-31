@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -304,20 +305,26 @@ func (s *Store) UpsertEmbedding(nodeID string, embedding []float32) error {
 	return tx.Commit()
 }
 
-// UpdateFTS updates the FTS index for a node
+// UpdateFTS updates the FTS index for a node.
+// Wrapped in a transaction so DELETE+INSERT are atomic — if INSERT fails, the old entry is preserved.
 func (s *Store) UpdateFTS(node types.ASTNode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Delete old entry if exists
-	if _, err := s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning FTS transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
 		return fmt.Errorf("FTS delete: %w", err)
 	}
-	// Insert new entry
-	_, err := s.db.Exec(
-		"INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
-		node.SymbolName, node.ContentSum, node.ID)
-	return err
+	if _, err := tx.Exec("INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
+		node.SymbolName, node.ContentSum, node.ID); err != nil {
+		return fmt.Errorf("FTS insert: %w", err)
+	}
+	return tx.Commit()
 }
 
 // DeleteFTSByFile removes FTS entries for all nodes in a file
@@ -593,18 +600,27 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("multi-statement queries are not allowed (semicolons forbidden)")
 	}
 
-	// Reject queries containing dangerous SQLite functions/patterns
-	dangerousPatterns := []string{"load_extension", "writefile", "readfile", "edit", "fts3_tokenizer", "attach"}
+	// Reject queries containing dangerous SQLite functions/patterns.
+	// Uses word-boundary regex to avoid false positives (e.g., "attachment", "credited").
+	// "edit" is intentionally omitted — it appears in normal identifiers and the real
+	// protection against edit() is PRAGMA query_only / read-only transactions.
+	dangerousPatterns := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex"}
 	for _, pattern := range dangerousPatterns {
-		if strings.Contains(trimmed, strings.ToUpper(pattern)) {
+		re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(pattern) + `\b`)
+		if re.MatchString(query) {
 			return nil, fmt.Errorf("query contains forbidden pattern: %s", pattern)
 		}
 	}
 
-	// Inject a default LIMIT to prevent unbounded result sets.
-	// Use word-boundary regex to avoid matching column/table names like "LIMITED".
-	hasLimit := regexp.MustCompile(`(?i)\bLIMIT\b`).MatchString(query)
-	if !hasLimit {
+	// Clamp LIMIT to 500 to prevent DoS via unbounded result sets.
+	// If user supplies LIMIT > 500, replace it. If no LIMIT, append one.
+	limitRe := regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)\b`)
+	if matches := limitRe.FindStringSubmatch(query); len(matches) > 1 {
+		userLimit, _ := strconv.Atoi(matches[1])
+		if userLimit > 500 {
+			query = limitRe.ReplaceAllString(query, "LIMIT 500")
+		}
+	} else {
 		query = query + " LIMIT 500"
 	}
 

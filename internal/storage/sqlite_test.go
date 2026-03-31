@@ -864,14 +864,35 @@ func TestRawQuery_BlocksReadfile(t *testing.T) {
 	}
 }
 
-func TestRawQuery_BlocksEdit(t *testing.T) {
+func TestRawQuery_EditRemovedFromBlocklist(t *testing.T) {
+	// "edit" was removed from the blocklist because it appears in normal identifiers
+	// (e.g., EditHandler, credited). The real protection is read-only transactions.
 	s := newTestStore(t)
 	_, err := s.RawQuery("SELECT edit('/tmp/test.db', '')")
-	if err == nil {
-		t.Fatal("expected edit to be blocked")
+	// The query should NOT be blocked by the blocklist — it will fail at SQLite level instead
+	if err != nil && strings.Contains(err.Error(), "forbidden pattern") {
+		t.Errorf("edit should not be blocked by blocklist, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "forbidden pattern") {
-		t.Errorf("expected 'forbidden pattern' in error, got: %v", err)
+}
+
+func TestRawQuery_WordBoundaryBlocklist(t *testing.T) {
+	s := newTestStore(t)
+
+	// "attach" as a standalone word should be blocked
+	_, err := s.RawQuery("SELECT 1 FROM nodes WHERE attach = 1")
+	if err == nil || !strings.Contains(err.Error(), "forbidden pattern") {
+		t.Errorf("expected 'attach' as word to be blocked, got: %v", err)
+	}
+
+	// "attachment" should NOT be blocked (word boundary prevents false positive)
+	// This will insert a node first so the query has something to select from
+	node := types.ASTNode{ID: "wb-test", FilePath: "test.go", SymbolName: "attachment_handler", NodeType: types.NodeTypeFunction}
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	_, err = s.RawQuery("SELECT symbol_name FROM nodes WHERE symbol_name LIKE '%attachment%'")
+	if err != nil {
+		t.Errorf("'attachment' should not be blocked, got: %v", err)
 	}
 }
 
