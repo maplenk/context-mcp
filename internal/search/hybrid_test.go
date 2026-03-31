@@ -375,6 +375,10 @@ func TestBuildFTSQuery_StopWords(t *testing.T) {
 // TestSetStopWords_ConcurrentSafety verifies that concurrent SetStopWords and
 // buildFTSQuery calls don't race (M4 fix).
 func TestSetStopWords_ConcurrentSafety(t *testing.T) {
+	// Save originals and guarantee restoration even on panic
+	original := GetStopWords()
+	t.Cleanup(func() { SetStopWords(original) })
+
 	var wg sync.WaitGroup
 	const goroutines = 20
 	const iterations = 100
@@ -409,15 +413,4 @@ func TestSetStopWords_ConcurrentSafety(t *testing.T) {
 	}
 
 	wg.Wait()
-
-	// Restore default stop words for other tests
-	SetStopWords([]string{
-		"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-		"have", "has", "had", "do", "does", "did", "will", "would", "could", "should",
-		"may", "might", "shall", "can", "and", "but", "or", "nor", "not",
-		"to", "of", "in", "for", "on", "at", "by", "with", "from", "as",
-		"into", "about", "between", "through", "this", "that", "these", "those",
-		"it", "its", "if", "then", "else", "when", "where", "how", "what", "which",
-		"who", "whom", "why",
-	})
 }

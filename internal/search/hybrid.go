@@ -71,6 +71,17 @@ func SetStopWords(words []string) {
 	stopWordsMu.Unlock()
 }
 
+// GetStopWords returns a copy of the current stop word set.
+func GetStopWords() []string {
+	stopWordsMu.RLock()
+	defer stopWordsMu.RUnlock()
+	result := make([]string, 0, len(stopWords))
+	for w := range stopWords {
+		result = append(result, w)
+	}
+	return result
+}
+
 // camelCaseRe splits CamelCase identifiers into words.
 // Matches: sequences of uppercase+lowercase (e.g. "Read"), all-lowercase runs, or all-uppercase runs.
 var camelCaseRe = regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z][a-z0-9]*|[A-Z]+|[0-9]+`)
