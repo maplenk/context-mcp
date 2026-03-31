@@ -366,9 +366,13 @@ func (w *Watcher) flushEvent(path string) {
 	w.mu.Unlock()
 
 	if exists && !stopped {
-		w.events <- types.FileEvent{
+		select {
+		case w.events <- types.FileEvent{
 			Path:   path,
 			Action: entry.action,
+		}:
+		case <-w.stopCh:
+			// Watcher is shutting down; discard the event safely.
 		}
 	}
 }
