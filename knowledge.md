@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-03-30 (post-Phase 3 — DA Review Fix Sprint).
+> Living document for team reference. Last updated: 2026-03-31 (post-Phase 4 — DA Review #6 Wave 1 + ONNX Embedder).
 
 ---
 
@@ -25,18 +25,21 @@
 ### Project Structure
 ```
 qb-context/
-├── cmd/qb-context/main.go         — CLI entry + MCP daemon + CLI tool subcommand + indexPath
+├── cmd/qb-context/main.go         — CLI entry + MCP daemon + CLI tool subcommand + indexPath + ONNX init
 ├── internal/
-│   ├── config/config.go            — Config with CLI flags
+│   ├── config/config.go            — Config with CLI flags (incl. --onnx-model, --onnx-lib, --embedding-dim)
 │   ├── types/types.go              — ASTNode, ASTEdge, enums, RiskLevel, NodeScore, Community, ProjectSummary
-│   ├── watcher/watcher.go          — Filesystem watcher (fsnotify + debounce + gitignore)
+│   ├── watcher/watcher.go          — Filesystem watcher (fsnotify + debounce + nested gitignore + hot-reload)
 │   ├── watcher/watcher_test.go     — 11 watcher tests (create/modify/delete, debounce, gitignore)
 │   ├── parser/parser.go            — Multi-language parser (Go native AST, improved regex for JS/TS/PHP)
 │   ├── parser/queries/*.scm        — Tree-sitter query files (reference, for future use)
-│   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec graceful fallback, node_scores)
-│   ├── storage/migrations.go       — Versioned schema migrations (schema_version table)
-│   ├── embedding/engine.go         — Embedding engine (TFIDFEmbedder default, HashEmbedder fallback)
-│   ├── embedding/model/embed.go    — Placeholder for ONNX model embedding
+│   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec graceful fallback, configurable embedding dim)
+│   ├── storage/migrations.go       — Versioned schema migrations (v2: FK removal from edges)
+│   ├── embedding/engine.go         — Embedding interface (Dim() method), TFIDFEmbedder default, variable EmbeddingDim
+│   ├── embedding/tokenizer.go      — Pure Go BPE tokenizer (HuggingFace tokenizer.json, 151K vocab, byte-level)
+│   ├── embedding/onnx.go           — ONNXEmbedder (build tag: onnx) — Qwen2 model, last-token pooling, Matryoshka
+│   ├── embedding/onnx_stub.go      — Stub for non-ONNX builds
+│   ├── embedding/model/embed.go    — Model metadata (Qwen2, Matryoshka dims, INT8)
 │   ├── graph/graph.go              — gonum directed graph (true PPR, BFS, Betweenness, Louvain, InDegree cache, TraceCallPath)
 │   ├── search/hybrid.go            — Multi-signal composite search with snapshot-based consistency
 │   ├── adr/adr.go                  — ADR discoverer (with symlink boundary validation)
@@ -67,8 +70,9 @@ qb-context/
 
 ### Storage (`internal/storage`)
 - SQLite with WAL mode, foreign keys, busy timeout, trusted_schema OFF
-- Tables: `nodes`, `edges` (with CASCADE), `nodes_fts` (FTS5 with porter tokenizer), `node_embeddings` (vec0, cosine, 384-dim), `node_scores` (betweenness/pagerank with CASCADE), `project_summaries` (ADR documents), `schema_version`
-- Versioned migrations: `schema_version` table tracks current version, only runs new migrations
+- Tables: `nodes`, `edges` (**FK removed in migration v2** — INSERT OR IGNORE was silently dropping cross-file edges), `nodes_fts` (FTS5 with porter tokenizer), `node_embeddings` (vec0, cosine, configurable dim), `node_scores` (betweenness/pagerank with CASCADE), `project_summaries` (ADR documents), `schema_version`
+- Versioned migrations: `schema_version` table tracks current version, currently at **v2**
+- `NewStore()` accepts optional `embeddingDim` parameter (default 384, ONNX models use e.g. 256)
 - `hasVecTable` flag: tracks whether sqlite-vec vec0 table was created successfully
 - `SearchSemantic()` gracefully returns nil when vec table unavailable (no crash)
 - `UpsertEmbedding()` is a no-op when vec table unavailable
@@ -94,17 +98,29 @@ qb-context/
 
 ### Watcher (`internal/watcher`)
 - fsnotify for OS-level events, recursive directory watching
-- Debounce with configurable window (default 500ms)
-- .gitignore support via go-gitignore (root .gitignore only)
-- `stopped` flag to prevent race condition panics on channel close
+- Debounce with configurable window (default 500ms) + improved coalescing (CREATE+WRITE→CREATE, DELETE always wins)
+- **Nested .gitignore** support via go-gitignore (root + discovered during walk)
+- **Hot-reload** of .gitignore files on modification (M10)
+- `stopped` flag set BEFORE closing `stopCh` to prevent timer race (L5)
+- `WalkSourceFiles()` standalone function — no fsnotify allocation needed (L4)
 
 ### Embedding (`internal/embedding`)
-- `Embedder` interface: Embed(text) → []float32, EmbedBatch, Close
+- `Embedder` interface: `Embed(text) → []float32`, `EmbedBatch`, `Dim() int`, `Close`
+- `EmbeddingDim` is now a **variable** (default 384, set at runtime when ONNX is used)
 - `TFIDFEmbedder` (default): word/subword tokenization with CamelCase splitting, TF-IDF weighting, random projection to 384-dim. Provides real semantic locality (similar code → similar vectors)
 - `HashEmbedder`: deterministic hash-based pseudo-embeddings (last-resort fallback, stateless)
-- `NewEmbedder()` factory returns TFIDFEmbedder by default
-- Future: ONNX Runtime via purego for all-MiniLM-L6-v2 (INT8 quantized, ~22MB)
+- **`ONNXEmbedder`** (build tag: `onnx`): Runs quantized Qwen2 model via ONNX Runtime
+  - Pure Go BPE tokenizer reads HuggingFace `tokenizer.json` (151K vocab, byte-level encoding, NFC normalization)
+  - Handles both array `[["a","b"],...]` and string `["a b",...]` merge formats
+  - Pre-tokenization regex adapted for Go RE2 (no negative lookahead)
+  - Last-token pooling (causal/decoder-only model)
+  - **Matryoshka dimension truncation**: 64, 128, 256, 512, or 896 (default 256)
+  - L2 normalization, thread-safe via mutex
+  - Semantic quality: `sim(ReadFile, ReadFileContents) = 0.69`, `sim(ReadFile, SQL) = 0.17`
+  - Model: `/Users/naman/Documents/coindex/quantized_model` (473MB, INT8, Qwen2ForCausalLM)
+- `NewEmbedder()` factory returns TFIDFEmbedder; main.go tries ONNX first if `--onnx-model` configured
 - Utility: SerializeFloat32, DeserializeFloat32, CosineSimilarity
+- **Build**: `go build -tags "fts5,onnx" ./...` for ONNX support; `go build -tags "fts5" ./...` for TFIDF only
 
 ### Graph (`internal/graph`)
 - gonum v0.17.0 directed graph with string hash ID <-> int64 ID mapping
@@ -169,7 +185,7 @@ qb-context/
 - Modeled after C project's `cli` subcommand
 
 ### Main Orchestrator (`cmd/qb-context/main.go`)
-- Boot: config → storage → TFIDFEmbedder → parser → graph → initial index (+ betweenness + ADR) → watcher → MCP server
+- Boot: config → **embedder (ONNX if configured, else TFIDF)** → storage (with embedding dim) → parser → graph → initial index (+ betweenness + ADR) → watcher → MCP server
 - Worker pool for parallel file parsing during initial index
 - Betweenness centrality computed and stored in `node_scores` at index time
 - ADR documents discovered and stored in `project_summaries` at index time
@@ -190,8 +206,9 @@ qb-context/
 | github.com/crackcomm/go-gitignore | .gitignore matching |
 | gonum.org/v1/gonum v0.17.0 | Graph engine, PageRank, Betweenness, Louvain community detection, InDegree |
 | github.com/metoro-io/mcp-golang v0.16.1 | MCP SDK (stdio transport, tool/resource/prompt support) |
+| github.com/yalue/onnxruntime_go v1.27.0 | ONNX Runtime Go bindings (CGO, build tag: onnx) |
+| golang.org/x/text v0.35.0 | Unicode NFC normalization for BPE tokenizer |
 | (future) github.com/asg017/sqlite-vec-go-bindings | Vector search |
-| (future) github.com/shota3506/onnxruntime-purego | ONNX inference |
 
 ---
 
@@ -235,13 +252,20 @@ qb-context/
 | 22 | `504b387` | Fix all medium/low bugs (M1,M3,M6,M7,M8,L2-L5) | Opus (worktree) | Done |
 | 23 | `d7b99ae` | Add watcher, incremental pipeline, and concurrency test suites | Opus (worktree) | Done |
 
-### Test Coverage (13 packages, all passing — 187 tests)
+### Phase 4: DA Review #6 + ONNX Embedder (Commits 24-25)
+
+| # | Hash | Description | Status |
+|---|------|-------------|--------|
+| 24 | `03ed37b` | DA Review Wave 1 — 22 fixes (C4, H1-H7, M1, M3-M10, L2-L5) | Done |
+| 25 | `afc28f7` | ONNX embedder with Qwen2 model support (C2) | Done |
+
+### Test Coverage (13 packages, all passing — 194+ tests)
 - `internal/types` — 10 tests (ID generation, enum values)
-- `internal/storage` — 8 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version)
-- `internal/parser` — 10 tests (Go/JS/TS/PHP parsing, edge extraction, import edges, class methods, findBlockEnd states, docblocks)
-- `internal/embedding` — 27 tests (hash embedder, TFIDF embedder, semantic locality, CamelCase similarity, tokenization, serialization)
+- `internal/storage` — 10 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT)
+- `internal/parser` — 11 tests (Go/JS/TS/PHP parsing, edge extraction, import edges, class methods, findBlockEnd states, docblocks, indented PHP classes)
+- `internal/embedding` — 34 tests (hash embedder, TFIDF embedder, semantic locality, CamelCase similarity, tokenization, serialization, BPE tokenizer load/encode/roundtrip, ONNX embedder basic/similarity/invalidDim)
 - `internal/graph` — 37 tests (BFS, cycles, depth limits, true PPR, PPR personalization bias, DAG, betweenness theoretical normalization, blast radius depth, communities, in-degree caching, search signals, change counter, trace call path)
-- `internal/search` — 24 tests (composite scoring, per-file cap, custom max_per_file, CamelCase, stop words, FTS sanitization, limits)
+- `internal/search` — 25 tests (composite scoring, per-file cap, custom max_per_file, CamelCase, stop words, FTS sanitization, limits, concurrent SetStopWords)
 - `internal/mcp` — 35 tests (CLI handlers, SDK protocol, initialize, tools/list, tools/call, all 13 tools, concurrent registration)
 - `internal/adr` — 20 tests (discover files, ADR directory, empty repo, max chars truncation, symlink boundary validation)
 - `internal/watcher` — 11 tests (create/modify/delete events, debounce, gitignore, excluded dirs, stop safety, walk existing, subdirectory events)
@@ -259,6 +283,12 @@ qb-context/
   - HIGH: H1 import edges, H2 sqlite-vec graceful fallback, H3 incremental graph updates, H4 async betweenness refresh, H5 search signal snapshot, H6 20 new watcher/incremental/concurrent tests, H7 batch embedding recovery. All fixed.
   - MEDIUM: M1 FTS5 wildcard, M2 InDegree caching, M3 deterministic GetNodeByName, M4 graph-theoretic betweenness normalization, M5 PHP call edges, M6 FTS error checking, M7 schema versioning, M8 index path parameter. All fixed.
   - LOW: L1 multi-line docblock capture, L2 configurable stop words, L3 configurable per-file cap, L4 health tool, L5 ADR symlink validation. All fixed.
+- **Review #6 (REVIEW-2.md)**: 27 issues found (5 CRITICAL, 7 HIGH, 10 MEDIUM, 5 LOW). **22 fixed in Wave 1** (03ed37b):
+  - CRITICAL: C4 FK removal from edges (cross-file edges were silently dropped). C2 ONNX embedder implemented (afc28f7).
+  - HIGH: H1 active file context in search, H2 stored betweenness scores, H3 PHP regex fix, H4 language filter in walk, H5 ADR in architecture mode, H6 memory monitoring, H7 search algorithm documentation. All fixed.
+  - MEDIUM: M1 debounce coalescing docs, M3 nested .gitignore, M4 stopwords thread safety, M5 file filter path matching, M6 RawQuery LIMIT, M7 PageRank storage, M8 indexMu mutex, M9 resources+prompts, M10 gitignore hot-reload. All fixed.
+  - LOW: L2 community loop break, L3 CLI subcommand detection, L4 WalkSourceFiles, L5 watcher stop race. All fixed.
+  - **Remaining**: C1 tree-sitter (future), C3 ncruces/go-sqlite3 (future), C5 sqlite-vec (future), L1 structured logging (future).
 
 ---
 
@@ -344,13 +374,37 @@ qb-context/
 - 5 incremental pipeline integration tests (add/modify/delete/consistency/full cycle)
 - 5 concurrency tests (search during index, multi-file changes, race conditions)
 
+### Feature 11: ONNX Embedder with Qwen2 Model (Done)
+- **Pure Go BPE tokenizer** (`tokenizer.go`): Reads HuggingFace `tokenizer.json`, handles both array and string merge formats, 151K vocab, byte-level encoding, NFC normalization, Go RE2-compatible pre-tokenization regex
+- **ONNXEmbedder** (`onnx.go`, build tag: `onnx`): Loads quantized Qwen2 model via `yalue/onnxruntime_go`, creates DynamicAdvancedSession, runs inference with input_ids/attention_mask/position_ids tensors
+- **Last-token pooling**: Appropriate for causal/decoder-only models (takes hidden state of last token)
+- **Matryoshka dim truncation**: Configurable (64/128/256/512/896), default 256
+- **Config**: `--onnx-model`, `--onnx-lib`, `--embedding-dim` CLI flags
+- **Graceful fallback**: ONNX failure → TFIDF embedder, non-ONNX builds → stub returns error
+- **Quality**: sim(ReadFile, ReadFileContents) = 0.69, sim(ReadFile, SQL) = 0.17
+- **Tests**: 7 new tests (tokenizer load/encode/special/roundtrip + ONNX basic/similarity/invalidDim)
+
+### Feature 12: DA Review #6 Wave 1 — 22 Bug Fixes (Done)
+- **C4 FK removal**: Migration v2 removes foreign keys from edges table — INSERT OR IGNORE + FK was silently dropping all cross-file edges
+- **H1 active file context**: `ActiveFiles []string` in search, resolved to node IDs, passed as PPR seeds
+- **H2 stored betweenness**: Architecture summary and explore use stored scores, not recomputed
+- **H3 PHP regex fix**: Removed `^` anchors, added indented declaration support
+- **H4 language filter**: `parser.IsSupported(path)` filter in indexPath walk
+- **H5 ADR architecture**: Architecture mode includes `GetAllProjectSummaries()`
+- **H6 memory monitoring**: 5-min ticker, 2GB warning
+- **H7 search docs**: Algorithm documentation for RRF → weighted linear combination
+- **M3 nested gitignore**: `gitignoreEntry` struct with baseDir, discovered during walk
+- **M4 thread safety**: `stopWordsMu sync.RWMutex` for concurrent access
+- **M9 resources+prompts**: `qb://graph/stats` resource, `explain_symbol` prompt template
+- **M10 gitignore reload**: Runtime .gitignore modification detection
+- 10 files changed, 603 insertions, 70 deletions
+
 ### Features Explicitly Skipped (for now)
 - HTTP UI server / graph visualization
 - Cypher query language
 - Co-change frequency (requires git history integration)
 - HITS authority/hub scores (C project uses, but InDegree covers similar ground)
 - Tree-sitter integration (gotreesitter) — improved regex approach working well, tree-sitter for future
-- ONNX Runtime embedding — TFIDFEmbedder provides real semantic locality as bridge
 
 ---
 
@@ -365,18 +419,24 @@ qb-context/
 
 ### Build & Test
 ```bash
-go build -tags "fts5" ./...           # compilation check
-go test -tags "fts5" ./... -count=1   # run all tests (FTS5 requires build tag)
-golangci-lint run ./...               # lint (needs manual install)
-qb-context cli --list                 # list available MCP tools
+go build -tags "fts5" ./...              # compilation check (TFIDF only)
+go build -tags "fts5,onnx" ./...         # compilation check (with ONNX support)
+go test -tags "fts5" ./... -count=1      # run all tests (TFIDF mode)
+go test -tags "fts5,onnx" ./... -count=1 # run all tests (with ONNX tests)
+qb-context cli --list                    # list available MCP tools
 qb-context cli context '{"query":"payment","limit":5}'  # test a tool
+
+# Run with ONNX model:
+qb-context --onnx-model /path/to/model --onnx-lib /path/to/libonnxruntime.dylib --embedding-dim 256
 ```
 
 ### Known Limitations
 - Parser uses improved regex for JS/TS/PHP (not tree-sitter) — state-machine findBlockEnd handles most cases but regex heuristics can still miss edge cases
-- .gitignore only reads root file, not nested ones
 - Go call edges only resolve within same file (cross-package calls create edges to non-existent nodes)
-- TFIDFEmbedder provides semantic locality but not full sentence-level understanding (ONNX Runtime with all-MiniLM-L6-v2 would be better)
 - sqlite-vec extension needed for vector KNN search — gracefully degrades to keyword-only when unavailable
 - gonum Betweenness doesn't support sampling (O(V*E) for large graphs)
-- No re-index serialization — concurrent `index` tool calls can race
+- Index operations serialized via `indexMu` mutex, but concurrent search during index is safe
+- ONNX embedder requires ONNX Runtime shared library installed on the system
+- BPE tokenizer pre-tokenization regex simplified for Go RE2 (no negative lookahead) — functionally equivalent for embedding
+- Embedding dim change requires re-indexing all embeddings (no automatic migration)
+- mattn/go-sqlite3 requires CGO; ncruces/go-sqlite3 (pure Go WASM) is a future replacement target
