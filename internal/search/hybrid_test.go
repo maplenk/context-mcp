@@ -421,3 +421,24 @@ func TestSetStopWords_ConcurrentSafety(t *testing.T) {
 		"who", "whom", "why",
 	})
 }
+
+// TestBuildFTSQuery_AllStopWords verifies that buildFTSQuery returns a
+// non-empty fallback when every token is a stop word (prevents empty FTS query).
+func TestBuildFTSQuery_AllStopWords(t *testing.T) {
+	// "the a is" are all stop words
+	result := buildFTSQuery("the a is")
+	if result == "" {
+		t.Fatal("buildFTSQuery returned empty string for all-stop-word input")
+	}
+
+	// The function should fall back to the original query
+	if !strings.Contains(result, "the") && !strings.Contains(result, "a") && !strings.Contains(result, "is") {
+		t.Errorf("expected fallback to contain original terms, got: %q", result)
+	}
+
+	// Also test single stop word
+	result2 := buildFTSQuery("the")
+	if result2 == "" {
+		t.Fatal("buildFTSQuery returned empty string for single stop word")
+	}
+}

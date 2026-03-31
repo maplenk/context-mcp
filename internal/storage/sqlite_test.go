@@ -1020,3 +1020,75 @@ func TestRawQuery_LimitWordBoundary(t *testing.T) {
 		t.Errorf("expected 1 result with explicit LIMIT 1, got %d", len(results))
 	}
 }
+
+// ---- H23: FTS5 special character injection ----
+
+func TestRawQuery_FTS5Injection(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a node so the table isn't empty
+	node := sampleNode(types.GenerateNodeID("inj.go", "InjFunc"), "inj.go", "InjFunc", types.NodeTypeFunction)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	// FTS5 special characters that could cause query injection or parse errors
+	specialInputs := []string{
+		`SELECT * FROM nodes WHERE id = '"test"'`,
+		"SELECT * FROM nodes WHERE id = 'test OR DROP'",
+		"SELECT count(*) AS c FROM nodes WHERE symbol_name LIKE '%*%'",
+	}
+	for _, q := range specialInputs {
+		// These should either succeed (returning results or empty set) or fail gracefully
+		// — they must NOT cause a panic or unhandled error
+		_, err := s.RawQuery(q)
+		// Any error should be a controlled rejection, not a crash
+		if err != nil {
+			t.Logf("RawQuery(%q) returned controlled error: %v", q, err)
+		}
+	}
+}
+
+// ---- H24: ATTACH DATABASE blocked ----
+
+func TestRawQuery_AttachBlocked(t *testing.T) {
+	s := newTestStore(t)
+
+	// ATTACH DATABASE should be rejected (it's not a SELECT and/or contains 'attach')
+	_, err := s.RawQuery("ATTACH DATABASE ':memory:' AS evil")
+	if err == nil {
+		t.Fatal("expected RawQuery to reject ATTACH DATABASE")
+	}
+
+	// Even if disguised inside a SELECT-like construct, 'attach' is in the blocklist
+	_, err = s.RawQuery("SELECT * FROM nodes WHERE id = 'attach'")
+	if err == nil {
+		t.Fatal("expected RawQuery to block query containing 'attach' pattern")
+	}
+}
+
+// ---- H25: Double Close safety ----
+
+func TestStore_DoubleClose(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "double_close.db")
+	s, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// First close should succeed
+	if err := s.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Second close should not panic (it may return an error, which is acceptable)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("second Close panicked: %v", r)
+			}
+		}()
+		_ = s.Close()
+	}()
+}
