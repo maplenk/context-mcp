@@ -130,9 +130,11 @@ func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
 	if err != nil {
 		return nil, err
 	}
+	// H22: Return error if EvalSymlinks on repoRoot fails, instead of silently
+	// falling back to the raw path which causes prefix mismatches.
 	resolvedRoot, err := filepath.EvalSymlinks(d.repoRoot)
 	if err != nil {
-		resolvedRoot = d.repoRoot
+		return nil, fmt.Errorf("resolving repo root symlinks: %w", err)
 	}
 	if !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) && resolved != resolvedRoot {
 		return nil, fmt.Errorf("symlink %s resolves to %s which is outside repo root %s", path, resolved, d.repoRoot)

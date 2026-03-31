@@ -73,6 +73,11 @@ func ParseFlags() *Config {
 	flag.IntVar(&cfg.EmbeddingDim, "embedding-dim", cfg.EmbeddingDim, "Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896)")
 	flag.Parse()
 
+	// H21: Prevent zero or negative batch-size causing infinite loop
+	if cfg.EmbeddingBatchSize < 1 {
+		cfg.EmbeddingBatchSize = 50
+	}
+
 	// Resolve absolute paths
 	if !filepath.IsAbs(cfg.RepoRoot) {
 		abs, err := filepath.Abs(cfg.RepoRoot)
