@@ -87,7 +87,7 @@ func GetStopWords() []string {
 var camelCaseRe = regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z][a-z0-9]*|[A-Z]+|[0-9]+`)
 
 // fts5SpecialRe matches FTS5 special characters that must be sanitized before query construction.
-var fts5SpecialRe = regexp.MustCompile(`[":(){}^+\-*/]`)
+var fts5SpecialRe = regexp.MustCompile("[\"':(){}^+\\-*/`]")
 
 // sanitizeFTS replaces FTS5 special characters with spaces and neutralizes boolean
 // operators to prevent query injection. FTS5 only recognizes uppercase OR, AND, NOT,
