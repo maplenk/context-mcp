@@ -594,7 +594,7 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	}
 
 	// Reject queries containing dangerous SQLite functions/patterns
-	dangerousPatterns := []string{"load_extension", "writefile", "readfile", "edit", "fts3_tokenizer", "attach"}
+	dangerousPatterns := []string{"load_extension", "writefile", "readfile", "edit", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex"}
 	for _, pattern := range dangerousPatterns {
 		if strings.Contains(trimmed, strings.ToUpper(pattern)) {
 			return nil, fmt.Errorf("query contains forbidden pattern: %s", pattern)
@@ -608,14 +608,22 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		query = query + " LIMIT 500"
 	}
 
-	// Use a proper read-only transaction on a pinned connection
-	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	// Pin a connection from the pool and enforce read-only at the SQLite level.
+	// mattn/go-sqlite3 ignores TxOptions{ReadOnly: true}, so we must use PRAGMA.
+	conn, err := s.db.Conn(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("beginning read-only transaction: %w", err)
+		return nil, fmt.Errorf("acquiring connection: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
 
-	rows, err := tx.Query(query)
+	// Enable query_only mode to prevent any writes
+	if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only = ON"); err != nil {
+		return nil, fmt.Errorf("enabling query_only: %w", err)
+	}
+	// Always restore the connection to read-write before returning to pool
+	defer conn.ExecContext(context.Background(), "PRAGMA query_only = OFF")
+
+	rows, err := conn.QueryContext(context.Background(), query)
 	if err != nil {
 		return nil, err
 	}
