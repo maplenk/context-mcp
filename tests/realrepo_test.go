@@ -143,11 +143,32 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 		return nil, err
 	}
 
-	// Filter edges (FK constraint: both endpoints must exist)
+	// --- Cross-file edge resolution ---
+	symbolIndex := make(map[string]string)
+	for _, n := range allNodes {
+		if n.NodeType == types.NodeTypeClass || n.NodeType == types.NodeTypeStruct ||
+			n.NodeType == types.NodeTypeInterface {
+			if _, exists := symbolIndex[n.SymbolName]; !exists {
+				symbolIndex[n.SymbolName] = n.ID
+			}
+		}
+	}
+
 	nodeIDSet := make(map[string]bool, len(allNodes))
 	for _, n := range allNodes {
 		nodeIDSet[n.ID] = true
 	}
+
+	// Resolve cross-file edges using TargetSymbol
+	for i, e := range allEdges {
+		if !nodeIDSet[e.TargetID] && e.TargetSymbol != "" {
+			if resolved, ok := symbolIndex[e.TargetSymbol]; ok {
+				allEdges[i].TargetID = resolved
+			}
+		}
+	}
+
+	// Filter edges (FK constraint: both endpoints must exist)
 	var validEdges []types.ASTEdge
 	for _, e := range allEdges {
 		if nodeIDSet[e.SourceID] && nodeIDSet[e.TargetID] {

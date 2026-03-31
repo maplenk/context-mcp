@@ -385,6 +385,33 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		allEdges = append(allEdges, r.edges...)
 	}
 
+	// --- Cross-file edge resolution ---
+	// Build symbol → nodeID index for class/struct/interface symbols
+	symbolIndex := make(map[string]string)
+	for _, n := range allNodes {
+		if n.NodeType == types.NodeTypeClass || n.NodeType == types.NodeTypeStruct ||
+			n.NodeType == types.NodeTypeInterface {
+			if _, exists := symbolIndex[n.SymbolName]; !exists {
+				symbolIndex[n.SymbolName] = n.ID
+			}
+		}
+	}
+
+	// Build nodeID set for resolution check
+	nodeIDSet := make(map[string]bool, len(allNodes))
+	for _, n := range allNodes {
+		nodeIDSet[n.ID] = true
+	}
+
+	// Resolve cross-file edges using TargetSymbol
+	for i, e := range allEdges {
+		if !nodeIDSet[e.TargetID] && e.TargetSymbol != "" {
+			if resolved, ok := symbolIndex[e.TargetSymbol]; ok {
+				allEdges[i].TargetID = resolved
+			}
+		}
+	}
+
 	// Store nodes
 	if len(allNodes) > 0 {
 		if err := store.UpsertNodes(allNodes); err != nil {

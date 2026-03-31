@@ -85,9 +85,10 @@ type ASTNode struct {
 
 // ASTEdge represents a relationship between two AST nodes
 type ASTEdge struct {
-	SourceID string   `json:"source_id"`
-	TargetID string   `json:"target_id"`
-	EdgeType EdgeType `json:"edge_type"`
+	SourceID     string   `json:"source_id"`
+	TargetID     string   `json:"target_id"`
+	EdgeType     EdgeType `json:"edge_type"`
+	TargetSymbol string   `json:"target_symbol,omitempty"` // raw symbol name for cross-file resolution
 }
 
 // FileEvent represents a filesystem change event

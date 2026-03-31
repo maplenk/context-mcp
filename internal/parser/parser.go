@@ -174,6 +174,25 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 			}
 			result.Nodes = append(result.Nodes, node)
 
+			// DEFINES edge: file → function/method
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: node.ID,
+				EdgeType: types.EdgeTypeDefines,
+			})
+
+			// DEFINES_METHOD edge: receiverType → method
+			if nodeType == types.NodeTypeMethod && decl.Recv != nil && decl.Recv.NumFields() > 0 {
+				recvType := extractReceiverType(decl.Recv)
+				if recvType != "" {
+					result.Edges = append(result.Edges, types.ASTEdge{
+						SourceID: types.GenerateNodeID(relPath, recvType),
+						TargetID: node.ID,
+						EdgeType: types.EdgeTypeDefinesMethod,
+					})
+				}
+			}
+
 			// Extract function calls within the body (M9: deduplicate)
 			if decl.Body != nil {
 				calls := extractGoCalls(decl.Body)
@@ -233,6 +252,13 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 						ContentSum: strings.TrimSpace(contentSum),
 					}
 					result.Nodes = append(result.Nodes, node)
+
+					// DEFINES edge: file → type
+					result.Edges = append(result.Edges, types.ASTEdge{
+						SourceID: fileNode.ID,
+						TargetID: node.ID,
+						EdgeType: types.EdgeTypeDefines,
+					})
 				}
 			}
 		}
@@ -385,6 +411,12 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
+			// DEFINES edge: file → function
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: types.GenerateNodeID(relPath, name),
+				EdgeType: types.EdgeTypeDefines,
+			})
 			return false // skip children
 
 		case "lexical_declaration", "variable_declaration":
@@ -422,6 +454,12 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 					EndByte:    endByte,
 					ContentSum: contentSum,
 				})
+				// DEFINES edge: file → arrow function
+				result.Edges = append(result.Edges, types.ASTEdge{
+					SourceID: fileNode.ID,
+					TargetID: types.GenerateNodeID(relPath, name),
+					EdgeType: types.EdgeTypeDefines,
+				})
 			}
 			return false // skip children
 
@@ -448,6 +486,12 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
+			// DEFINES edge: file → class
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: types.GenerateNodeID(relPath, className),
+				EdgeType: types.EdgeTypeDefines,
+			})
 
 			// Check for extends (INHERITS edge)
 			superNode := n.ChildByFieldName("superclass")
@@ -455,9 +499,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				parentName := superNode.Content(content)
 				if parentName != "" {
 					result.Edges = append(result.Edges, types.ASTEdge{
-						SourceID: types.GenerateNodeID(relPath, className),
-						TargetID: types.GenerateNodeID(relPath, parentName),
-						EdgeType: types.EdgeTypeInherits,
+						SourceID:     types.GenerateNodeID(relPath, className),
+						TargetID:     types.GenerateNodeID(relPath, parentName),
+						EdgeType:     types.EdgeTypeInherits,
+						TargetSymbol: parentName,
 					})
 				}
 			}
@@ -501,6 +546,12 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 						EndByte:    mEndByte,
 						ContentSum: mContentSum,
 					})
+					// DEFINES_METHOD edge: class → method
+					result.Edges = append(result.Edges, types.ASTEdge{
+						SourceID: types.GenerateNodeID(relPath, className),
+						TargetID: types.GenerateNodeID(relPath, qualifiedName),
+						EdgeType: types.EdgeTypeDefinesMethod,
+					})
 				}
 			}
 			return false // skip children
@@ -532,6 +583,12 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
+			// DEFINES edge: file → interface
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: types.GenerateNodeID(relPath, name),
+				EdgeType: types.EdgeTypeDefines,
+			})
 			return false // skip children
 
 		case "enum_declaration":
@@ -556,6 +613,12 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
+			// DEFINES edge: file → enum
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: types.GenerateNodeID(relPath, name),
+				EdgeType: types.EdgeTypeDefines,
+			})
 			return false // skip children
 
 		case "type_alias_declaration":
@@ -579,6 +642,12 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				StartByte:  n.StartByte(),
 				EndByte:    endByte,
 				ContentSum: contentSum,
+			})
+			// DEFINES edge: file → type alias
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: types.GenerateNodeID(relPath, name),
+				EdgeType: types.EdgeTypeDefines,
 			})
 			return false // skip children
 		}
@@ -816,6 +885,59 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
+			// DEFINES edge: file → class
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: types.GenerateNodeID(relPath, className),
+				EdgeType: types.EdgeTypeDefines,
+			})
+
+			// Check for extends and implements
+			for ci := 0; ci < int(n.ChildCount()); ci++ {
+				child := n.Child(ci)
+				if child == nil || !child.IsNamed() {
+					continue
+				}
+				if child.Type() == "base_clause" {
+					for cj := 0; cj < int(child.ChildCount()); cj++ {
+						nameChild := child.Child(cj)
+						if nameChild != nil && nameChild.IsNamed() && (nameChild.Type() == "name" || nameChild.Type() == "qualified_name") {
+							parentName := nameChild.Content(content)
+							if idx := strings.LastIndex(parentName, "\\"); idx >= 0 {
+								parentName = parentName[idx+1:]
+							}
+							if parentName != "" {
+								result.Edges = append(result.Edges, types.ASTEdge{
+									SourceID:     types.GenerateNodeID(relPath, className),
+									TargetID:     types.GenerateNodeID(relPath, parentName),
+									EdgeType:     types.EdgeTypeInherits,
+									TargetSymbol: parentName,
+								})
+							}
+							break
+						}
+					}
+				}
+				if child.Type() == "class_interface_clause" {
+					for cj := 0; cj < int(child.ChildCount()); cj++ {
+						ifaceChild := child.Child(cj)
+						if ifaceChild != nil && ifaceChild.IsNamed() && (ifaceChild.Type() == "name" || ifaceChild.Type() == "qualified_name") {
+							ifaceName := ifaceChild.Content(content)
+							if idx := strings.LastIndex(ifaceName, "\\"); idx >= 0 {
+								ifaceName = ifaceName[idx+1:]
+							}
+							if ifaceName != "" {
+								result.Edges = append(result.Edges, types.ASTEdge{
+									SourceID:     types.GenerateNodeID(relPath, className),
+									TargetID:     types.GenerateNodeID(relPath, ifaceName),
+									EdgeType:     types.EdgeTypeImplements,
+									TargetSymbol: ifaceName,
+								})
+							}
+						}
+					}
+				}
+			}
 
 			// Extract methods from declaration_list body
 			bodyNode := n.ChildByFieldName("body")
@@ -850,6 +972,12 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 						EndByte:    mEndByte,
 						ContentSum: mContentSum,
 					})
+					// DEFINES_METHOD edge: class → method
+					result.Edges = append(result.Edges, types.ASTEdge{
+						SourceID: types.GenerateNodeID(relPath, className),
+						TargetID: types.GenerateNodeID(relPath, qualifiedName),
+						EdgeType: types.EdgeTypeDefinesMethod,
+					})
 				}
 			}
 			return false // skip children
@@ -875,6 +1003,12 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				StartByte:  n.StartByte(),
 				EndByte:    endByte,
 				ContentSum: contentSum,
+			})
+			// DEFINES edge: file → function
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID: fileNode.ID,
+				TargetID: types.GenerateNodeID(relPath, name),
+				EdgeType: types.EdgeTypeDefines,
 			})
 			return false // skip children
 
