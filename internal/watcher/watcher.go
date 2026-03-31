@@ -35,11 +35,13 @@ type Watcher struct {
 	mu      sync.Mutex
 	pending map[string]*debounceEntry
 	stopped bool
+	genSeq  uint64 // H19: monotonic generation counter for debounce
 }
 
 type debounceEntry struct {
-	action types.FileEventAction
-	timer  *time.Timer
+	action     types.FileEventAction
+	timer      *time.Timer
+	generation uint64 // H19: invalidates stale timer callbacks
 }
 
 // New creates a new Watcher for the given repo root
@@ -329,7 +331,14 @@ func (w *Watcher) debounce(path string, action types.FileEventAction) {
 
 	// If there's already a pending event for this file, cancel its timer and update
 	if entry, exists := w.pending[path]; exists {
-		entry.timer.Stop()
+		// H19: If Stop returns false the timer already fired; drain the channel
+		// so the old callback won't interfere with the new timer.
+		if !entry.timer.Stop() {
+			select {
+			case <-entry.timer.C:
+			default:
+			}
+		}
 		// Coalescing rules:
 		// - Delete always wins (file is gone)
 		// - Don't downgrade Create to Modified (CREATE+WRITE = new file being written)
@@ -338,27 +347,40 @@ func (w *Watcher) debounce(path string, action types.FileEventAction) {
 		} else if entry.action != types.FileEventCreated {
 			entry.action = action
 		}
+		// H19: Bump generation so any in-flight old callback becomes a no-op
+		w.genSeq++
+		gen := w.genSeq
+		entry.generation = gen
 		// Reset the timer
 		entry.timer = time.AfterFunc(w.debounceDelay, func() {
-			w.flushEvent(path)
+			w.flushEventIfCurrent(path, gen)
 		})
 		return
 	}
 
 	// Create a new pending entry
+	w.genSeq++
+	gen := w.genSeq
 	entry := &debounceEntry{
-		action: action,
+		action:     action,
+		generation: gen,
 	}
 	entry.timer = time.AfterFunc(w.debounceDelay, func() {
-		w.flushEvent(path)
+		w.flushEventIfCurrent(path, gen)
 	})
 	w.pending[path] = entry
 }
 
-// flushEvent sends a pending event to the events channel and removes it from pending
-func (w *Watcher) flushEvent(path string) {
+// flushEventIfCurrent sends a pending event only if the generation matches the
+// current entry. This prevents stale timer callbacks from emitting duplicate events (H19).
+func (w *Watcher) flushEventIfCurrent(path string, gen uint64) {
 	w.mu.Lock()
 	entry, exists := w.pending[path]
+	if exists && entry.generation != gen {
+		// Stale callback — a newer debounce superseded this one.
+		w.mu.Unlock()
+		return
+	}
 	if exists {
 		delete(w.pending, path)
 	}
