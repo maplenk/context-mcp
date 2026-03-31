@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-03-31 (post-Search Quality & Speed — subgraph PPR, structural edges, BM25 weights, DA review #9).
+> Living document for team reference. Last updated: 2026-03-31 (post-Phase 8 — TargetSymbol cross-file edge resolution, structural edge emission, helper file penalty, nested shouldSkip, DA review #10).
 
 ---
 
@@ -59,9 +59,9 @@ qb-context/
 
 ### Core Types (`internal/types`)
 - `NodeType` uint8: Function(1), Class(2), Struct(3), Method(4), Interface(5), File(6)
-- `EdgeType` uint8: Calls(1), Imports(2), Implements(3), Instantiates(4)
+- `EdgeType` uint8: Calls(1), Imports(2), Implements(3), Instantiates(4), Defines(5), DefinesMethod(6), Inherits(7)
 - `ASTNode`: ID (SHA-256 of path + null byte + symbol), FilePath, SymbolName, NodeType, StartByte, EndByte, ContentSum
-- `ASTEdge`: SourceID, TargetID, EdgeType
+- `ASTEdge`: SourceID, TargetID, EdgeType, TargetSymbol (optional — raw symbol name for cross-file resolution)
 - `FileEvent`: Path, Action (Created/Modified/Deleted)
 - `SearchResult`: Node, Score
 - `RiskLevel` string: CRITICAL, HIGH, MEDIUM, LOW (hop-based impact classification)
@@ -106,6 +106,13 @@ qb-context/
   - Tree-sitter gives exact byte offsets (StartByte/EndByte) from AST nodes
   - TypeScript-specific: interface→NodeTypeInterface, enum→NodeTypeStruct, type alias→NodeTypeFunction
   - Call edges still use regex on node body text for reliability (jsCallExprRe, phpMethodCallRe etc.)
+- **Structural edges emitted from all parsers** (Phase 8):
+  - DEFINES (file→class/function/type) — Go, JS/TS, PHP
+  - DEFINES_METHOD (class/struct→method) — Go (via receiver type), JS/TS, PHP
+  - INHERITS (class→parent) — JS/TS (via `superclass` field), PHP (via `base_clause` child)
+  - IMPLEMENTS (class→interface) — PHP (via `class_interface_clause` child)
+  - INHERITS/IMPLEMENTS edges include `TargetSymbol` for cross-file resolution
+  - PHP namespace stripping: `\App\Models\Base` → `Base` for symbol lookup
 - PHP methods without visibility keywords now detected (defaults to public)
 - PHP deduplication via `seen` map — standalone function regex no longer duplicates class methods
 - **File-level nodes** (NodeTypeFile) created for every parsed file — import edges now have valid source/target nodes in the graph, fixing graph connectivity
@@ -178,13 +185,14 @@ qb-context/
   composite = 0.35*PPR + 0.25*BM25 + 0.15*Betweenness + 0.10*InDegree + 0.15*SemanticSim
   ```
 - All signals normalized to [0,1] before weighting
+- **Helper file penalty**: `composite *= 0.3` for `_ide_helper`, `.d.ts`, `generated` files — prevents auto-generated files from dominating results
 - **Snapshot-based signal fetching**: PPR + InDegree computed under single lock via `ComputeSearchSignals()` (no race conditions)
 - PPR seeded from top 10 FTS results + active file nodes (query-time, not index-time)
 - FTS5 enhancements: prefix matching (`term*`), CamelCase splitting, stop word filtering, FTS5 special char sanitization (includes `*` wildcard), **boolean operator neutralization** (OR/AND/NOT/NEAR lowercased)
 - **Min-max normalization** for all scores (handles negative cosine similarity correctly)
 - PPR seeds **deduplicated** before computation
 - CamelCase regex includes **digits** (`[0-9]+`) for identifiers like `HTTP2Client`
-- Per-file cap: configurable via `max_per_file` parameter (default 3)
+- Per-file cap: configurable via `max_per_file` parameter (default 3), helper files capped at 1
 - Stop words: configurable via `SetStopWords()` function
 
 ### MCP Server (`internal/mcp`)
@@ -220,8 +228,9 @@ qb-context/
 - Modeled after C project's `cli` subcommand
 
 ### Main Orchestrator (`cmd/qb-context/main.go`)
-- Boot: config → **embedder (ONNX if configured, else TFIDF)** → storage (with embedding dim) → parser → graph → initial index (+ betweenness + ADR) → watcher → MCP server
+- Boot: config → **embedder (ONNX if configured, else TFIDF)** → storage (with embedding dim) → parser → graph → initial index (+ cross-file resolution + betweenness + ADR) → watcher → MCP server
 - Worker pool for parallel file parsing during initial index
+- **Cross-file edge resolution** in `indexRepo()`: builds symbol→nodeID index from class/struct/interface nodes, resolves dangling INHERITS/IMPLEMENTS edges using `TargetSymbol` field before storing
 - Betweenness centrality computed and stored in `node_scores` at index time
 - ADR documents discovered and stored in `project_summaries` at index time
 - **Incremental graph updates** via filesystem watcher: RemoveNode/AddEdge instead of full rebuild
@@ -325,6 +334,20 @@ qb-context/
 |---|------|-------------|-------|--------|
 | 37 | `caf8d0f` | Subgraph PPR, structural edges (DEFINES/DEFINES_METHOD/INHERITS), BM25 10x name weight, domain stop words, helper file cap, JS extends, DA fixes | 4 Opus agents | Done |
 
+### Phase 8: Cross-File Edge Resolution (Commits 38-39)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 38 | `f9dfebf` | Fix nested dir matching in shouldSkip + helper file score penalty (0.3x) | Opus (worktree) | Done |
+| 39 | `9e637b9` | TargetSymbol cross-file edge resolution + structural edge emission from all parsers | Opus + orchestrator | Done |
+
+**Key changes:**
+- `TargetSymbol` field on `ASTEdge` — stores raw symbol name for INHERITS/IMPLEMENTS edges
+- Cross-file edge resolution pass in `indexRepo()`, `realrepo_test.go`, `integration_test.go` — builds symbol→nodeID index from class/struct/interface nodes, resolves dangling targets before FK filtering
+- Structural edges emitted from Go/JS/PHP tree-sitter parsers: DEFINES, DEFINES_METHOD, INHERITS (with TargetSymbol), IMPLEMENTS (with TargetSymbol)
+- `shouldSkip` rewritten to match path components (catches nested `node_modules/`)
+- Helper file score penalty: `composite *= 0.3` for `_ide_helper`, `.d.ts`, `generated` files
+
 ### Test Coverage (13 packages, all passing — 233 unit tests + 22 real-repo subtests)
 - `internal/types` — 12 tests (ID generation, enum values, null byte separator collision, hex format validation)
 - `internal/storage` — 14 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT, write rejection, transactional upsert)
@@ -370,6 +393,13 @@ qb-context/
   - HIGH: `isHelperFile` false positives (path-component matching), over-aggressive domain stop words (removed "get", "class", "method", "code", etc.).
   - MEDIUM: Added test coverage for 3 new EdgeType values, JS/TS extends detection for INHERITS edges.
   - LOW (accepted): PPR subgraph parameter differences (intentional speed trade-off), Go DEFINES_METHOD file-local resolution, PHP namespaced extends, methods double-counted in-degree (intentional — both edges are semantically correct).
+- **Review #10 (Cross-File Edge Resolution DA)**: 3 HIGH, 2 MEDIUM, 1 LOW:
+  - HIGH #1 (false positive): JS INHERITS missing TargetSymbol — actually present at line 505.
+  - HIGH #2 (accepted): `indexPath` and `processFileEvent` skip cross-file resolution — full re-index on daemon start mitigates; incremental resolution would require DB lookups per edge (future optimization).
+  - HIGH #3 (accepted): Double penalty (score 0.3x + cap 1) for helper files — intentional; score penalty handles ranking, cap handles diversity.
+  - MEDIUM #4 (accepted): `symbolIndex` first-wins is non-deterministic for duplicate names — acceptable for Laravel (one class per file); would need FQN for disambiguation (future).
+  - MEDIUM #5 (accepted): Stop words "end", "flow", "logic" may suppress legitimate searches — CamelCase splitting mitigates (`AuthFlow` → `Auth` + `Flow`); plain `flow` is rare as a code search.
+  - LOW #6: DEFINES_METHOD source may be dangling for cross-file receivers — pre-existing, same-file resolution only.
 
 ---
 
@@ -523,7 +553,8 @@ qb-context --onnx-model /path/to/model --onnx-lib /path/to/libonnxruntime.dylib 
 
 ### Known Limitations
 - Tree-sitter JS/TS/PHP parsers extract symbol definitions via AST; call edges still use regex on node body text for reliability
-- DEFINES_METHOD, INHERITS, IMPLEMENTS edges use file-local ID resolution — cross-file targets create dangling edges (connected via import edges)
+- INHERITS/IMPLEMENTS cross-file resolution via `TargetSymbol` works in `indexRepo()` (full index) but NOT in `indexPath()` or `processFileEvent()` (incremental) — incremental updates produce dangling edges until next full re-index
+- `symbolIndex` first-wins: duplicate class names across files (e.g., `User` model + `User` resource) resolve non-deterministically — would need FQN for disambiguation
 - Go call edges resolve cross-package via file-level nodes, but symbol-level cross-package resolution is approximate
 - gonum Betweenness doesn't support sampling (O(V*E) for large graphs)
 - Index operations serialized via `indexMu` mutex, but concurrent search during index is safe
