@@ -253,6 +253,12 @@ func (g *GraphEngine) personalizedPageRankLocked(activeNodeIDs []string) map[str
 			}
 			diff += d
 		}
+		// Also count mass lost from nodes in rank but not in newRank
+		for id, r := range rank {
+			if _, ok := newRank[id]; !ok {
+				diff += r
+			}
+		}
 		rank = newRank
 		if diff < epsilon {
 			break
@@ -316,10 +322,31 @@ func (g *GraphEngine) personalizedPageRankSubgraphLocked(seedIDs, candidateIDs [
 	}
 	// Normalize teleport vector
 	if len(teleport) == 0 {
-		// Fall back to uniform over candidates
-		weight := 1.0 / float64(n)
-		for id := range candidateSet {
-			teleport[id] = weight
+		// Seeds are outside candidate set — use their neighbors in candidates as proxies
+		for _, hashID := range seedIDs {
+			if id, ok := g.idMap[hashID]; ok {
+				succs := g.dg.From(id)
+				for succs.Next() {
+					succID := succs.Node().ID()
+					if candidateSet[succID] {
+						teleport[succID] += 1.0
+					}
+				}
+				preds := g.dg.To(id)
+				for preds.Next() {
+					predID := preds.Node().ID()
+					if candidateSet[predID] {
+						teleport[predID] += 1.0
+					}
+				}
+			}
+		}
+		// If still empty, fall back to uniform
+		if len(teleport) == 0 {
+			weight := 1.0 / float64(n)
+			for id := range candidateSet {
+				teleport[id] = weight
+			}
 		}
 	} else {
 		sum := 0.0
@@ -379,6 +406,12 @@ func (g *GraphEngine) personalizedPageRankSubgraphLocked(seedIDs, candidateIDs [
 				d = -d
 			}
 			diff += d
+		}
+		// Also count mass lost from nodes in rank but not in newRank
+		for id, r := range rank {
+			if _, ok := newRank[id]; !ok {
+				diff += r
+			}
 		}
 		rank = newRank
 		if diff < epsilon {
@@ -735,7 +768,8 @@ func (g *GraphEngine) TraceCallPath(fromHash, toHash string, maxDepth int) [][]s
 	// meetingNodes are nodes found in both forward and backward visited sets
 	var meetingNodes []int64
 
-	for depth := 0; depth < maxDepth && len(meetingNodes) == 0; depth++ {
+	halfDepth := (maxDepth + 1) / 2
+	for depth := 0; depth < halfDepth && len(meetingNodes) == 0; depth++ {
 		// Expand forward frontier
 		if len(frontierFwd) > 0 {
 			var nextFwd []int64
@@ -744,11 +778,13 @@ func (g *GraphEngine) TraceCallPath(fromHash, toHash string, maxDepth int) [][]s
 				for succs.Next() {
 					succID := succs.Node().ID()
 					if _, visited := parentFwd[succID]; !visited {
-						parentFwd[succID] = append(parentFwd[succID], nodeID)
+						parentFwd[succID] = []int64{nodeID}
 						nextFwd = append(nextFwd, succID)
 						if _, inBwd := parentBwd[succID]; inBwd {
 							meetingNodes = append(meetingNodes, succID)
 						}
+					} else {
+						parentFwd[succID] = append(parentFwd[succID], nodeID)
 					}
 				}
 			}
@@ -767,11 +803,13 @@ func (g *GraphEngine) TraceCallPath(fromHash, toHash string, maxDepth int) [][]s
 				for preds.Next() {
 					predID := preds.Node().ID()
 					if _, visited := parentBwd[predID]; !visited {
-						parentBwd[predID] = append(parentBwd[predID], nodeID)
+						parentBwd[predID] = []int64{nodeID}
 						nextBwd = append(nextBwd, predID)
 						if _, inFwd := parentFwd[predID]; inFwd {
 							meetingNodes = append(meetingNodes, predID)
 						}
+					} else {
+						parentBwd[predID] = append(parentBwd[predID], nodeID)
 					}
 				}
 			}
@@ -791,6 +829,9 @@ func (g *GraphEngine) TraceCallPath(fromHash, toHash string, maxDepth int) [][]s
 		fwdPath := g.reconstructPath(parentFwd, fromID, mid)
 		// Build backward path from meeting node to target
 		bwdPath := g.reconstructPath(parentBwd, toID, mid)
+		if fwdPath == nil || bwdPath == nil {
+			continue // skip this meeting node — no valid path
+		}
 
 		// Reverse the backward path and combine
 		for i, j := 0, len(bwdPath)-1; i < j; i, j = i+1, j-1 {
@@ -908,7 +949,7 @@ func (g *GraphEngine) reconstructPath(parentMap map[int64][]int64, source, targe
 		}
 	}
 
-	return []int64{target}
+	return nil // No path found
 }
 
 // PageRank computes standard (non-personalized) PageRank and returns a map of
