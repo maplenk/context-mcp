@@ -135,8 +135,13 @@ func main() {
 		}
 	}()
 
-	// 8. Start incremental update goroutine
-	go handleFileEvents(w, cfg, store, p, embedder, graphEngine)
+	// 8. Start incremental update goroutine (H35: tracked with WaitGroup)
+	var fileEventsWg sync.WaitGroup
+	fileEventsWg.Add(1)
+	go func() {
+		defer fileEventsWg.Done()
+		handleFileEvents(w, cfg, store, p, embedder, graphEngine)
+	}()
 
 	// 9. Set up MCP server
 	server := mcp.NewServer()
@@ -179,7 +184,8 @@ func main() {
 	go func() {
 		sig := <-sigCh
 		log.Printf("Received signal %v, shutting down...", sig)
-		w.Stop()
+		w.Stop()                // closes Events channel, causing handleFileEvents to return
+		fileEventsWg.Wait()     // H35: wait for handleFileEvents to finish before cleanup
 		cleanup()
 		os.Exit(0)
 	}()
@@ -580,6 +586,10 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 
 	log.Printf("Targeted re-index: %d files under %s", len(files), targetPath)
 
+	// Collect all parsed nodes and edges across files for cross-file resolution
+	var allNewNodes []types.ASTNode
+	var allNewEdges []types.ASTEdge
+
 	for _, relPath := range files {
 		absPath := filepath.Join(cfg.RepoRoot, relPath)
 
@@ -595,15 +605,13 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			continue
 		}
 
-		// Store nodes and edges
+		allNewNodes = append(allNewNodes, result.Nodes...)
+		allNewEdges = append(allNewEdges, result.Edges...)
+
+		// Store nodes first (needed for symbol index query below)
 		if len(result.Nodes) > 0 {
 			if err := store.UpsertNodes(result.Nodes); err != nil {
 				log.Printf("Failed to store nodes for %s: %v", relPath, err)
-			}
-		}
-		if len(result.Edges) > 0 {
-			if err := store.UpsertEdges(result.Edges); err != nil {
-				log.Printf("Failed to store edges for %s: %v", relPath, err)
 			}
 		}
 
@@ -615,6 +623,45 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 				continue
 			}
 			store.UpsertEmbedding(node.ID, vec)
+		}
+	}
+
+	// H32: Cross-file edge resolution — same logic as indexRepo
+	if len(allNewEdges) > 0 {
+		// Build symbol index from ALL nodes in the store (includes just-inserted nodes)
+		symbolIndex, siErr := store.GetSymbolIndex()
+		if siErr != nil {
+			log.Printf("Failed to build symbol index for cross-file resolution: %v", siErr)
+		} else {
+			// Also include new nodes that might be class/struct/interface but not yet
+			// returned by GetSymbolIndex (race-free: we already upserted above)
+			// Build nodeID set for resolution check
+			nodeIDSet := make(map[string]bool, len(allNewNodes))
+			for _, n := range allNewNodes {
+				nodeIDSet[n.ID] = true
+			}
+			// Extend with all existing node IDs from symbolIndex values
+			for _, id := range symbolIndex {
+				nodeIDSet[id] = true
+			}
+
+			resolved := 0
+			for i, e := range allNewEdges {
+				if !nodeIDSet[e.TargetID] && e.TargetSymbol != "" {
+					if rid, ok := symbolIndex[e.TargetSymbol]; ok {
+						allNewEdges[i].TargetID = rid
+						resolved++
+					}
+				}
+			}
+			if resolved > 0 {
+				log.Printf("Cross-file edge resolution: resolved %d edges", resolved)
+			}
+		}
+
+		// Store edges after resolution
+		if err := store.UpsertEdges(allNewEdges); err != nil {
+			log.Printf("Failed to store edges: %v", err)
 		}
 	}
 

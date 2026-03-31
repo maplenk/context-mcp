@@ -816,6 +816,35 @@ func (s *Store) SearchNodesByName(pattern string) ([]types.ASTNode, error) {
 	return nodes, rows.Err()
 }
 
+// GetSymbolIndex returns a map of symbol_name -> node_id for class, struct, and
+// interface nodes. Used for cross-file edge resolution during incremental re-index.
+func (s *Store) GetSymbolIndex() (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT symbol_name, id FROM nodes
+		WHERE node_type IN (?, ?, ?)`,
+		uint8(types.NodeTypeClass), uint8(types.NodeTypeStruct), uint8(types.NodeTypeInterface))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	index := make(map[string]string)
+	for rows.Next() {
+		var sym, id string
+		if err := rows.Scan(&sym, &id); err != nil {
+			return nil, err
+		}
+		// first-wins: same behavior as indexRepo's symbolIndex
+		if _, exists := index[sym]; !exists {
+			index[sym] = id
+		}
+	}
+	return index, rows.Err()
+}
+
 // GetNodesByFile returns all nodes for a given file path
 func (s *Store) GetNodesByFile(filePath string) ([]types.ASTNode, error) {
 	s.mu.RLock()
