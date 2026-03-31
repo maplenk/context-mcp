@@ -234,10 +234,11 @@ func (s *Store) DeleteByFile(filePath string) error {
 	}
 	defer tx.Rollback()
 
-	// Delete edges where source or target is a node from this file
+	// Delete only outgoing edges (where source belongs to this file).
+	// Incoming edges from other files are preserved — they may become stale if
+	// target nodes are removed, but that is handled by graph pruning, not here.
 	_, err = tx.Exec(`
-		DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE file_path = ?)
-		OR target_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath, filePath)
+		DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
 	if err != nil {
 		return err
 	}
@@ -910,6 +911,34 @@ func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
 		scores = append(scores, score)
 	}
 	return scores, rows.Err()
+}
+
+// GetSymbolIndex returns a map of symbol_name -> node_id for class/struct/interface
+// nodes across the entire store. Used for cross-file edge resolution during incremental updates.
+func (s *Store) GetSymbolIndex() (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT symbol_name, id FROM nodes WHERE node_type IN (?, ?, ?)`,
+		uint8(types.NodeTypeClass), uint8(types.NodeTypeStruct), uint8(types.NodeTypeInterface))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	symbolIndex := make(map[string]string)
+	for rows.Next() {
+		var symbolName, nodeID string
+		if err := rows.Scan(&symbolName, &nodeID); err != nil {
+			return nil, err
+		}
+		// First occurrence wins (matches indexRepo behavior)
+		if _, exists := symbolIndex[symbolName]; !exists {
+			symbolIndex[symbolName] = nodeID
+		}
+	}
+	return symbolIndex, rows.Err()
 }
 
 // sanitizeFTSStorage strips FTS5 special characters for safe direct queries

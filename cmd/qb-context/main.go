@@ -208,6 +208,10 @@ func main() {
 	case <-done:
 		log.Printf("Shutdown complete")
 	}
+
+	// Normal exit: stop watcher and wait for handleFileEvents before deferred cleanup runs
+	w.Stop()
+	fileEventsWg.Wait()
 }
 
 // runCLI handles the "cli" subcommand for direct tool invocation
@@ -823,12 +827,33 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 			return
 		}
 
-		// Store new nodes and edges
+		// Store new nodes first (needed before edge resolution)
 		if len(result.Nodes) > 0 {
 			if err := store.UpsertNodes(result.Nodes); err != nil {
 				log.Printf("Failed to store nodes: %v", err)
 			}
 		}
+
+		// Resolve cross-file edges using TargetSymbol (matches indexRepo behavior)
+		if len(result.Edges) > 0 {
+			symbolIndex, siErr := store.GetSymbolIndex()
+			if siErr != nil {
+				log.Printf("Failed to get symbol index for cross-file resolution: %v", siErr)
+			} else {
+				nodeIDSet := make(map[string]bool, len(result.Nodes))
+				for _, n := range result.Nodes {
+					nodeIDSet[n.ID] = true
+				}
+				for i, e := range result.Edges {
+					if !nodeIDSet[e.TargetID] && e.TargetSymbol != "" {
+						if resolved, ok := symbolIndex[e.TargetSymbol]; ok {
+							result.Edges[i].TargetID = resolved
+						}
+					}
+				}
+			}
+		}
+
 		if len(result.Edges) > 0 {
 			if err := store.UpsertEdges(result.Edges); err != nil {
 				log.Printf("Failed to store edges: %v", err)
