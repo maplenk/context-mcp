@@ -128,12 +128,20 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 		return nil, fmt.Errorf("ONNX inference: %w", err)
 	}
 
+	// Close ALL output values when done (covers all outputs, not just the one we use)
+	defer func() {
+		for _, o := range outputs {
+			if o != nil {
+				o.Close()
+			}
+		}
+	}()
+
 	// Extract last_hidden_state [1, seqLen, hiddenDim]
 	outputValue, ok := outputs["last_hidden_state"]
 	if !ok {
 		return nil, fmt.Errorf("missing last_hidden_state output")
 	}
-	defer outputValue.Close()
 
 	hiddenData, _, err := ort.GetTensorData[float32](outputValue)
 	if err != nil {
@@ -148,6 +156,11 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 		if computed > 0 {
 			hiddenDim = computed
 		}
+	}
+
+	// Validate Matryoshka dim fits within hidden dimension
+	if e.dim > hiddenDim {
+		return nil, fmt.Errorf("requested Matryoshka dim %d exceeds model hidden dim %d", e.dim, hiddenDim)
 	}
 
 	// Last-token pooling: take the hidden state of the last token
@@ -186,15 +199,20 @@ func (e *ONNXEmbedder) Dim() int {
 }
 
 // Close destroys the ONNX session, environment, and runtime, freeing resources.
+// Nils out fields after closing to prevent double-close panics.
 func (e *ONNXEmbedder) Close() error {
 	if e.session != nil {
 		e.session.Close()
+		e.session = nil
 	}
 	if e.env != nil {
 		e.env.Close()
+		e.env = nil
 	}
 	if e.runtime != nil {
-		return e.runtime.Close()
+		err := e.runtime.Close()
+		e.runtime = nil
+		return err
 	}
 	return nil
 }

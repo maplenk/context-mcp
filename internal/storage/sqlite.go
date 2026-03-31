@@ -20,6 +20,9 @@ import (
 // DefaultEmbeddingDim is the default embedding dimension (TFIDF fallback).
 const DefaultEmbeddingDim = 384
 
+// sqliteVecOnce ensures sqlite_vec.Auto() is called exactly once.
+var sqliteVecOnce sync.Once
+
 // Store manages all SQLite database operations
 type Store struct {
 	db           *sql.DB
@@ -31,10 +34,10 @@ type Store struct {
 // NewStore opens (or creates) a SQLite database at the given path and runs migrations.
 // embeddingDim sets the expected embedding vector dimension (0 uses DefaultEmbeddingDim).
 func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
-	// Register sqlite-vec extension for all future SQLite connections.
-	// Must be called before sql.Open so the extension is available when
-	// the connection is established. Safe to call multiple times.
-	sqlite_vec.Auto()
+	// Register sqlite-vec extension once for all future SQLite connections.
+	sqliteVecOnce.Do(func() {
+		sqlite_vec.Auto()
+	})
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(dbPath)

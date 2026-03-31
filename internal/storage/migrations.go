@@ -173,6 +173,7 @@ func (s *Store) runMigrations() error {
 		return fmt.Errorf("creating vec0 table (sqlite-vec should be statically linked): %w", err)
 	}
 	s.hasVecTable = true
+	log.Printf("sqlite-vec vec0 table ready (embedding dim: %d)", s.embeddingDim)
 
 	return nil
 }
