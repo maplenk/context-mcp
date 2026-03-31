@@ -365,12 +365,14 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	}
 
 	tsParser := sitter.NewParser()
+	defer tsParser.Close()
 	tsParser.SetLanguage(lang)
 	tree, err := tsParser.ParseCtx(context.Background(), nil, content)
 	if err != nil {
 		log.Printf("parser: tree-sitter failed for %s: %v — returning file-level node only", relPath, err)
 		return result, nil
 	}
+	defer tree.Close()
 	root := tree.RootNode()
 	if root == nil {
 		log.Printf("parser: tree-sitter returned nil root for %s — returning file-level node only", relPath)
@@ -839,12 +841,14 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 
 	phpLang := php.GetLanguage()
 	phpParser := sitter.NewParser()
+	defer phpParser.Close()
 	phpParser.SetLanguage(phpLang)
 	tree, err := phpParser.ParseCtx(context.Background(), nil, content)
 	if err != nil {
 		log.Printf("parser: tree-sitter failed for %s: %v — returning file-level node only", relPath, err)
 		return result, nil
 	}
+	defer tree.Close()
 	root := tree.RootNode()
 	if root == nil {
 		log.Printf("parser: tree-sitter returned nil root for %s — returning file-level node only", relPath)
