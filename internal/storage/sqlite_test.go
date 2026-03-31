@@ -672,3 +672,100 @@ func TestGetNodeByName_DeterministicOrder(t *testing.T) {
 		t.Errorf("expected deterministic result from a_file.go, got %s", got.FilePath)
 	}
 }
+
+// ---- RawQuery LIMIT injection (M6) ----
+
+func TestRawQuery_InjectsDefaultLimit(t *testing.T) {
+	s := newTestStore(t)
+
+	// A query without LIMIT should have LIMIT 500 appended automatically.
+	// We verify it works by inserting one node and querying without a LIMIT clause.
+	node := sampleNode(types.GenerateNodeID("lim.go", "LimFunc"), "lim.go", "LimFunc", types.NodeTypeFunction)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	results, err := s.RawQuery("SELECT id, symbol_name FROM nodes")
+	if err != nil {
+		t.Fatalf("RawQuery without LIMIT: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+}
+
+func TestRawQuery_RespectsExistingLimit(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert 3 nodes
+	nodes := []types.ASTNode{
+		sampleNode(types.GenerateNodeID("el.go", "A"), "el.go", "A", types.NodeTypeFunction),
+		sampleNode(types.GenerateNodeID("el.go", "B"), "el.go", "B", types.NodeTypeFunction),
+		sampleNode(types.GenerateNodeID("el.go", "C"), "el.go", "C", types.NodeTypeFunction),
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	// Query with explicit LIMIT 1 — should NOT have LIMIT 500 appended
+	results, err := s.RawQuery("SELECT id FROM nodes LIMIT 1")
+	if err != nil {
+		t.Fatalf("RawQuery with explicit LIMIT: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result with LIMIT 1, got %d", len(results))
+	}
+}
+
+// ---- C4: Foreign key removal — edges with non-existent node IDs ----
+
+func TestUpsertEdge_NoForeignKeyEnforcement(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert an edge where neither source_id nor target_id exist in the nodes table.
+	// Before migration v2 (FK removal), this would be silently dropped by INSERT OR IGNORE.
+	edge := types.ASTEdge{
+		SourceID: "nonexistent-source-id",
+		TargetID: "nonexistent-target-id",
+		EdgeType: types.EdgeTypeImports,
+	}
+	if err := s.UpsertEdge(edge); err != nil {
+		t.Fatalf("UpsertEdge with non-existent node IDs: %v", err)
+	}
+
+	// Verify the edge was actually stored
+	edges, err := s.GetEdgesFrom("nonexistent-source-id")
+	if err != nil {
+		t.Fatalf("GetEdgesFrom: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected 1 edge stored (no FK enforcement), got %d", len(edges))
+	}
+	if edges[0].TargetID != "nonexistent-target-id" {
+		t.Errorf("TargetID: got %q, want %q", edges[0].TargetID, "nonexistent-target-id")
+	}
+	if edges[0].EdgeType != types.EdgeTypeImports {
+		t.Errorf("EdgeType: got %v, want EdgeTypeImports", edges[0].EdgeType)
+	}
+}
+
+func TestUpsertEdges_NoForeignKeyEnforcement_Batch(t *testing.T) {
+	s := newTestStore(t)
+
+	// Batch insert edges with non-existent source/target IDs
+	edges := []types.ASTEdge{
+		{SourceID: "phantom-src-1", TargetID: "phantom-tgt-1", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "phantom-src-2", TargetID: "phantom-tgt-2", EdgeType: types.EdgeTypeImports},
+	}
+	if err := s.UpsertEdges(edges); err != nil {
+		t.Fatalf("UpsertEdges with non-existent node IDs: %v", err)
+	}
+
+	allEdges, err := s.GetAllEdges()
+	if err != nil {
+		t.Fatalf("GetAllEdges: %v", err)
+	}
+	if len(allEdges) != 2 {
+		t.Errorf("expected 2 edges stored (no FK enforcement), got %d", len(allEdges))
+	}
+}

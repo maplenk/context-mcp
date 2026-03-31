@@ -544,6 +544,11 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		}
 	}
 
+	// M6: Inject a default LIMIT to prevent unbounded result sets
+	if !strings.Contains(trimmed, "LIMIT") {
+		query = query + " LIMIT 500"
+	}
+
 	// Use a proper read-only transaction on a pinned connection
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {

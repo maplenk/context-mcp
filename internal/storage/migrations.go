@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version.
 // Increment this when adding new migrations.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // migrationSet maps schema versions to their SQL statements.
 // Version 1 is the initial schema.
@@ -71,6 +71,24 @@ var migrationSet = map[int][]string{
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+	},
+
+	// Migration v2: Remove foreign key constraints from edges table.
+	// FK + INSERT OR IGNORE silently drops edges referencing non-existent nodes
+	// (import edges, cross-file call edges). DeleteByFile already explicitly
+	// removes edges before nodes, so CASCADE is not needed.
+	2: {
+		`CREATE TABLE IF NOT EXISTS edges_new (
+			source_id TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			edge_type INTEGER NOT NULL,
+			PRIMARY KEY (source_id, target_id, edge_type)
+		)`,
+		`INSERT OR IGNORE INTO edges_new SELECT source_id, target_id, edge_type FROM edges`,
+		`DROP TABLE edges`,
+		`ALTER TABLE edges_new RENAME TO edges`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)`,
 	},
 }
 

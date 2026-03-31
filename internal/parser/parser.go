@@ -409,9 +409,9 @@ func skipLeadingNewline(content []byte, pos int) int {
 
 // PHP regex patterns
 var (
-	phpClassDeclRe    = regexp.MustCompile(`(?m)^(?:abstract\s+)?class\s+(\w+)`)
+	phpClassDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:abstract\s+)?class\s+(\w+)`)
 	phpMethodDeclRe   = regexp.MustCompile(`(?m)^\s+(?:public|protected|private)\s+(?:static\s+)?function\s+(\w+)\s*\(`)
-	phpFuncDeclRe     = regexp.MustCompile(`(?m)^function\s+(\w+)\s*\(`)
+	phpFuncDeclRe     = regexp.MustCompile(`(?m)(?:^|\n)\s*function\s+(\w+)\s*\(`)
 	phpNewExprRe      = regexp.MustCompile(`new\s+(\w+)\s*\(`)
 	phpUseRe          = regexp.MustCompile(`(?m)^use\s+([\w\\]+)`)
 	phpMethodCallRe   = regexp.MustCompile(`(?:\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
@@ -441,9 +441,11 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	// Extract classes
 	for _, match := range phpClassDeclRe.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
-		startByte := uint32(match[0])
-		endByte := findBlockEnd(content, match[0])
-		contentSum := buildContentSum(lines, match[0], name)
+		rawStart := match[0]
+		startPos := skipLeadingNewline(content, rawStart)
+		startByte := uint32(startPos)
+		endByte := findBlockEnd(content, startPos)
+		contentSum := buildContentSum(lines, startPos, name)
 
 		result.Nodes = append(result.Nodes, types.ASTNode{
 			ID:         types.GenerateNodeID(relPath, name),
@@ -488,9 +490,11 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	// Extract standalone functions
 	for _, match := range phpFuncDeclRe.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
-		startByte := uint32(match[0])
-		endByte := findBlockEnd(content, match[0])
-		contentSum := buildContentSum(lines, match[0], name)
+		rawStart := match[0]
+		startPos := skipLeadingNewline(content, rawStart)
+		startByte := uint32(startPos)
+		endByte := findBlockEnd(content, startPos)
+		contentSum := buildContentSum(lines, startPos, name)
 
 		result.Nodes = append(result.Nodes, types.ASTNode{
 			ID:         types.GenerateNodeID(relPath, name),

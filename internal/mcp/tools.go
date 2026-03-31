@@ -29,10 +29,11 @@ type ToolDeps struct {
 // ContextParams are the parameters for the context tool.
 // Tags provide JSON schema metadata for the MCP SDK.
 type ContextParams struct {
-	Query      string `json:"query" jsonschema:"required,description=Natural language or keyword query to search for relevant code"`
-	Limit      int    `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 10)"`
-	Mode       string `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
-	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 3)"`
+	Query       string   `json:"query" jsonschema:"required,description=Natural language or keyword query to search for relevant code"`
+	Limit       int      `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 10)"`
+	Mode        string   `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
+	MaxPerFile  int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 3)"`
+	ActiveFiles []string `json:"active_files,omitempty" jsonschema:"description=File paths the developer is currently editing for PPR personalization"`
 }
 
 // ImpactParams are the parameters for the impact tool.
@@ -123,6 +124,9 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerArchitectureSummaryTool(s, deps)
 	registerExploreTool(s, deps)
 	registerUnderstandTool(s, deps)
+	// M9: Register MCP resources and prompts
+	registerResources(s, deps)
+	registerPrompts(s, deps)
 }
 
 // ----- Tool 1: context -----
@@ -131,23 +135,41 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 	if p.Limit == 0 {
 		p.Limit = 10
 	}
-	// Architecture mode: return community detection results
+	// Architecture mode: return community detection results + ADR context
 	if p.Mode == "architecture" {
 		if deps.Graph == nil {
 			return nil, fmt.Errorf("graph engine not initialized")
 		}
 		communities, modularity := deps.Graph.DetectCommunities()
-		return map[string]interface{}{
+		response := map[string]interface{}{
 			"mode":        "architecture",
 			"communities": communities,
 			"modularity":  modularity,
 			"count":       len(communities),
-		}, nil
+		}
+		// Include ADR documents in architecture mode
+		summaries, _ := deps.Store.GetAllProjectSummaries()
+		if len(summaries) > 0 {
+			var adrTexts []string
+			for _, s := range summaries {
+				adrTexts = append(adrTexts, fmt.Sprintf("[%s] %s", s.Project, s.Summary))
+			}
+			response["architecture_context"] = strings.Join(adrTexts, "\n\n")
+		}
+		return response, nil
 	}
 	if deps.Search == nil {
 		return nil, fmt.Errorf("search engine not initialized")
 	}
-	results, err := deps.Search.Search(p.Query, p.Limit, nil, p.MaxPerFile)
+	// Resolve active files to node IDs for PPR personalization
+	var activeFileNodeIDs []string
+	for _, filePath := range p.ActiveFiles {
+		nodeIDs, err := deps.Store.GetNodeIDsByFile(filePath)
+		if err == nil {
+			activeFileNodeIDs = append(activeFileNodeIDs, nodeIDs...)
+		}
+	}
+	results, err := deps.Search.Search(p.Query, p.Limit, activeFileNodeIDs, p.MaxPerFile)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -838,11 +860,15 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 
 	var matches []codeMatch
 	for _, relPath := range filePaths {
-		// Apply file filter if specified
+		// Apply file filter if specified (try full path first, fallback to basename)
 		if p.FileFilter != "" {
-			matched, err := filepath.Match(p.FileFilter, filepath.Base(relPath))
+			matched, err := filepath.Match(p.FileFilter, relPath)
 			if err != nil || !matched {
-				continue
+				// Fallback: try matching just the basename for simple patterns like "*.go"
+				matched, err = filepath.Match(p.FileFilter, filepath.Base(relPath))
+				if err != nil || !matched {
+					continue
+				}
 			}
 		}
 
@@ -1156,7 +1182,8 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 	}
 
 	// Connectors: high betweenness + edges to multiple communities
-	betweenness := deps.Graph.ComputeBetweenness()
+	// Use pre-computed betweenness from node_scores table instead of O(V*E) recomputation
+	betweenness, _ := deps.Store.GetAllBetweenness()
 	connectorIDs := deps.Graph.GetConnectors(betweenness, p.Limit)
 	var connectors []namedNode
 	for _, hashID := range connectorIDs {
@@ -1322,7 +1349,8 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 		}
 
 		// Identify hotspots: nodes in the result set with highest betweenness
-		betweenness := deps.Graph.ComputeBetweenness()
+		// Use pre-computed betweenness from node_scores instead of O(V*E) recomputation
+		betweenness, _ := deps.Store.GetAllBetweenness()
 		type hotspot struct {
 			Name        string  `json:"name"`
 			FilePath    string  `json:"file_path"`
@@ -1513,14 +1541,19 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 			result["pagerank"] = pageranks[resolvedID]
 		}
 
-		// Community membership
+		// Community membership (with early exit)
 		communities, _ := deps.Graph.DetectCommunities()
 		for _, c := range communities {
+			found := false
 			for _, nodeID := range c.NodeIDs {
 				if nodeID == resolvedID {
 					result["community"] = c.ID
+					found = true
 					break
 				}
+			}
+			if found {
+				break
 			}
 		}
 	}
@@ -1566,6 +1599,67 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 }
 
 // ----- Helpers -----
+
+// ----- MCP Resources (M9) -----
+
+func registerResources(s *Server, deps ToolDeps) {
+	// Register codebase graph statistics as a resource
+	_ = s.sdk.RegisterResource(
+		"qb://graph/stats",
+		"Graph Statistics",
+		"Current codebase graph statistics including node count, edge count, and community info",
+		"application/json",
+		func() (*mcp_golang.ResourceResponse, error) {
+			var nodeCount, edgeCount int
+			if deps.Graph != nil {
+				nodeCount = deps.Graph.NodeCount()
+				edgeCount = deps.Graph.EdgeCount()
+			}
+			data := map[string]interface{}{
+				"nodes": nodeCount,
+				"edges": edgeCount,
+			}
+			if deps.Graph != nil {
+				communities, modularity := deps.Graph.DetectCommunities()
+				data["communities"] = len(communities)
+				data["modularity"] = modularity
+			}
+			jsonBytes, _ := json.MarshalIndent(data, "", "  ")
+			return mcp_golang.NewResourceResponse(
+				mcp_golang.NewTextEmbeddedResource("qb://graph/stats", string(jsonBytes), "application/json"),
+			), nil
+		},
+	)
+}
+
+// ----- MCP Prompts (M9) -----
+
+type explainSymbolArgs struct {
+	Symbol string `json:"symbol" jsonschema:"required,description=The symbol name to explain"`
+}
+
+func registerPrompts(s *Server, deps ToolDeps) {
+	// Register an "explain symbol" prompt template
+	_ = s.sdk.RegisterPrompt(
+		"explain_symbol",
+		"Generate a prompt to explain a code symbol in context",
+		func(args explainSymbolArgs) (*mcp_golang.PromptResponse, error) {
+			promptText := fmt.Sprintf(
+				"Explain the purpose and behavior of the code symbol '%s'. "+
+					"Use the `context` tool to find it, then `read_symbol` to read its source code, "+
+					"and `impact` to understand its blast radius. Provide a clear, concise explanation.",
+				args.Symbol,
+			)
+			return mcp_golang.NewPromptResponse(
+				"Explain: "+args.Symbol,
+				mcp_golang.NewPromptMessage(
+					mcp_golang.NewTextContent(promptText),
+					mcp_golang.RoleUser,
+				),
+			), nil
+		},
+	)
+}
 
 // toToolResponse converts a generic result (string or anything JSON-serializable)
 // into the SDK's ToolResponse format.

@@ -972,3 +972,38 @@ export function createService() {
 		t.Errorf("expected UserService content summary to contain doc block, got: %q", usNode.ContentSum)
 	}
 }
+
+// ===========================================================================
+// H3: PHP indented class and function declarations
+// ===========================================================================
+
+func TestParsePHP_IndentedClass(t *testing.T) {
+	dir := t.TempDir()
+	const phpIndented = `<?php
+
+namespace App\Controllers;
+
+    class IndentedController {
+        public function handle() {
+            return true;
+        }
+    }
+
+    function indentedHelper() {
+        return 42;
+    }
+`
+	path := writeFile(t, dir, "indented.php", phpIndented)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile PHP indented: %v", err)
+	}
+
+	if findNodeBySymbol(result.Nodes, "IndentedController") == nil {
+		t.Error("expected indented PHP class 'IndentedController' to be found")
+	}
+	if findNodeBySymbol(result.Nodes, "indentedHelper") == nil {
+		t.Error("expected indented PHP function 'indentedHelper' to be found")
+	}
+}

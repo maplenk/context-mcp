@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/naman/qb-context/internal/adr"
 	"github.com/naman/qb-context/internal/config"
@@ -22,21 +24,25 @@ import (
 	"github.com/naman/qb-context/internal/watcher"
 )
 
+// indexMu prevents concurrent index operations (M8)
+var indexMu sync.Mutex
+
 func main() {
 	// Route all logging to stderr to avoid corrupting MCP JSON-RPC on stdout
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	cfg := config.ParseFlags()
-
-	// If the first non-binary argument is "cli", enter CLI mode instead of
-	// starting the MCP server and filesystem watcher.
+	// L3: Check for CLI subcommand BEFORE flag.Parse() — avoids fragile
+	// reliance on flag stopping at non-flag arguments.
 	for i, arg := range os.Args[1:] {
 		if arg == "cli" {
+			cfg := config.ParseFlags()
 			runCLI(cfg, os.Args[i+2:]) // pass everything after "cli"
 			return
 		}
 	}
+
+	cfg := config.ParseFlags()
 
 	log.Printf("qb-context daemon starting — repo: %s", cfg.RepoRoot)
 
@@ -86,12 +92,29 @@ func main() {
 	defer w.Stop() // safe: cleanup() above does not touch the watcher
 	log.Printf("Filesystem watcher started")
 
+	// H6: Periodic memory monitoring
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			log.Printf("Memory: Alloc=%dMB Sys=%dMB NumGC=%d",
+				m.Alloc/1024/1024, m.Sys/1024/1024, m.NumGC)
+			if m.Alloc > 2*1024*1024*1024 {
+				log.Printf("WARNING: memory exceeds 2GB limit")
+			}
+		}
+	}()
+
 	// 8. Start incremental update goroutine
 	go handleFileEvents(w, cfg, store, p, embedder, graphEngine)
 
 	// 9. Set up MCP server
 	server := mcp.NewServer()
 	indexFn := func(path string) error {
+		indexMu.Lock()
+		defer indexMu.Unlock()
 		if path == "" {
 			log.Printf("Full re-index triggered")
 			indexRepo(cfg, store, p, embedder, graphEngine)
@@ -221,17 +244,8 @@ func runCLI(cfg *config.Config, args []string) {
 
 // indexRepo performs a full index of the repository
 func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) {
-	// Walk the repo to find all source files.
-	// Use a temporary watcher only for its WalkExisting logic; stop it
-	// immediately after the walk to avoid leaking OS file descriptors.
-	walker, err := watcher.New(cfg.RepoRoot, cfg.DebounceInterval, cfg.ExcludedDirs)
-	if err != nil {
-		log.Printf("Failed to create walker: %v", err)
-		return
-	}
-
-	files, err := walker.WalkExisting()
-	walker.Stop() // release fds immediately; we no longer need this watcher
+	// L4: Use standalone walk function — no fsnotify watcher allocation needed
+	files, err := watcher.WalkSourceFiles(cfg.RepoRoot, cfg.ExcludedDirs)
 	if err != nil {
 		log.Printf("Failed to walk repository: %v", err)
 		return
@@ -366,20 +380,31 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		log.Printf("Graph built with %d nodes, %d edges", graphEngine.NodeCount(), graphEngine.EdgeCount())
 	}
 
-	// Compute and store betweenness centrality
+	// Compute and store betweenness centrality and PageRank (M7)
 	betweenness := graphEngine.ComputeBetweenness()
-	if len(betweenness) > 0 {
+	pageranks := graphEngine.PageRank()
+
+	if len(betweenness) > 0 || len(pageranks) > 0 {
+		nodeIDs := make(map[string]bool)
+		for id := range betweenness {
+			nodeIDs[id] = true
+		}
+		for id := range pageranks {
+			nodeIDs[id] = true
+		}
+
 		var scores []types.NodeScore
-		for nodeID, btwn := range betweenness {
+		for nodeID := range nodeIDs {
 			scores = append(scores, types.NodeScore{
 				NodeID:      nodeID,
-				Betweenness: btwn,
+				Betweenness: betweenness[nodeID],
+				PageRank:    pageranks[nodeID],
 			})
 		}
 		if err := store.UpsertNodeScores(scores); err != nil {
 			log.Printf("Failed to store node scores: %v", err)
 		} else {
-			log.Printf("Stored betweenness scores for %d nodes", len(scores))
+			log.Printf("Stored scores for %d nodes", len(scores))
 		}
 	}
 
@@ -425,6 +450,10 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 				return nil
 			}
 			if fi.IsDir() {
+				return nil
+			}
+			// Only index files with supported extensions
+			if !parser.IsSupported(path) {
 				return nil
 			}
 			relPath, err := filepath.Rel(cfg.RepoRoot, path)
@@ -577,23 +606,34 @@ func handleFileEvents(w *watcher.Watcher, cfg *config.Config, store *storage.Sto
 			}
 		}
 
-		// H4: Trigger async betweenness recomputation after threshold changes
+		// H4: Trigger async betweenness + PageRank recomputation after threshold changes (M7)
 		if graphEngine.ChangeCount() >= betweennessRefreshThreshold {
 			graphEngine.ResetChangeCount()
 			go func() {
 				betweenness := graphEngine.ComputeBetweenness()
-				if len(betweenness) > 0 {
+				pageranks := graphEngine.PageRank()
+
+				if len(betweenness) > 0 || len(pageranks) > 0 {
+					nodeIDs := make(map[string]bool)
+					for id := range betweenness {
+						nodeIDs[id] = true
+					}
+					for id := range pageranks {
+						nodeIDs[id] = true
+					}
+
 					var scores []types.NodeScore
-					for nodeID, btwn := range betweenness {
+					for nodeID := range nodeIDs {
 						scores = append(scores, types.NodeScore{
 							NodeID:      nodeID,
-							Betweenness: btwn,
+							Betweenness: betweenness[nodeID],
+							PageRank:    pageranks[nodeID],
 						})
 					}
 					if err := store.UpsertNodeScores(scores); err != nil {
-						log.Printf("Failed to update betweenness scores: %v", err)
+						log.Printf("Failed to update node scores: %v", err)
 					} else {
-						log.Printf("Async betweenness recomputation complete (%d nodes)", len(scores))
+						log.Printf("Async score recomputation complete (%d nodes)", len(scores))
 					}
 				}
 			}()

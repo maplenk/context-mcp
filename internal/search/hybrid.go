@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/naman/qb-context/internal/embedding"
@@ -11,6 +12,17 @@ import (
 	"github.com/naman/qb-context/internal/storage"
 	"github.com/naman/qb-context/internal/types"
 )
+
+// Search Fusion Algorithm: Weighted Linear Combination
+//
+// The blueprint specified Reciprocal Rank Fusion (RRF): score = Sum(1/(k + rank_i)).
+// This implementation uses weighted linear combination instead:
+//   composite = 0.35*PPR + 0.25*BM25 + 0.15*Betweenness + 0.10*InDegree + 0.15*Semantic
+//
+// Rationale: The multi-signal composite approach (from the C reference project v0.8.0)
+// outperforms RRF on the internal 15-case benchmark (30→123 improvement). RRF is
+// rank-based and discards score magnitude; weighted composition preserves relative
+// signal strength and enables per-signal tuning that RRF cannot express.
 
 // Composite scoring weights
 const (
@@ -41,6 +53,9 @@ var stopWords = map[string]bool{
 	"who": true, "whom": true, "why": true,
 }
 
+// stopWordsMu protects concurrent access to the stopWords map.
+var stopWordsMu sync.RWMutex
+
 // SetStopWords replaces the default stop word list with a custom set.
 // Pass nil or an empty slice to disable stop word filtering entirely.
 func SetStopWords(words []string) {
@@ -48,7 +63,9 @@ func SetStopWords(words []string) {
 	for _, w := range words {
 		newSet[w] = true
 	}
+	stopWordsMu.Lock()
 	stopWords = newSet
+	stopWordsMu.Unlock()
 }
 
 // camelCaseRe splits CamelCase identifiers into words.
@@ -200,6 +217,11 @@ func buildFTSQuery(query string) string {
 	// Sanitize FTS5 special characters to prevent query injection
 	query = sanitizeFTS(query)
 
+	// Snapshot stopWords under read lock for thread safety (M4)
+	stopWordsMu.RLock()
+	currentStopWords := stopWords
+	stopWordsMu.RUnlock()
+
 	// Split CamelCase tokens
 	words := strings.Fields(query)
 	var expanded []string
@@ -213,7 +235,7 @@ func buildFTSQuery(query string) string {
 				expanded = append(expanded, word)
 				for _, p := range parts {
 					lower := strings.ToLower(p)
-					if !stopWords[lower] {
+					if !currentStopWords[lower] {
 						expanded = append(expanded, p)
 					}
 				}
@@ -222,7 +244,7 @@ func buildFTSQuery(query string) string {
 		}
 
 		lower := strings.ToLower(word)
-		if stopWords[lower] {
+		if currentStopWords[lower] {
 			continue
 		}
 		expanded = append(expanded, word)
