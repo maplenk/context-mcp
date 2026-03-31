@@ -246,12 +246,16 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 						nodeType = types.NodeTypeFunction
 					}
 
-					startByte := uint32(fset.Position(decl.Pos()).Offset)
-					endByte := uint32(fset.Position(decl.End()).Offset)
+					startByte := uint32(fset.Position(typeSpec.Pos()).Offset)
+					endByte := uint32(fset.Position(typeSpec.End()).Offset)
 
 					contentSum := name
-					if decl.Doc != nil {
-						contentSum = decl.Doc.Text() + " " + name
+					doc := typeSpec.Doc
+					if doc == nil {
+						doc = decl.Doc // fall back to group doc if individual has none
+					}
+					if doc != nil {
+						contentSum = doc.Text() + " " + name
 					}
 
 					node := types.ASTNode{
