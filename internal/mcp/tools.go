@@ -30,7 +30,7 @@ type ToolDeps struct {
 // ContextParams are the parameters for the context tool.
 // Tags provide JSON schema metadata for the MCP SDK.
 type ContextParams struct {
-	Query       string   `json:"query" jsonschema:"required,description=Natural language or keyword query to search for relevant code"`
+	Query       string   `json:"query" jsonschema:"description=Natural language or keyword query to search for relevant code"`
 	Limit       int      `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 10)"`
 	Mode        string   `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
 	MaxPerFile  int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 3)"`
@@ -238,7 +238,6 @@ func registerContextTool(s *Server, deps ToolDeps) {
 					"description": "File paths the developer is currently editing for PPR personalization",
 				},
 			},
-			"required": []string{"query"},
 		},
 	}, cliHandler)
 
@@ -246,7 +245,7 @@ func registerContextTool(s *Server, deps ToolDeps) {
 	if err := s.RegisterSDKTool("context", desc, func(p ContextParams) (*mcp_golang.ToolResponse, error) {
 		result, err := contextHandler(deps, p)
 		if err != nil {
-			return nil, err
+			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
 		}
 		return toToolResponse(result)
 	}); err != nil {
@@ -383,7 +382,7 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 	if err := s.RegisterSDKTool("impact", desc, func(p ImpactParams) (*mcp_golang.ToolResponse, error) {
 		result, err := impactHandler(deps, p)
 		if err != nil {
-			return nil, err
+			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
 		}
 		return toToolResponse(result)
 	}); err != nil {
@@ -419,7 +418,8 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 	if resolvedRoot == "" {
 		resolvedRoot = deps.RepoRoot
 	}
-	if !strings.HasPrefix(absPath, resolvedRoot+string(filepath.Separator)) && absPath != resolvedRoot {
+	absPath = filepath.Clean(absPath)
+	if absPath != resolvedRoot && !strings.HasPrefix(absPath, resolvedRoot+string(filepath.Separator)) {
 		return nil, fmt.Errorf("path traversal detected: %s is outside repo root", node.FilePath)
 	}
 	f, err := os.Open(absPath)
@@ -455,14 +455,33 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 		return nil, fmt.Errorf("reading bytes: %w", err)
 	}
 
-	return map[string]interface{}{
+	response := map[string]interface{}{
 		"symbol_name": node.SymbolName,
 		"file_path":   node.FilePath,
 		"node_type":   node.NodeType.String(),
 		"start_byte":  node.StartByte,
 		"end_byte":    node.EndByte,
 		"source":      string(buf),
-	}, nil
+	}
+
+	// Heuristic staleness check: verify extracted content contains the symbol's base name.
+	// If the file changed since indexing, the byte offsets may be stale.
+	baseName := symbolBaseName(node.SymbolName)
+	if baseName != "" && !strings.Contains(string(buf), baseName) {
+		response["stale"] = true
+		response["warning"] = "file may have changed since indexing"
+	}
+
+	return response, nil
+}
+
+// symbolBaseName extracts the last component of a dotted symbol name.
+// e.g. "pkg.MyStruct.Method" -> "Method", "processOrder" -> "processOrder"
+func symbolBaseName(symbolName string) string {
+	if idx := strings.LastIndex(symbolName, "."); idx >= 0 {
+		return symbolName[idx+1:]
+	}
+	return symbolName
 }
 
 func registerReadSymbolTool(s *Server, deps ToolDeps) {
@@ -496,7 +515,7 @@ func registerReadSymbolTool(s *Server, deps ToolDeps) {
 	if err := s.RegisterSDKTool("read_symbol", desc, func(p ReadSymbolParams) (*mcp_golang.ToolResponse, error) {
 		result, err := readSymbolHandler(deps, p)
 		if err != nil {
-			return nil, err
+			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
 		}
 		return toToolResponse(result)
 	}); err != nil {
@@ -545,7 +564,7 @@ func registerQueryTool(s *Server, deps ToolDeps) {
 	if err := s.RegisterSDKTool("query", desc, func(p QueryParams) (*mcp_golang.ToolResponse, error) {
 		result, err := queryHandler(deps, p)
 		if err != nil {
-			return nil, err
+			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
 		}
 		return toToolResponse(result)
 	}); err != nil {
@@ -655,7 +674,7 @@ func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	if err := s.RegisterSDKTool("index", desc, func(p IndexParams) (*mcp_golang.ToolResponse, error) {
 		result, err := indexHandler(indexFn, p, deps.RepoRoot)
 		if err != nil {
-			return nil, err
+			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
 		}
 		return toToolResponse(result)
 	}); err != nil {
