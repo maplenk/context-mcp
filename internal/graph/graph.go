@@ -580,70 +580,39 @@ func (g *GraphEngine) ResetChangeCount() {
 	g.changeCount = 0
 }
 
-// ComputeSearchSignals computes PPR and InDegree for search. Uses a read lock when
-// in-degree cache is valid, upgrading to a write lock only when cache needs rebuilding.
-// This prevents blocking concurrent readers during search operations.
+// ComputeSearchSignals computes PPR and InDegree for search under a single write lock
+// to prevent race conditions where BuildFromEdges could replace the graph between
+// the PPR computation and in-degree read.
 func (g *GraphEngine) ComputeSearchSignals(activeNodeIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
-	g.mu.RLock()
-	ppr = g.personalizedPageRankLocked(activeNodeIDs)
-
-	if g.inDegreeValid && g.inDegreeCache != nil {
-		inDegree = make(map[string]float64, len(g.inDegreeCache))
-		for k, v := range g.inDegreeCache {
-			inDegree[k] = v
-		}
-		g.mu.RUnlock()
-		return ppr, inDegree
-	}
-	g.mu.RUnlock()
-
-	// Need write lock to compute and cache in-degree
 	g.mu.Lock()
-	// Double-check after acquiring write lock (another goroutine may have computed it)
+	defer g.mu.Unlock()
+	ppr = g.personalizedPageRankLocked(activeNodeIDs)
 	if g.inDegreeValid && g.inDegreeCache != nil {
 		inDegree = make(map[string]float64, len(g.inDegreeCache))
 		for k, v := range g.inDegreeCache {
 			inDegree[k] = v
 		}
-		g.mu.Unlock()
 	} else {
 		inDegree = g.computeInDegreeLocked()
-		g.mu.Unlock()
 	}
-
 	return ppr, inDegree
 }
 
 // ComputeSearchSignalsSubgraph computes PPR on the candidate subgraph and returns
-// InDegree from cache. This is much faster than ComputeSearchSignals for large graphs
-// because PPR only iterates over ~100 candidate nodes instead of all nodes.
+// InDegree from cache. Uses a single write lock to prevent race conditions where
+// BuildFromEdges could replace the graph between PPR and in-degree computations.
 func (g *GraphEngine) ComputeSearchSignalsSubgraph(seedIDs, candidateIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
-	g.mu.RLock()
-	ppr = g.personalizedPageRankSubgraphLocked(seedIDs, candidateIDs)
-
-	if g.inDegreeValid && g.inDegreeCache != nil {
-		inDegree = make(map[string]float64, len(g.inDegreeCache))
-		for k, v := range g.inDegreeCache {
-			inDegree[k] = v
-		}
-		g.mu.RUnlock()
-		return ppr, inDegree
-	}
-	g.mu.RUnlock()
-
-	// Need write lock to compute and cache in-degree
 	g.mu.Lock()
+	defer g.mu.Unlock()
+	ppr = g.personalizedPageRankSubgraphLocked(seedIDs, candidateIDs)
 	if g.inDegreeValid && g.inDegreeCache != nil {
 		inDegree = make(map[string]float64, len(g.inDegreeCache))
 		for k, v := range g.inDegreeCache {
 			inDegree[k] = v
 		}
-		g.mu.Unlock()
 	} else {
 		inDegree = g.computeInDegreeLocked()
-		g.mu.Unlock()
 	}
-
 	return ppr, inDegree
 }
 
@@ -660,7 +629,12 @@ func (g *GraphEngine) HasNode(hashID string) bool {
 func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.detectCommunitiesLocked()
+}
 
+// detectCommunitiesLocked is the inner implementation of DetectCommunities.
+// Caller must hold g.mu (write lock).
+func (g *GraphEngine) detectCommunitiesLocked() ([]types.Community, float64) {
 	if g.communityValid {
 		// Return cached results
 		var result []types.Community
@@ -1048,18 +1022,15 @@ func (g *GraphEngine) GetHubs(limit int) []struct {
 
 // GetConnectors returns nodes that bridge communities — they have high betweenness
 // and edges to nodes in multiple communities. Returns hash IDs.
+// Uses a single write lock to prevent race conditions where BuildFromEdges could
+// replace the graph between community detection check and the read of graph data.
 func (g *GraphEngine) GetConnectors(betweenness map[string]float64, limit int) []string {
-	// Ensure communities are computed and up-to-date before taking read lock
-	g.mu.RLock()
-	valid := g.communityValid
-	g.mu.RUnlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
-	if !valid {
-		g.DetectCommunities() // This will compute and cache under write lock
+	if !g.communityValid {
+		g.detectCommunitiesLocked()
 	}
-
-	g.mu.RLock()
-	defer g.mu.RUnlock()
 
 	// Build community membership map from cached data
 	communityOf := make(map[string]int)
