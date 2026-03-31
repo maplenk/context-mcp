@@ -163,18 +163,16 @@ func (s *Store) runMigrations() error {
 		log.Printf("Applied schema migration version %d", v)
 	}
 
-	// Try to create the vec0 table (requires sqlite-vec extension)
+	// Create the vec0 table for semantic search embeddings.
+	// sqlite-vec is statically linked via CGO bindings, so this must always succeed.
 	_, err = s.db.Exec(fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS node_embeddings USING vec0(
 		node_id TEXT PRIMARY KEY,
 		embedding float[%d] distance_metric=cosine
 	)`, s.embeddingDim))
 	if err != nil {
-		// sqlite-vec extension not available — log but don't fail
-		// Semantic search will be unavailable; hasVecTable stays false
-		log.Printf("Warning: sqlite-vec not available, semantic search disabled: %v", err)
-	} else {
-		s.hasVecTable = true
+		return fmt.Errorf("creating vec0 table (sqlite-vec should be statically linked): %w", err)
 	}
+	s.hasVecTable = true
 
 	return nil
 }

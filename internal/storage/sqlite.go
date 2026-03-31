@@ -12,8 +12,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/naman/qb-context/internal/types"
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/naman/qb-context/internal/types"
 )
 
 // DefaultEmbeddingDim is the default embedding dimension (TFIDF fallback).
@@ -30,6 +31,11 @@ type Store struct {
 // NewStore opens (or creates) a SQLite database at the given path and runs migrations.
 // embeddingDim sets the expected embedding vector dimension (0 uses DefaultEmbeddingDim).
 func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
+	// Register sqlite-vec extension for all future SQLite connections.
+	// Must be called before sql.Open so the extension is available when
+	// the connection is established. Safe to call multiple times.
+	sqlite_vec.Auto()
+
 	// Ensure parent directory exists
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
