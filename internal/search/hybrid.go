@@ -70,14 +70,26 @@ func SetStopWords(words []string) {
 
 // camelCaseRe splits CamelCase identifiers into words.
 // Matches: sequences of uppercase+lowercase (e.g. "Read"), all-lowercase runs, or all-uppercase runs.
-var camelCaseRe = regexp.MustCompile(`[A-Z][a-z]*|[a-z]+|[A-Z]+`)
+var camelCaseRe = regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z][a-z0-9]*|[A-Z]+|[0-9]+`)
 
 // fts5SpecialRe matches FTS5 special characters that must be sanitized before query construction.
-var fts5SpecialRe = regexp.MustCompile(`[":(){}^+\-*]`)
+var fts5SpecialRe = regexp.MustCompile(`[":(){}^+\-*/]`)
 
-// sanitizeFTS replaces FTS5 special characters with spaces to prevent query injection.
+// sanitizeFTS replaces FTS5 special characters with spaces and neutralizes boolean
+// operators to prevent query injection. FTS5 only recognizes uppercase OR, AND, NOT,
+// NEAR as operators, so lowercasing them makes them regular search terms.
 func sanitizeFTS(s string) string {
-	return fts5SpecialRe.ReplaceAllString(s, " ")
+	// First strip special characters
+	s = fts5SpecialRe.ReplaceAllString(s, " ")
+	// Neutralize FTS5 boolean operators by lowercasing them
+	words := strings.Fields(s)
+	for i, w := range words {
+		upper := strings.ToUpper(w)
+		if upper == "OR" || upper == "AND" || upper == "NOT" || upper == "NEAR" {
+			words[i] = strings.ToLower(w)
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // HybridSearch combines lexical, semantic, and structural search with composite scoring
@@ -119,8 +131,9 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// Path 1: Lexical search via FTS5 BM25
 	lexicalResults, err := h.store.SearchLexical(ftsQuery, candidateLimit)
 	if err != nil {
-		// FTS5 query syntax errors — try original query as fallback
-		lexicalResults, err = h.store.SearchLexical(query, candidateLimit)
+		// FTS5 query syntax errors — try sanitized original as fallback
+		sanitizedFallback := sanitizeFTS(query)
+		lexicalResults, err = h.store.SearchLexical(sanitizedFallback, candidateLimit)
 		if err != nil {
 			lexicalResults = nil
 		}
@@ -159,12 +172,22 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		if seedCount > len(lexicalResults) {
 			seedCount = len(lexicalResults)
 		}
-		seeds := make([]string, seedCount)
+		// Deduplicate seeds to prevent double-weighting in the PPR teleportation vector
+		seeds := make([]string, 0, seedCount+len(activeFileNodeIDs))
+		seedSet := make(map[string]bool)
 		for i := 0; i < seedCount; i++ {
-			seeds[i] = lexicalResults[i].Node.ID
+			id := lexicalResults[i].Node.ID
+			if !seedSet[id] {
+				seeds = append(seeds, id)
+				seedSet[id] = true
+			}
 		}
-		// Also include active file nodes as seeds
-		seeds = append(seeds, activeFileNodeIDs...)
+		for _, id := range activeFileNodeIDs {
+			if !seedSet[id] {
+				seeds = append(seeds, id)
+				seedSet[id] = true
+			}
+		}
 		rawPPR, rawInDegree := h.graph.ComputeSearchSignals(seeds)
 		pprScores = normalizeMap(rawPPR)
 		inDegreeScores = rawInDegree // already [0,1] normalized
@@ -296,52 +319,88 @@ func collectCandidates(lists ...[]types.SearchResult) map[string]types.ASTNode {
 	return candidates
 }
 
-// normalizeScores extracts scores from results and normalizes to [0,1]
+// normalizeScores extracts scores from results and normalizes to [0,1] using min-max
+// normalization. This correctly handles negative scores (e.g., cosine distance can
+// produce Score = 1.0 - distance, which ranges from -1 to 1).
 func normalizeScores(results []types.SearchResult) map[string]float64 {
 	if len(results) == 0 {
 		return nil
 	}
 
 	scores := make(map[string]float64)
-	var maxScore float64
+	var minScore, maxScore float64
+	first := true
 	for _, r := range results {
 		scores[r.Node.ID] = r.Score
-		if r.Score > maxScore {
+		if first {
+			minScore = r.Score
 			maxScore = r.Score
+			first = false
+		} else {
+			if r.Score < minScore {
+				minScore = r.Score
+			}
+			if r.Score > maxScore {
+				maxScore = r.Score
+			}
 		}
 	}
 
-	if maxScore <= 0 {
-		return scores
+	scoreRange := maxScore - minScore
+	if scoreRange <= 0 {
+		// All scores identical — assign uniform 0.5
+		normalized := make(map[string]float64)
+		for id := range scores {
+			normalized[id] = 0.5
+		}
+		return normalized
 	}
 
 	normalized := make(map[string]float64)
 	for id, score := range scores {
-		normalized[id] = score / maxScore
+		normalized[id] = (score - minScore) / scoreRange
 	}
 	return normalized
 }
 
-// normalizeMap normalizes a map of scores to [0,1]
+// normalizeMap normalizes a map of scores to [0,1] using min-max normalization.
+// This produces comparable scores where the range reflects actual significance
+// rather than always mapping the maximum to 1.0.
 func normalizeMap(m map[string]float64) map[string]float64 {
 	if len(m) == 0 {
 		return nil
 	}
 
-	var maxVal float64
+	var minVal, maxVal float64
+	first := true
 	for _, v := range m {
-		if v > maxVal {
+		if first {
+			minVal = v
 			maxVal = v
+			first = false
+		} else {
+			if v < minVal {
+				minVal = v
+			}
+			if v > maxVal {
+				maxVal = v
+			}
 		}
 	}
 
-	if maxVal <= 0 {
-		return m
+	valRange := maxVal - minVal
+	if valRange <= 0 {
+		// All values identical — assign 0.5
+		result := make(map[string]float64)
+		for k := range m {
+			result[k] = 0.5
+		}
+		return result
 	}
 
 	result := make(map[string]float64)
 	for k, v := range m {
-		result[k] = v / maxVal
+		result[k] = (v - minVal) / valRange
 	}
 	return result
 }

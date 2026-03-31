@@ -375,7 +375,13 @@ func (g *GraphEngine) computeInDegreeLocked() map[string]float64 {
 
 	g.inDegreeCache = result
 	g.inDegreeValid = true
-	return result
+
+	// Return a copy to prevent caller mutations from corrupting the cache
+	copyResult := make(map[string]float64, len(result))
+	for k, v := range result {
+		copyResult[k] = v
+	}
+	return copyResult
 }
 
 // BlastRadiusWithDepth performs BFS over incoming edges (same as BlastRadius)
@@ -447,23 +453,35 @@ func (g *GraphEngine) ResetChangeCount() {
 	g.changeCount = 0
 }
 
-// ComputeSearchSignals computes PPR and InDegree under a SINGLE lock acquisition
-// to ensure consistency during search. This prevents race conditions where a
-// concurrent graph rebuild could give inconsistent results between the two signals.
+// ComputeSearchSignals computes PPR and InDegree for search. Uses a read lock when
+// in-degree cache is valid, upgrading to a write lock only when cache needs rebuilding.
+// This prevents blocking concurrent readers during search operations.
 func (g *GraphEngine) ComputeSearchSignals(activeNodeIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
+	g.mu.RLock()
 	ppr = g.personalizedPageRankLocked(activeNodeIDs)
 
-	// Reuse cached in-degree if valid, otherwise compute and cache
 	if g.inDegreeValid && g.inDegreeCache != nil {
 		inDegree = make(map[string]float64, len(g.inDegreeCache))
 		for k, v := range g.inDegreeCache {
 			inDegree[k] = v
 		}
+		g.mu.RUnlock()
+		return ppr, inDegree
+	}
+	g.mu.RUnlock()
+
+	// Need write lock to compute and cache in-degree
+	g.mu.Lock()
+	// Double-check after acquiring write lock (another goroutine may have computed it)
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		inDegree = make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			inDegree[k] = v
+		}
+		g.mu.Unlock()
 	} else {
 		inDegree = g.computeInDegreeLocked()
+		g.mu.Unlock()
 	}
 
 	return ppr, inDegree
@@ -871,10 +889,19 @@ func (g *GraphEngine) GetHubs(limit int) []struct {
 // GetConnectors returns nodes that bridge communities — they have high betweenness
 // and edges to nodes in multiple communities. Returns hash IDs.
 func (g *GraphEngine) GetConnectors(betweenness map[string]float64, limit int) []string {
+	// Ensure communities are computed and up-to-date before taking read lock
+	g.mu.RLock()
+	valid := g.communityValid
+	g.mu.RUnlock()
+
+	if !valid {
+		g.DetectCommunities() // This will compute and cache under write lock
+	}
+
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	// Build a community membership map
+	// Build community membership map from cached data
 	communityOf := make(map[string]int)
 	for i, comm := range g.communities {
 		for _, nodeID := range comm {
