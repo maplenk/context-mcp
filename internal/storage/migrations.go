@@ -77,6 +77,7 @@ var migrationSet = map[int][]string{
 	// FK + INSERT OR IGNORE silently drops edges referencing non-existent nodes
 	// (import edges, cross-file call edges). DeleteByFile already explicitly
 	// removes edges before nodes, so CASCADE is not needed.
+	// NOTE: ALTER TABLE ... RENAME requires SQLite 3.25.0+ (mattn/go-sqlite3 bundles 3.41+)
 	2: {
 		`CREATE TABLE IF NOT EXISTS edges_new (
 			source_id TEXT NOT NULL,
@@ -163,10 +164,10 @@ func (s *Store) runMigrations() error {
 	}
 
 	// Try to create the vec0 table (requires sqlite-vec extension)
-	_, err = s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS node_embeddings USING vec0(
+	_, err = s.db.Exec(fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS node_embeddings USING vec0(
 		node_id TEXT PRIMARY KEY,
-		embedding float[384] distance_metric=cosine
-	)`)
+		embedding float[%d] distance_metric=cosine
+	)`, s.embeddingDim))
 	if err != nil {
 		// sqlite-vec extension not available — log but don't fail
 		// Semantic search will be unavailable; hasVecTable stays false
