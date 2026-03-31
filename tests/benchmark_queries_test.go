@@ -83,7 +83,12 @@ func TestBenchmarkQueries(t *testing.T) {
 			t.Logf("Elapsed: %v", elapsed)
 
 			if result == nil {
-				t.Fatal("handler returned nil result")
+				t.Fatalf("query %s returned nil result", q.id)
+			}
+
+			// Catch catastrophic performance regressions (generous upper bound).
+			if elapsed > 30*time.Second {
+				t.Errorf("query %s took %v (expected < 30s)", q.id, elapsed)
 			}
 
 			// Marshal result to inspect structure

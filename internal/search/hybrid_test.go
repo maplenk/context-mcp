@@ -374,6 +374,9 @@ func TestBuildFTSQuery_StopWords(t *testing.T) {
 
 // TestSetStopWords_ConcurrentSafety verifies that concurrent SetStopWords and
 // buildFTSQuery calls don't race (M4 fix).
+//
+// NOTE: This test mutates global stopWords and must NOT use t.Parallel().
+// t.Cleanup restores the default stop words so other tests are unaffected.
 func TestSetStopWords_ConcurrentSafety(t *testing.T) {
 	// Save originals and guarantee restoration even on panic
 	original := GetStopWords()

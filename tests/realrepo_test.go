@@ -55,22 +55,36 @@ type realRepoEnv struct {
 	totalNodes  int
 	totalEdges  int // valid (FK-filtered) edges stored in DB
 	rawEdges    int // total edges before FK filtering
+	tmpDir      string // temp directory for the DB; cleaned up via cleanup()
 	// Track edge types seen in raw parsed data (before FK filter).
 	// Import edges often point to external symbols not in our node set,
 	// so they get filtered out. We still want to verify the parser emits them.
 	rawEdgeTypes map[types.EdgeType]bool
 }
 
+// cleanup closes the store and removes the temp directory.
+func (e *realRepoEnv) cleanup() {
+	if e.store != nil {
+		e.store.Close()
+	}
+	if e.tmpDir != "" {
+		os.RemoveAll(e.tmpDir)
+	}
+}
+
 // Shared singleton: index the repo once across all test functions.
 var (
-	sharedEnv     *realRepoEnv
-	sharedEnvOnce sync.Once
-	sharedEnvErr  error
+	sharedEnv        *realRepoEnv
+	sharedEnvOnce    sync.Once
+	sharedEnvErr     error
+	sharedCleanOnce  sync.Once
 )
 
 // getSharedEnv returns the shared real-repo environment, indexing the repo
 // on first call. Subsequent calls return the cached result. Uses a temp dir
 // outside t.TempDir() so the DB survives across test functions.
+// Each caller registers a t.Cleanup that will close the store and remove the
+// temp dir (guarded by sync.Once so it only runs once).
 func getSharedEnv(t *testing.T) *realRepoEnv {
 	t.Helper()
 
@@ -85,6 +99,14 @@ func getSharedEnv(t *testing.T) *realRepoEnv {
 	if sharedEnvErr != nil {
 		t.Fatalf("failed to build real repo env: %v", sharedEnvErr)
 	}
+
+	// Register cleanup — sync.Once ensures store.Close + os.RemoveAll run exactly once.
+	t.Cleanup(func() {
+		sharedCleanOnce.Do(func() {
+			sharedEnv.cleanup()
+		})
+	})
+
 	return sharedEnv
 }
 
@@ -212,6 +234,7 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 		totalNodes:   len(allNodes),
 		totalEdges:   len(validEdges),
 		rawEdges:     len(allEdges),
+		tmpDir:       tmpDir,
 		rawEdgeTypes: rawEdgeTypes,
 	}, nil
 }
@@ -589,7 +612,7 @@ func TestRealRepo_SearchQuality(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Logf("warning: query %q — none of the results contain keyword %q in name/path/content",
+					t.Errorf("search quality regression: query %q — none of the results contain keyword %q in name/path/content",
 						tc.query, tc.expectKeyword)
 				}
 			}
