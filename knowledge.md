@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-03-31 (post-Phase 5 — DA Review #7 full fix sprint, 86 issues fixed).
+> Living document for team reference. Last updated: 2026-03-31 (post-Blueprint Alignment — 5 gaps addressed, DA review, real-repo tests).
 
 ---
 
@@ -31,13 +31,13 @@ qb-context/
 │   ├── types/types.go              — ASTNode, ASTEdge, enums, RiskLevel, NodeScore, Community, ProjectSummary
 │   ├── watcher/watcher.go          — Filesystem watcher (fsnotify + debounce + nested gitignore + hot-reload)
 │   ├── watcher/watcher_test.go     — 11 watcher tests (create/modify/delete, debounce, gitignore)
-│   ├── parser/parser.go            — Multi-language parser (Go native AST, improved regex for JS/TS/PHP)
-│   ├── parser/queries/*.scm        — Tree-sitter query files (reference, for future use)
-│   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec graceful fallback, configurable embedding dim)
+│   ├── parser/parser.go            — Multi-language parser (Go native AST, tree-sitter for JS/TS/PHP via gotreesitter)
+│   ├── parser/queries/*.scm        — Tree-sitter S-expression query files (reference)
+│   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec statically linked, configurable embedding dim)
 │   ├── storage/migrations.go       — Versioned schema migrations (v2: FK removal from edges)
 │   ├── embedding/engine.go         — Embedding interface (Dim() method), TFIDFEmbedder default, variable EmbeddingDim
 │   ├── embedding/tokenizer.go      — Pure Go BPE tokenizer (HuggingFace tokenizer.json, 151K vocab, byte-level)
-│   ├── embedding/onnx.go           — ONNXEmbedder (build tag: onnx) — Qwen2 model, last-token pooling, Matryoshka
+│   ├── embedding/onnx.go           — ONNXEmbedder (build tag: onnx) — purego ONNX Runtime (no CGO), Qwen2 model, last-token pooling, Matryoshka
 │   ├── embedding/onnx_stub.go      — Stub for non-ONNX builds
 │   ├── embedding/model/embed.go    — Model metadata (Qwen2, Matryoshka dims, INT8)
 │   ├── graph/graph.go              — gonum directed graph (true PPR, BFS, Betweenness, Louvain, InDegree cache, TraceCallPath)
@@ -45,12 +45,13 @@ qb-context/
 │   ├── adr/adr.go                  — ADR discoverer (with symlink boundary validation)
 │   └── mcp/
 │       ├── server.go               — mcp-golang SDK server over stdio
-│       ├── tools.go                — 13 MCP tools (context, impact, read_symbol, query, index, trace_call_path, get_key_symbols, search_code, detect_changes, get_architecture_summary, explore, understand, health)
+│       ├── tools.go                — 13 CLI tools, 5 SDK tools (context, impact, read_symbol, query, index)
 │       └── tools_test.go           — 35 tool tests
 ├── tests/
-│   ├── integration_test.go         — Full pipeline integration test
+│   ├── integration_test.go         — Full pipeline integration test (synthetic files)
 │   ├── incremental_test.go         — Incremental update pipeline tests
-│   └── concurrent_test.go          — Concurrency and race condition tests
+│   ├── concurrent_test.go          — Concurrency and race condition tests
+│   └── realrepo_test.go            — Real-repo integration test against qbapi (build tag: realrepo)
 ├── .golangci.yml                   — Linter configuration
 ├── go.mod / go.sum
 └── knowledge.md                    — This file
@@ -73,9 +74,12 @@ qb-context/
 - Tables: `nodes`, `edges` (**FK removed in migration v2** — INSERT OR IGNORE was silently dropping cross-file edges), `nodes_fts` (FTS5 with porter tokenizer), `node_embeddings` (vec0, cosine, configurable dim), `node_scores` (betweenness/pagerank with CASCADE), `project_summaries` (ADR documents), `schema_version`
 - Versioned migrations: `schema_version` table tracks current version, currently at **v2**
 - `NewStore()` accepts optional `embeddingDim` parameter (default 384, ONNX models use e.g. 256)
-- `hasVecTable` flag: tracks whether sqlite-vec vec0 table was created successfully
-- `SearchSemantic()` gracefully returns nil when vec table unavailable (no crash)
-- `UpsertEmbedding()` is a no-op when vec table unavailable
+- **sqlite-vec statically linked** via `asg017/sqlite-vec-go-bindings/cgo` (Blueprint Alignment)
+  - `sqlite_vec.Auto()` called once via `sync.Once` before DB open
+  - vec0 creation failure is now a fatal error (sqlite-vec always available)
+- `hasVecTable` flag: always true now (kept as defense-in-depth)
+- `SearchSemantic()` gracefully returns nil when vec table unavailable (legacy fallback)
+- `UpsertEmbedding()` is a no-op when vec table unavailable (legacy fallback)
 - FTS sync errors now properly checked in UpsertNode/UpsertNodes
 - `GetNodeByName` uses `ORDER BY file_path, id` for deterministic results
 - `GetNodeIDsByFile`, `GetAllFilePaths`, `SearchNodesByName`, `GetNodesByFile`, `GetAllNodeScores` helpers added
@@ -94,9 +98,12 @@ qb-context/
 ### Parser (`internal/parser`)
 - Go files: uses `go/parser` + `go/ast` (native, accurate), extracts import edges, **type aliases and named types** now captured
 - Go interfaces use `NodeTypeInterface` (not NodeTypeClass)
-- JS/TS files: improved regex extraction (functions, arrow functions, classes, class methods, calls, imports/require)
-- **TypeScript-specific**: interface, enum, type alias declarations extracted
-- PHP files: improved regex extraction (classes, methods, functions, instantiation, method calls, static calls, use statements)
+- **JS/TS/PHP files: tree-sitter AST parsing** via `gotreesitter` v0.12.2 (replaced regex in Blueprint Alignment)
+  - JS/JSX: `grammars.JavascriptLanguage()`, TS: `grammars.TypescriptLanguage()`, TSX: `grammars.TsxLanguage()`
+  - PHP: `grammars.PhpLanguage()` — classes, methods, functions, use statements, instantiation, call edges
+  - Tree-sitter gives exact byte offsets (StartByte/EndByte) from AST nodes
+  - TypeScript-specific: interface→NodeTypeInterface, enum→NodeTypeStruct, type alias→NodeTypeFunction
+  - Call edges still use regex on node body text for reliability (jsCallExprRe, phpMethodCallRe etc.)
 - PHP methods without visibility keywords now detected (defaults to public)
 - PHP deduplication via `seen` map — standalone function regex no longer duplicates class methods
 - **File-level nodes** (NodeTypeFile) created for every parsed file — import edges now have valid source/target nodes in the graph, fixing graph connectivity
@@ -235,9 +242,10 @@ qb-context/
 | github.com/crackcomm/go-gitignore | .gitignore matching |
 | gonum.org/v1/gonum v0.17.0 | Graph engine, PageRank, Betweenness, Louvain community detection, InDegree |
 | github.com/metoro-io/mcp-golang v0.16.1 | MCP SDK (stdio transport, tool/resource/prompt support) |
-| github.com/yalue/onnxruntime_go v1.27.0 | ONNX Runtime Go bindings (CGO, build tag: onnx) |
+| github.com/shota3506/onnxruntime-purego | ONNX Runtime pure Go bindings (purego, no CGO, build tag: onnx) |
+| github.com/odvcencio/gotreesitter v0.12.2 | Tree-sitter parser for JS/TS/PHP (205 embedded grammars) |
+| github.com/asg017/sqlite-vec-go-bindings/cgo v0.1.6 | sqlite-vec statically linked (vec0 always available) |
 | golang.org/x/text v0.35.0 | Unicode NFC normalization for BPE tokenizer |
-| (future) github.com/asg017/sqlite-vec-go-bindings | Vector search |
 
 ---
 
@@ -299,7 +307,17 @@ qb-context/
 | 30 | `664112d` | Tools + Server — 22 issues (H13-H18, H23-H24, M22-M26, M31, L14-L16, L23) | Agent E (Opus) | Done |
 | 31 | `5241fd0` | Test Improvements — 13 issues (L1-L3, L5-L13, L22) | Agent F (Opus) | Done |
 
-### Test Coverage (13 packages, all passing — 233 tests)
+### Phase 6: Blueprint Alignment (Commits 32-37)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 32 | `53e24f7` | Replace yalue/onnxruntime_go (CGO) with shota3506/onnxruntime-purego | Opus (worktree) | Done |
+| 33 | `58a5020` | Consolidate MCP SDK tools from 13 to 5 blueprint tools | Opus (worktree) | Done |
+| 34 | `f8468bd` | Add sqlite-vec CGO bindings for guaranteed vec0 tables | Opus (worktree) | Done |
+| 35 | `0ee152b` | Replace regex JS/TS/PHP parsers with tree-sitter (gotreesitter) | Opus (worktree) | Done |
+| 36 | `ede6fcf` | DA review fixes + real-repo integration tests (22 subtests) | Opus (worktree) | Done |
+
+### Test Coverage (13 packages, all passing — 233 unit tests + 22 real-repo subtests)
 - `internal/types` — 12 tests (ID generation, enum values, null byte separator collision, hex format validation)
 - `internal/storage` — 14 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT, write rejection, transactional upsert)
 - `internal/parser` — 15 tests (Go/JS/TS/PHP parsing, edge extraction, import edges, class methods, findBlockEnd states, docblocks, indented PHP classes, file-level nodes, cross-file edges)
@@ -312,6 +330,7 @@ qb-context/
 - `tests/integration_test.go` — full pipeline (parse → store → embed → graph → search → delete → graph connectivity assertion)
 - `tests/incremental_test.go` — 5 tests (add/modify/delete/consistency/full cycle)
 - `tests/concurrent_test.go` — 5 tests (search during index, multi-file changes, search consistency, race conditions)
+- `tests/realrepo_test.go` — 3 test functions, 22 subtests (build tag: `realrepo`) against `/Users/naman/Documents/QBApps/qbapi` Laravel project: full pipeline indexing (31K nodes, 8K edges), all MCP tool handlers, domain-relevant search quality
 - Benchmark tests added for parser, graph, and search packages
 
 ### Devil's Advocate Reviews (4 completed)
@@ -338,6 +357,7 @@ qb-context/
   - **Agent E (Tools+Server, 22 issues)**: H13 registration error logging, H14 active_files InputSchema, H15-H16 read_symbol/search_code fixes, H17 PageRank caching, H18 BPE unknown tokens, H23 detect_changes status, H24 ONNX tensor leak, M22-M26 server/tool fixes, M31 configurable ONNX dim, L14-L16 response cap/filter/BFS, L23 duplicate prevention.
   - **Agent F (Tests, 13 issues)**: L1 5 core tool tests, L2 cross-file edges, L3 graph connectivity, L5-L12 test improvements, L22 write rejection, L13 deps.
   - **Deferred**: C2 tree-sitter, C3 ONNX library, C4 model choice, C5 model not embedded, C6 sqlite-vec. **False positive**: C17 Go 1.25.0 (valid).
+- **Review #8 (Blueprint Alignment DA)**: Quick review of Phase 1+2 changes. Found 6 issues (bounds check in ONNX, output tensor cleanup, nil-on-close, hidden dim derivation). All fixed in commit `ede6fcf`.
 
 ---
 
@@ -423,13 +443,15 @@ qb-context/
 - 5 incremental pipeline integration tests (add/modify/delete/consistency/full cycle)
 - 5 concurrency tests (search during index, multi-file changes, race conditions)
 
-### Feature 11: ONNX Embedder with Qwen2 Model (Done)
+### Feature 11: ONNX Embedder with Qwen2 Model (Done — now purego)
 - **Pure Go BPE tokenizer** (`tokenizer.go`): Reads HuggingFace `tokenizer.json`, handles both array and string merge formats, 151K vocab, byte-level encoding, NFC normalization, Go RE2-compatible pre-tokenization regex
-- **ONNXEmbedder** (`onnx.go`, build tag: `onnx`): Loads quantized Qwen2 model via `yalue/onnxruntime_go`, creates DynamicAdvancedSession, runs inference with input_ids/attention_mask/position_ids tensors
+- **ONNXEmbedder** (`onnx.go`, build tag: `onnx`): Loads quantized Qwen2 model via `shota3506/onnxruntime-purego` (pure Go, no CGO for ONNX)
+- **purego API**: `ort.NewRuntime(libPath)` → `rt.NewEnv()` → `rt.NewSession()` → `session.Run()` with map-based I/O
 - **Last-token pooling**: Appropriate for causal/decoder-only models (takes hidden state of last token)
-- **Matryoshka dim truncation**: Configurable (64/128/256/512/896), default 256
+- **Matryoshka dim truncation**: Configurable (64/128/256/512/896), default 256, with bounds check vs hiddenDim
 - **Config**: `--onnx-model`, `--onnx-lib`, `--embedding-dim` CLI flags
 - **Graceful fallback**: ONNX failure → TFIDF embedder, non-ONNX builds → stub returns error
+- **Safety**: Close all output values via defer loop, nil fields on Close() (double-close safe)
 - **Quality**: sim(ReadFile, ReadFileContents) = 0.69, sim(ReadFile, SQL) = 0.17
 - **Tests**: 7 new tests (tokenizer load/encode/special/roundtrip + ONNX basic/similarity/invalidDim)
 
@@ -448,12 +470,20 @@ qb-context/
 - **M10 gitignore reload**: Runtime .gitignore modification detection
 - 10 files changed, 603 insertions, 70 deletions
 
+### Feature 13: Blueprint Alignment — 5 Gaps Addressed (Done)
+- **Gap 1: Tree-sitter** (gotreesitter v0.12.2): Replaced regex JS/TS/PHP parsers with proper AST parsing. JS/JSX/TS/TSX/PHP each use their correct tree-sitter grammar. Go parser unchanged (go/ast). All 49 parser tests pass.
+- **Gap 2: purego ONNX** (shota3506/onnxruntime-purego): Replaced CGO yalue/onnxruntime_go with pure Go bindings via ebitengine/purego. Eliminates CGO requirement for ONNX inference.
+- **Gap 3: MCP tools 13→5** SDK: Removed RegisterSDKTool for 8 non-blueprint tools. MCP clients see 5 tools (context, impact, read_symbol, query, index). All 13 remain in CLI mode.
+- **Gap 4: sqlite-vec always available** (asg017/sqlite-vec-go-bindings/cgo v0.1.6): Statically linked via CGO. `sqlite_vec.Auto()` via sync.Once. Vec0 creation failure is now fatal.
+- **Gap 5: Single binary verified**: `go build -tags "fts5"` = single binary (no external deps). `go build -tags "fts5,onnx"` = single binary + ONNX Runtime .dylib sidecar.
+- **DA Review**: 2 HIGH + 4 MEDIUM issues fixed (ONNX bounds check, output cleanup, Close safety, sync.Once, PHP offset, vec0 logging)
+- **Real-repo test** (build tag: `fts5,realrepo`): 3 test functions, 22 subtests against qbapi Laravel project (31K+ nodes, 8K+ edges)
+
 ### Features Explicitly Skipped (for now)
 - HTTP UI server / graph visualization
 - Cypher query language
 - Co-change frequency (requires git history integration)
 - HITS authority/hub scores (C project uses, but InDegree covers similar ground)
-- Tree-sitter integration (gotreesitter) — improved regex approach working well, tree-sitter for future
 
 ---
 
@@ -480,12 +510,11 @@ qb-context --onnx-model /path/to/model --onnx-lib /path/to/libonnxruntime.dylib 
 ```
 
 ### Known Limitations
-- Parser uses improved regex for JS/TS/PHP (not tree-sitter) — state-machine findBlockEnd handles most cases but regex heuristics can still miss edge cases
+- Tree-sitter JS/TS/PHP parsers extract symbol definitions via AST; call edges still use regex on node body text for reliability
 - Go call edges resolve cross-package via file-level nodes, but symbol-level cross-package resolution is approximate
-- sqlite-vec extension needed for vector KNN search — gracefully degrades to keyword-only when unavailable
 - gonum Betweenness doesn't support sampling (O(V*E) for large graphs)
 - Index operations serialized via `indexMu` mutex, but concurrent search during index is safe
-- ONNX embedder requires ONNX Runtime shared library installed on the system
+- ONNX embedder requires ONNX Runtime shared library installed on the system (purego FFI, no CGO for ONNX itself)
 - BPE tokenizer pre-tokenization regex simplified for Go RE2 (no negative lookahead) — functionally equivalent for embedding
 - Embedding dim change requires re-indexing all embeddings (no automatic migration)
 - mattn/go-sqlite3 requires CGO; ncruces/go-sqlite3 (pure Go WASM) is a future replacement target
