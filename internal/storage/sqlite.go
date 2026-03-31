@@ -913,34 +913,6 @@ func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
 	return scores, rows.Err()
 }
 
-// GetSymbolIndex returns a map of symbol_name -> node_id for class/struct/interface
-// nodes across the entire store. Used for cross-file edge resolution during incremental updates.
-func (s *Store) GetSymbolIndex() (map[string]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.db.Query(`
-		SELECT symbol_name, id FROM nodes WHERE node_type IN (?, ?, ?)`,
-		uint8(types.NodeTypeClass), uint8(types.NodeTypeStruct), uint8(types.NodeTypeInterface))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	symbolIndex := make(map[string]string)
-	for rows.Next() {
-		var symbolName, nodeID string
-		if err := rows.Scan(&symbolName, &nodeID); err != nil {
-			return nil, err
-		}
-		// First occurrence wins (matches indexRepo behavior)
-		if _, exists := symbolIndex[symbolName]; !exists {
-			symbolIndex[symbolName] = nodeID
-		}
-	}
-	return symbolIndex, rows.Err()
-}
-
 // sanitizeFTSStorage strips FTS5 special characters for safe direct queries
 func sanitizeFTSStorage(s string) string {
 	replacer := strings.NewReplacer(
