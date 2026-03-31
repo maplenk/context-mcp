@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,26 @@ import (
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
+
+// maxTreeSitterFileSize is the maximum file size (in bytes) for tree-sitter parsing.
+// Files exceeding this limit are skipped to prevent stack overflows in recursive
+// GLR parsers (e.g., PHP's stackEntryNodesEquivalentFrontierWithScratch).
+const maxTreeSitterFileSize = 500 * 1024
+
+// treeSitterParseSafe wraps a tree-sitter Parse call with panic recovery.
+// Some tree-sitter grammars (notably PHP's GLR parser) can cause stack overflows
+// on large or deeply nested files. This function catches such panics and returns
+// them as errors instead of crashing the process.
+func treeSitterParseSafe(tsParser *gotreesitter.Parser, content []byte) (tree *gotreesitter.Tree, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			tree = nil
+			err = fmt.Errorf("tree-sitter panic during parse: %v", r)
+		}
+	}()
+	tree, err = tsParser.Parse(content)
+	return
+}
 
 // Parser extracts structural nodes and edges from source files
 type Parser struct{}
@@ -290,6 +311,24 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	result := &ParseResult{}
 	lines := strings.Split(string(content), "\n")
 
+	// C1: Create file-level node so import edges have a valid source node
+	fileNode := types.ASTNode{
+		ID:         types.GenerateNodeID(relPath, relPath),
+		FilePath:   relPath,
+		SymbolName: relPath,
+		NodeType:   types.NodeTypeFile,
+		StartByte:  0,
+		EndByte:    uint32(len(content)),
+		ContentSum: relPath,
+	}
+	result.Nodes = append(result.Nodes, fileNode)
+
+	// Skip tree-sitter for very large files to prevent stack overflows
+	if len(content) > maxTreeSitterFileSize {
+		log.Printf("parser: skipping tree-sitter for %s (%d bytes exceeds %d byte limit)", relPath, len(content), maxTreeSitterFileSize)
+		return result, nil
+	}
+
 	// Determine if this is a TypeScript file
 	ext := strings.ToLower(filepath.Ext(relPath))
 	isTS := ext == ".ts" || ext == ".tsx"
@@ -307,26 +346,16 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	}
 
 	tsParser := gotreesitter.NewParser(lang)
-	tree, err := tsParser.Parse(content)
+	tree, err := treeSitterParseSafe(tsParser, content)
 	if err != nil {
-		return nil, fmt.Errorf("tree-sitter parse JS/TS: %w", err)
+		log.Printf("parser: tree-sitter failed for %s: %v — returning file-level node only", relPath, err)
+		return result, nil
 	}
 	root := tree.RootNode()
 	if root == nil {
-		return nil, fmt.Errorf("tree-sitter returned nil root for %s", relPath)
+		log.Printf("parser: tree-sitter returned nil root for %s — returning file-level node only", relPath)
+		return result, nil
 	}
-
-	// C1: Create file-level node so import edges have a valid source node
-	fileNode := types.ASTNode{
-		ID:         types.GenerateNodeID(relPath, relPath),
-		FilePath:   relPath,
-		SymbolName: relPath,
-		NodeType:   types.NodeTypeFile,
-		StartByte:  0,
-		EndByte:    uint32(len(content)),
-		ContentSum: relPath,
-	}
-	result.Nodes = append(result.Nodes, fileNode)
 
 	// Track names already added to avoid duplicates
 	seen := map[string]bool{}
@@ -720,17 +749,6 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	result := &ParseResult{}
 	lines := strings.Split(string(content), "\n")
 
-	phpLang := grammars.PhpLanguage()
-	phpParser := gotreesitter.NewParser(phpLang)
-	tree, err := phpParser.Parse(content)
-	if err != nil {
-		return nil, fmt.Errorf("tree-sitter parse PHP: %w", err)
-	}
-	root := tree.RootNode()
-	if root == nil {
-		return nil, fmt.Errorf("tree-sitter returned nil root for %s", relPath)
-	}
-
 	// C1: Create file-level node so import edges have a valid source node
 	fileNode := types.ASTNode{
 		ID:         types.GenerateNodeID(relPath, relPath),
@@ -742,6 +760,26 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		ContentSum: relPath,
 	}
 	result.Nodes = append(result.Nodes, fileNode)
+
+	// Skip tree-sitter for very large files to prevent stack overflows
+	// in the PHP GLR parser (stackEntryNodesEquivalentFrontierWithScratch)
+	if len(content) > maxTreeSitterFileSize {
+		log.Printf("parser: skipping tree-sitter for %s (%d bytes exceeds %d byte limit)", relPath, len(content), maxTreeSitterFileSize)
+		return result, nil
+	}
+
+	phpLang := grammars.PhpLanguage()
+	phpParser := gotreesitter.NewParser(phpLang)
+	tree, err := treeSitterParseSafe(phpParser, content)
+	if err != nil {
+		log.Printf("parser: tree-sitter failed for %s: %v — returning file-level node only", relPath, err)
+		return result, nil
+	}
+	root := tree.RootNode()
+	if root == nil {
+		log.Printf("parser: tree-sitter returned nil root for %s — returning file-level node only", relPath)
+		return result, nil
+	}
 
 	// C11: Track seen names to avoid duplicate nodes
 	seen := map[string]bool{}
