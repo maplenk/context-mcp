@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -46,6 +47,10 @@ func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
+	// Configure connection pool for SQLite WAL mode (concurrent readers + single writer)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+
 	dim := DefaultEmbeddingDim
 	if len(embeddingDim) > 0 && embeddingDim[0] > 0 {
 		dim = embeddingDim[0]
@@ -72,18 +77,27 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// DB returns the underlying sql.DB for raw queries
+// DB returns the underlying sql.DB for raw queries.
+// WARNING: Bypasses all safety checks (read-only enforcement, blocklist).
+// Use RawQuery for safe user-facing queries. Only use DB() for internal operations.
 func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
 // UpsertNode inserts or updates a node in the database.
 // Uses ON CONFLICT to avoid DELETE+INSERT which would cascade-delete edges.
+// Wrapped in a transaction to ensure node + FTS index stay in sync.
 func (s *Store) UpsertNode(node types.ASTNode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
 		INSERT INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -101,13 +115,17 @@ func (s *Store) UpsertNode(node types.ASTNode) error {
 	}
 
 	// Update FTS index (delete old entry then insert new)
-	if _, err := s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
+	if _, err := tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
 		return fmt.Errorf("FTS delete: %w", err)
 	}
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		"INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
 		node.SymbolName, node.ContentSum, node.ID)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // UpsertEdge inserts or ignores an edge in the database
@@ -224,6 +242,12 @@ func (s *Store) DeleteByFile(filePath string) error {
 	_, _ = tx.Exec(`
 		DELETE FROM node_embeddings WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
 
+	// Delete node_scores
+	_, err = tx.Exec(`DELETE FROM node_scores WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
+	if err != nil {
+		return err
+	}
+
 	// Delete FTS entries for nodes from this file
 	_, err = tx.Exec("DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)", filePath)
 	if err != nil {
@@ -242,6 +266,7 @@ func (s *Store) DeleteByFile(filePath string) error {
 // UpsertEmbedding stores a vector embedding for a node.
 // The embedding dimension must match the configured store dimension.
 // Returns nil (no-op) if sqlite-vec is not available, enabling graceful degradation.
+// Wrapped in a transaction to ensure delete + insert are atomic.
 func (s *Store) UpsertEmbedding(nodeID string, embedding []float32) error {
 	if !s.hasVecTable {
 		return nil // graceful degradation: sqlite-vec not available
@@ -253,13 +278,21 @@ func (s *Store) UpsertEmbedding(nodeID string, embedding []float32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	// Delete then insert for vec0 virtual table compatibility
-	_, _ = s.db.Exec(`DELETE FROM node_embeddings WHERE node_id = ?`, nodeID)
+	if _, err := tx.Exec(`DELETE FROM node_embeddings WHERE node_id = ?`, nodeID); err != nil {
+		return fmt.Errorf("delete old embedding: %w", err)
+	}
 	blob := serializeFloat32(embedding)
-	_, err := s.db.Exec(`
-		INSERT INTO node_embeddings (node_id, embedding)
-		VALUES (?, ?)`, nodeID, blob)
-	return err
+	if _, err := tx.Exec(`INSERT INTO node_embeddings (node_id, embedding) VALUES (?, ?)`, nodeID, blob); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateFTS updates the FTS index for a node
@@ -268,7 +301,9 @@ func (s *Store) UpdateFTS(node types.ASTNode) error {
 	defer s.mu.Unlock()
 
 	// Delete old entry if exists
-	s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID)
+	if _, err := s.db.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
+		return fmt.Errorf("FTS delete: %w", err)
+	}
 	// Insert new entry
 	_, err := s.db.Exec(
 		"INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
@@ -451,6 +486,9 @@ func (s *Store) SearchLexical(query string, limit int) ([]types.SearchResult, er
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Sanitize FTS5 special characters to prevent injection
+	query = sanitizeFTSStorage(query)
+
 	rows, err := s.db.Query(`
 		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
 		       bm25(nodes_fts) as score
@@ -539,21 +577,25 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("only SELECT queries are allowed, got: %s", strings.SplitN(trimmed, " ", 2)[0])
 	}
 
-	// Reject multi-statement queries
+	// Reject multi-statement queries (semicolons outside string literals).
+	// Note: this may reject queries with semicolons in string literals.
+	// Use parameterized values to avoid this limitation.
 	if strings.Contains(query, ";") {
-		return nil, fmt.Errorf("multi-statement queries are not allowed")
+		return nil, fmt.Errorf("multi-statement queries are not allowed (semicolons forbidden)")
 	}
 
 	// Reject queries containing dangerous SQLite functions/patterns
-	dangerousPatterns := []string{"load_extension", "writefile", "fts3_tokenizer", "attach"}
+	dangerousPatterns := []string{"load_extension", "writefile", "readfile", "edit", "fts3_tokenizer", "attach"}
 	for _, pattern := range dangerousPatterns {
 		if strings.Contains(trimmed, strings.ToUpper(pattern)) {
 			return nil, fmt.Errorf("query contains forbidden pattern: %s", pattern)
 		}
 	}
 
-	// M6: Inject a default LIMIT to prevent unbounded result sets
-	if !strings.Contains(trimmed, "LIMIT") {
+	// Inject a default LIMIT to prevent unbounded result sets.
+	// Use word-boundary regex to avoid matching column/table names like "LIMITED".
+	hasLimit := regexp.MustCompile(`(?i)\bLIMIT\b`).MatchString(query)
+	if !hasLimit {
 		query = query + " LIMIT 500"
 	}
 
@@ -812,6 +854,16 @@ func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
 		scores = append(scores, score)
 	}
 	return scores, rows.Err()
+}
+
+// sanitizeFTSStorage strips FTS5 special characters for safe direct queries
+func sanitizeFTSStorage(s string) string {
+	// Remove characters that have special meaning in FTS5 query syntax
+	replacer := strings.NewReplacer(
+		`"`, " ", `(`, " ", `)`, " ", `{`, " ", `}`, " ",
+		`^`, " ", `+`, " ", `-`, " ", `*`, " ", `:`, " ",
+	)
+	return replacer.Replace(s)
 }
 
 // serializeFloat32 converts a float32 slice to a little-endian byte slice for sqlite-vec

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/naman/qb-context/internal/types"
@@ -767,5 +768,175 @@ func TestUpsertEdges_NoForeignKeyEnforcement_Batch(t *testing.T) {
 	}
 	if len(allEdges) != 2 {
 		t.Errorf("expected 2 edges stored (no FK enforcement), got %d", len(allEdges))
+	}
+}
+
+// ---- C8+M4: RawQuery blocklist tests ----
+
+func TestRawQuery_BlocksReadfile(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.RawQuery("SELECT readfile('/etc/passwd')")
+	if err == nil {
+		t.Fatal("expected readfile to be blocked")
+	}
+	if !strings.Contains(err.Error(), "forbidden pattern") {
+		t.Errorf("expected 'forbidden pattern' in error, got: %v", err)
+	}
+}
+
+func TestRawQuery_BlocksEdit(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.RawQuery("SELECT edit('/tmp/test.db', '')")
+	if err == nil {
+		t.Fatal("expected edit to be blocked")
+	}
+	if !strings.Contains(err.Error(), "forbidden pattern") {
+		t.Errorf("expected 'forbidden pattern' in error, got: %v", err)
+	}
+}
+
+func TestRawQuery_BlocksWritefile(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.RawQuery("SELECT writefile('/tmp/evil.txt', 'data')")
+	if err == nil {
+		t.Fatal("expected writefile to be blocked")
+	}
+}
+
+func TestRawQuery_BlocksLoadExtension(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.RawQuery("SELECT load_extension('evil.so')")
+	if err == nil {
+		t.Fatal("expected load_extension to be blocked")
+	}
+}
+
+// ---- M3: Semicolon rejection ----
+
+func TestRawQuery_BlocksSemicolons(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.RawQuery("SELECT 1; DROP TABLE nodes")
+	if err == nil {
+		t.Fatal("expected semicolons to be blocked")
+	}
+	if !strings.Contains(err.Error(), "semicolons forbidden") {
+		t.Errorf("expected 'semicolons forbidden' in error, got: %v", err)
+	}
+}
+
+// ---- C7+M1: UpsertNode atomicity (verify FTS sync) ----
+
+func TestUpsertNode_FTSSync(t *testing.T) {
+	s := newTestStore(t)
+
+	node := sampleNode(
+		types.GenerateNodeID("fts_sync.go", "SyncFunc"),
+		"fts_sync.go",
+		"SyncFunc",
+		types.NodeTypeFunction,
+	)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	// Verify FTS is in sync: search should find the node
+	results, err := s.SearchLexical("SyncFunc", 10)
+	if err != nil {
+		t.Fatalf("SearchLexical: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS to find 'SyncFunc' after UpsertNode")
+	}
+
+	// Update the node and verify FTS updates
+	node.ContentSum = "updated sync content summary"
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode (update): %v", err)
+	}
+
+	// Verify FTS still finds the node (exactly once, not duplicated)
+	results, err = s.SearchLexical("SyncFunc", 10)
+	if err != nil {
+		t.Fatalf("SearchLexical after update: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected exactly 1 FTS result after update, got %d", len(results))
+	}
+}
+
+// ---- H6: DeleteByFile cleans up node_scores ----
+
+func TestDeleteByFile_CleansUpNodeScores(t *testing.T) {
+	s := newTestStore(t)
+
+	node := sampleNode(types.GenerateNodeID("cleanup.go", "CleanFunc"), "cleanup.go", "CleanFunc", types.NodeTypeFunction)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	scores := []types.NodeScore{
+		{NodeID: node.ID, PageRank: 0.5, Betweenness: 0.3},
+	}
+	if err := s.UpsertNodeScores(scores); err != nil {
+		t.Fatalf("UpsertNodeScores: %v", err)
+	}
+
+	// Verify score exists
+	if _, err := s.GetNodeScore(node.ID); err != nil {
+		t.Fatalf("GetNodeScore before delete: %v", err)
+	}
+
+	if err := s.DeleteByFile("cleanup.go"); err != nil {
+		t.Fatalf("DeleteByFile: %v", err)
+	}
+
+	// Score should be gone
+	_, err := s.GetNodeScore(node.ID)
+	if err == nil {
+		t.Error("expected node_score to be deleted after DeleteByFile, but it still exists")
+	}
+}
+
+// ---- M6: FTS5 sanitization ----
+
+func TestSanitizeFTSStorage(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{`hello "world"`, `hello  world `},
+		{`func(a)`, `func a `},
+		{`test+case-two`, `test case two`},
+		{`normal query`, `normal query`},
+		{`prefix*`, `prefix `},
+		{`col:value`, `col value`},
+	}
+	for _, tc := range tests {
+		got := sanitizeFTSStorage(tc.input)
+		if got != tc.want {
+			t.Errorf("sanitizeFTSStorage(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// ---- M2: LIMIT word boundary check ----
+
+func TestRawQuery_LimitWordBoundary(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a node to query
+	node := sampleNode(types.GenerateNodeID("wb.go", "WBFunc"), "wb.go", "WBFunc", types.NodeTypeFunction)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	// A query with "LIMIT" as part of a column alias should still get LIMIT 500 appended
+	// (we can't test this directly, but we can verify that an explicit LIMIT keyword works)
+	results, err := s.RawQuery("SELECT id FROM nodes LIMIT 1")
+	if err != nil {
+		t.Fatalf("RawQuery with LIMIT: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result with explicit LIMIT 1, got %d", len(results))
 	}
 }
