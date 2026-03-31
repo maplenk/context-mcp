@@ -87,12 +87,24 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 
 	result := &ParseResult{}
 
+	// C1: Create file-level node so import edges have a valid source node
+	fileNode := types.ASTNode{
+		ID:         types.GenerateNodeID(relPath, relPath),
+		FilePath:   relPath,
+		SymbolName: relPath,
+		NodeType:   types.NodeTypeFile,
+		StartByte:  0,
+		EndByte:    uint32(len(content)),
+		ContentSum: relPath,
+	}
+	result.Nodes = append(result.Nodes, fileNode)
+
 	// H1: Extract import edges from Go import statements
 	for _, imp := range file.Imports {
 		importPath := strings.Trim(imp.Path.Value, `"`)
 		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),
-			TargetID: types.GenerateNodeID(relPath, importPath),
+			SourceID: types.GenerateNodeID(relPath, relPath),             // this file
+			TargetID: types.GenerateNodeID(importPath, importPath),       // target file's file node
 			EdgeType: types.EdgeTypeImports,
 		})
 	}
@@ -116,10 +128,17 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 			startByte := uint32(fset.Position(decl.Pos()).Offset)
 			endByte := uint32(fset.Position(decl.End()).Offset)
 
-			// Build content summary from signature + doc comment
+			// M13: Build content summary from signature (including param types) + doc comment
 			contentSum := name
+			if decl.Type != nil && decl.Type.Params != nil {
+				var params []string
+				for _, param := range decl.Type.Params.List {
+					params = append(params, fmt.Sprintf("%v", param.Type))
+				}
+				contentSum = name + "(" + strings.Join(params, ", ") + ")"
+			}
 			if decl.Doc != nil {
-				contentSum = decl.Doc.Text() + " " + name
+				contentSum = decl.Doc.Text() + " " + contentSum
 			}
 
 			node := types.ASTNode{
@@ -133,13 +152,20 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 			}
 			result.Nodes = append(result.Nodes, node)
 
-			// Extract function calls within the body
+			// Extract function calls within the body (M9: deduplicate)
 			if decl.Body != nil {
 				calls := extractGoCalls(decl.Body)
+				callSeen := map[string]bool{}
 				for _, call := range calls {
+					targetID := types.GenerateNodeID(relPath, call)
+					edgeKey := node.ID + ":" + targetID
+					if callSeen[edgeKey] {
+						continue
+					}
+					callSeen[edgeKey] = true
 					edge := types.ASTEdge{
 						SourceID: node.ID,
-						TargetID: types.GenerateNodeID(relPath, call),
+						TargetID: targetID,
 						EdgeType: types.EdgeTypeCalls,
 					}
 					result.Edges = append(result.Edges, edge)
@@ -161,9 +187,10 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 					case *ast.StructType:
 						nodeType = types.NodeTypeStruct
 					case *ast.InterfaceType:
-						nodeType = types.NodeTypeClass // Use Class for interfaces
+						nodeType = types.NodeTypeInterface // H22: use distinct interface type
 					default:
-						continue
+						// H21: Type aliases and named types (e.g., type Handler func(...), type UserID string)
+						nodeType = types.NodeTypeFunction
 					}
 
 					startByte := uint32(fset.Position(decl.Pos()).Offset)
@@ -210,7 +237,9 @@ func extractReceiverType(recv *ast.FieldList) string {
 	return ""
 }
 
-// extractGoCalls finds function/method calls within a Go AST block
+// extractGoCalls finds function/method calls within a Go AST block.
+// H2/H3: Call edges are inherently file-local. Cross-package/cross-file calls would
+// require an import resolution system. The graph connects these via import edges instead.
 func extractGoCalls(body *ast.BlockStmt) []string {
 	var calls []string
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -247,10 +276,29 @@ var (
 )
 
 // parseJavaScript uses regex-based extraction for JS/TS files
+// L17: TypeScript-specific regex patterns
+var (
+	tsInterfaceDeclRe = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?interface\s+(\w+)`)
+	tsEnumDeclRe      = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:const\s+)?enum\s+(\w+)`)
+	tsTypeDeclRe      = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?type\s+(\w+)\s*[=<]`)
+)
+
 func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, error) {
 	result := &ParseResult{}
 	text := string(content)
 	lines := strings.Split(text, "\n")
+
+	// C1: Create file-level node so import edges have a valid source node
+	fileNode := types.ASTNode{
+		ID:         types.GenerateNodeID(relPath, relPath),
+		FilePath:   relPath,
+		SymbolName: relPath,
+		NodeType:   types.NodeTypeFile,
+		StartByte:  0,
+		EndByte:    uint32(len(content)),
+		ContentSum: relPath,
+	}
+	result.Nodes = append(result.Nodes, fileNode)
 
 	// Track names already added to avoid duplicates
 	seen := map[string]bool{}
@@ -356,8 +404,81 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		}
 	}
 
+	// L17: Extract TypeScript-specific constructs (interfaces, enums, type aliases)
+	for _, match := range tsInterfaceDeclRe.FindAllStringSubmatchIndex(text, -1) {
+		name := text[match[2]:match[3]]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		rawStart := match[0]
+		startByte := skipLeadingNewline(content, rawStart)
+		endByte := findBlockEnd(content, startByte)
+		contentSum := buildContentSum(lines, startByte, name)
+
+		result.Nodes = append(result.Nodes, types.ASTNode{
+			ID:         types.GenerateNodeID(relPath, name),
+			FilePath:   relPath,
+			SymbolName: name,
+			NodeType:   types.NodeTypeInterface,
+			StartByte:  uint32(startByte),
+			EndByte:    endByte,
+			ContentSum: contentSum,
+		})
+	}
+
+	for _, match := range tsEnumDeclRe.FindAllStringSubmatchIndex(text, -1) {
+		name := text[match[2]:match[3]]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		rawStart := match[0]
+		startByte := skipLeadingNewline(content, rawStart)
+		endByte := findBlockEnd(content, startByte)
+		contentSum := buildContentSum(lines, startByte, name)
+
+		result.Nodes = append(result.Nodes, types.ASTNode{
+			ID:         types.GenerateNodeID(relPath, name),
+			FilePath:   relPath,
+			SymbolName: name,
+			NodeType:   types.NodeTypeStruct,
+			StartByte:  uint32(startByte),
+			EndByte:    endByte,
+			ContentSum: contentSum,
+		})
+	}
+
+	for _, match := range tsTypeDeclRe.FindAllStringSubmatchIndex(text, -1) {
+		name := text[match[2]:match[3]]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		rawStart := match[0]
+		startByte := skipLeadingNewline(content, rawStart)
+		// Type aliases may not have braces, use a simpler end detection
+		endByte := findBlockEnd(content, startByte)
+		contentSum := buildContentSum(lines, startByte, name)
+
+		result.Nodes = append(result.Nodes, types.ASTNode{
+			ID:         types.GenerateNodeID(relPath, name),
+			FilePath:   relPath,
+			SymbolName: name,
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  uint32(startByte),
+			EndByte:    endByte,
+			ContentSum: contentSum,
+		})
+	}
+
 	// Extract call edges (connecting nodes found in this file to their calls)
+	// M9: deduplicate call edges
+	callSeen := map[string]bool{}
 	for i, node := range result.Nodes {
+		if node.NodeType == types.NodeTypeFile {
+			continue // skip file node for call extraction
+		}
 		if node.EndByte > uint32(len(content)) {
 			continue
 		}
@@ -368,21 +489,28 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 			if isJSKeyword(target) || target == node.SymbolName {
 				continue
 			}
+			targetID := types.GenerateNodeID(relPath, target)
+			edgeKey := result.Nodes[i].ID + ":" + targetID
+			if callSeen[edgeKey] {
+				continue
+			}
+			callSeen[edgeKey] = true
 			result.Edges = append(result.Edges, types.ASTEdge{
 				SourceID: result.Nodes[i].ID,
-				TargetID: types.GenerateNodeID(relPath, target),
+				TargetID: targetID,
 				EdgeType: types.EdgeTypeCalls,
 			})
 		}
 	}
 
 	// H1: Extract import edges
+	// C1: TargetID references the target file's file node
 	// import ... from 'module'
 	for _, match := range jsImportFromRe.FindAllStringSubmatch(text, -1) {
 		modulePath := match[1]
 		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),
-			TargetID: types.GenerateNodeID(relPath, modulePath),
+			SourceID: types.GenerateNodeID(relPath, relPath),           // this file
+			TargetID: types.GenerateNodeID(modulePath, modulePath),     // target file's file node
 			EdgeType: types.EdgeTypeImports,
 		})
 	}
@@ -390,8 +518,8 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	for _, match := range jsRequireRe.FindAllStringSubmatch(text, -1) {
 		modulePath := match[1]
 		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),
-			TargetID: types.GenerateNodeID(relPath, modulePath),
+			SourceID: types.GenerateNodeID(relPath, relPath),           // this file
+			TargetID: types.GenerateNodeID(modulePath, modulePath),     // target file's file node
 			EdgeType: types.EdgeTypeImports,
 		})
 	}
@@ -410,7 +538,7 @@ func skipLeadingNewline(content []byte, pos int) int {
 // PHP regex patterns
 var (
 	phpClassDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:abstract\s+)?class\s+(\w+)`)
-	phpMethodDeclRe   = regexp.MustCompile(`(?m)^\s+(?:public|protected|private)\s+(?:static\s+)?function\s+(\w+)\s*\(`)
+	phpMethodDeclRe   = regexp.MustCompile(`(?m)^[ \t]+(?:(?:public|protected|private)\s+)?(?:static\s+)?function\s+(\w+)\s*\(`)
 	phpFuncDeclRe     = regexp.MustCompile(`(?m)(?:^|\n)\s*function\s+(\w+)\s*\(`)
 	phpNewExprRe      = regexp.MustCompile(`new\s+(\w+)\s*\(`)
 	phpUseRe          = regexp.MustCompile(`(?m)^use\s+([\w\\]+)`)
@@ -438,9 +566,28 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	text := string(content)
 	lines := strings.Split(text, "\n")
 
+	// C1: Create file-level node so import edges have a valid source node
+	fileNode := types.ASTNode{
+		ID:         types.GenerateNodeID(relPath, relPath),
+		FilePath:   relPath,
+		SymbolName: relPath,
+		NodeType:   types.NodeTypeFile,
+		StartByte:  0,
+		EndByte:    uint32(len(content)),
+		ContentSum: relPath,
+	}
+	result.Nodes = append(result.Nodes, fileNode)
+
+	// C11: Track seen names to avoid duplicate nodes
+	seen := map[string]bool{}
+
 	// Extract classes
 	for _, match := range phpClassDeclRe.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
 		rawStart := match[0]
 		startPos := skipLeadingNewline(content, rawStart)
 		startByte := uint32(startPos)
@@ -472,6 +619,12 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 			}
 		}
 
+		// C11: skip duplicates
+		if seen[qualifiedName] {
+			continue
+		}
+		seen[qualifiedName] = true
+
 		startByte := uint32(match[0])
 		endByte := findBlockEnd(content, match[0])
 		contentSum := buildContentSum(lines, match[0], qualifiedName)
@@ -492,6 +645,24 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		name := text[match[2]:match[3]]
 		rawStart := match[0]
 		startPos := skipLeadingNewline(content, rawStart)
+
+		// C11: Skip if this function is inside a class body (already captured as a method)
+		insideClass := false
+		for _, node := range result.Nodes {
+			if node.NodeType == types.NodeTypeClass && uint32(startPos) >= node.StartByte && uint32(startPos) < node.EndByte {
+				insideClass = true
+				break
+			}
+		}
+		if insideClass {
+			continue
+		}
+
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
 		startByte := uint32(startPos)
 		endByte := findBlockEnd(content, startPos)
 		contentSum := buildContentSum(lines, startPos, name)
@@ -508,7 +679,12 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	}
 
 	// Extract instantiation edges (new ClassName) and call edges
+	// M9: deduplicate call edges
+	callSeen := map[string]bool{}
 	for _, node := range result.Nodes {
+		if node.NodeType == types.NodeTypeFile {
+			continue // skip file node for call extraction
+		}
 		if node.EndByte > uint32(len(content)) {
 			continue
 		}
@@ -517,9 +693,15 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		// Instantiation edges: new ClassName()
 		for _, newMatch := range phpNewExprRe.FindAllStringSubmatch(bodyText, -1) {
 			target := newMatch[1]
+			targetID := types.GenerateNodeID(relPath, target)
+			edgeKey := node.ID + ":inst:" + targetID
+			if callSeen[edgeKey] {
+				continue
+			}
+			callSeen[edgeKey] = true
 			result.Edges = append(result.Edges, types.ASTEdge{
 				SourceID: node.ID,
-				TargetID: types.GenerateNodeID(relPath, target),
+				TargetID: targetID,
 				EdgeType: types.EdgeTypeInstantiates,
 			})
 		}
@@ -528,9 +710,15 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		for _, callMatch := range phpMethodCallRe.FindAllStringSubmatch(bodyText, -1) {
 			target := callMatch[1]
 			if !phpCallKeywords[target] {
+				targetID := types.GenerateNodeID(relPath, target)
+				edgeKey := node.ID + ":" + targetID
+				if callSeen[edgeKey] {
+					continue
+				}
+				callSeen[edgeKey] = true
 				result.Edges = append(result.Edges, types.ASTEdge{
 					SourceID: node.ID,
-					TargetID: types.GenerateNodeID(relPath, target),
+					TargetID: targetID,
 					EdgeType: types.EdgeTypeCalls,
 				})
 			}
@@ -541,9 +729,15 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 			className := callMatch[1]
 			methodName := callMatch[2]
 			target := className + "." + methodName
+			targetID := types.GenerateNodeID(relPath, target)
+			edgeKey := node.ID + ":" + targetID
+			if callSeen[edgeKey] {
+				continue
+			}
+			callSeen[edgeKey] = true
 			result.Edges = append(result.Edges, types.ASTEdge{
 				SourceID: node.ID,
-				TargetID: types.GenerateNodeID(relPath, target),
+				TargetID: targetID,
 				EdgeType: types.EdgeTypeCalls,
 			})
 		}
@@ -555,9 +749,15 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				if phpCallKeywords[target] || target == extractBaseName(node.SymbolName) {
 					continue
 				}
+				targetID := types.GenerateNodeID(relPath, target)
+				edgeKey := node.ID + ":" + targetID
+				if callSeen[edgeKey] {
+					continue
+				}
+				callSeen[edgeKey] = true
 				result.Edges = append(result.Edges, types.ASTEdge{
 					SourceID: node.ID,
-					TargetID: types.GenerateNodeID(relPath, target),
+					TargetID: targetID,
 					EdgeType: types.EdgeTypeCalls,
 				})
 			}
@@ -565,11 +765,12 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	}
 
 	// H1: Extract PHP import (use) edges
+	// C1: TargetID references the target file's file node
 	for _, match := range phpUseRe.FindAllStringSubmatch(text, -1) {
 		usePath := match[1]
 		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),
-			TargetID: types.GenerateNodeID(relPath, usePath),
+			SourceID: types.GenerateNodeID(relPath, relPath),       // this file
+			TargetID: types.GenerateNodeID(usePath, usePath),       // target file's file node
 			EdgeType: types.EdgeTypeImports,
 		})
 	}
@@ -659,10 +860,22 @@ func findBlockEnd(content []byte, startPos int) uint32 {
 				i++ // skip escaped character
 			} else if ch == '`' {
 				state = stateCode
+			} else if ch == '$' && i+1 < n && content[i+1] == '{' {
+				// H4: Template literal interpolation ${...}: track nested braces
+				i++ // skip {
+				braceDepth := 1
+				for i++; i < n && braceDepth > 0; i++ {
+					switch content[i] {
+					case '{':
+						braceDepth++
+					case '}':
+						braceDepth--
+					case '\\':
+						i++ // skip escaped char
+					}
+				}
+				i-- // outer for loop will increment
 			}
-			// Note: we don't handle ${...} interpolation because the braces
-			// inside template expressions would need recursive parsing.
-			// For block-end detection, skipping the whole template literal is sufficient.
 
 		case stateLineComment:
 			if ch == '\n' {
@@ -687,12 +900,8 @@ func findBlockEnd(content []byte, startPos int) uint32 {
 		}
 	}
 
-	// If no matching brace found, return end of content or a reasonable limit
-	end := startPos + 5000
-	if end > len(content) {
-		end = len(content)
-	}
-	return uint32(end)
+	// M10: If no matching brace found, return end of content
+	return uint32(len(content))
 }
 
 // looksLikeRegex determines if a '/' at position i is likely the start of a
@@ -747,6 +956,13 @@ func buildContentSum(lines []string, byteOffset int, name string) string {
 // Returns the collected comment text lines (in top-to-bottom order).
 func collectDocBlock(lines []string, declLine int) []string {
 	if declLine <= 0 {
+		return nil
+	}
+
+	// M14: If the line immediately before the declaration is blank,
+	// don't capture a doc block from further above
+	prevLine := strings.TrimSpace(lines[declLine-1])
+	if prevLine == "" {
 		return nil
 	}
 

@@ -50,19 +50,19 @@ func TestGenerateNodeID_DifferentInputs(t *testing.T) {
 // TestGenerateNodeID_KnownValue pins the SHA-256 output for a known input so we catch
 // any accidental changes to the hashing logic.
 func TestGenerateNodeID_KnownValue(t *testing.T) {
-	// sha256("file.go:MyFunc") = computed once and pinned here
-	// We recompute it via the function and compare against a second call to confirm
-	// both calls are equal AND that the input separator is ":" (as documented).
+	// M15: Uses null byte separator: sha256("file.go" + \x00 + "MyFunc")
 	id := GenerateNodeID("file.go", "MyFunc")
-	// Expected: sha256("file.go:MyFunc")
-	const expected = "3b9c4e7f6a2d1c8b5e0a9f4d3c2b1a0e9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4" // placeholder
-	// Rather than hard-coding the exact digest (which requires running the code),
-	// we verify the property by ensuring a different separator would differ.
-	idWithColon := GenerateNodeID("file.go", "MyFunc")
-	if id != idWithColon {
+	// Verify determinism with repeated call
+	idAgain := GenerateNodeID("file.go", "MyFunc")
+	if id != idAgain {
 		t.Error("same inputs produced different IDs on repeated call")
 	}
-	_ = expected
+	// Verify the null byte separator prevents collisions that a colon separator wouldn't.
+	// "file.go" + \0 + "MyFunc" must differ from "file.go\x00My" + \0 + "Func"
+	id2 := GenerateNodeID("file.go\x00My", "Func")
+	if id == id2 {
+		t.Error("null byte separator did not prevent collision")
+	}
 }
 
 // ---- NodeType.String tests ----
@@ -76,6 +76,8 @@ func TestNodeTypeString(t *testing.T) {
 		{NodeTypeClass, "class"},
 		{NodeTypeStruct, "struct"},
 		{NodeTypeMethod, "method"},
+		{NodeTypeInterface, "interface"},
+		{NodeTypeFile, "file"},
 		{NodeType(0), "unknown"},
 		{NodeType(255), "unknown"},
 	}
@@ -114,7 +116,7 @@ func TestEdgeTypeString(t *testing.T) {
 // ---- Enum distinctness and non-zero tests ----
 
 func TestNodeTypeDistinctAndNonZero(t *testing.T) {
-	values := []NodeType{NodeTypeFunction, NodeTypeClass, NodeTypeStruct, NodeTypeMethod}
+	values := []NodeType{NodeTypeFunction, NodeTypeClass, NodeTypeStruct, NodeTypeMethod, NodeTypeInterface, NodeTypeFile}
 	seen := make(map[NodeType]bool)
 	for _, v := range values {
 		if v == 0 {

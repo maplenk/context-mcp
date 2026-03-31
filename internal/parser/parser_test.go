@@ -135,9 +135,9 @@ func TestParseFile_Go_NodeCount(t *testing.T) {
 		t.Fatalf("ParseFile Go: %v", err)
 	}
 
-	// Expect: MyStruct (struct), Greet (function), Sum (function), MyStruct.Describe (method)
-	if len(result.Nodes) != 4 {
-		t.Errorf("expected 4 nodes, got %d:", len(result.Nodes))
+	// Expect: sample.go (file), MyStruct (struct), Greet (function), Sum (function), MyStruct.Describe (method)
+	if len(result.Nodes) != 5 {
+		t.Errorf("expected 5 nodes, got %d:", len(result.Nodes))
 		for _, n := range result.Nodes {
 			t.Logf("  node: SymbolName=%q NodeType=%v", n.SymbolName, n.NodeType)
 		}
@@ -632,10 +632,10 @@ func main() {
 		t.Errorf("expected 3 import edges, got %d", importCount)
 	}
 
-	// Verify specific imports by checking target IDs
-	fmtID := types.GenerateNodeID("main.go", "fmt")
-	stringsID := types.GenerateNodeID("main.go", "strings")
-	osID := types.GenerateNodeID("main.go", "os")
+	// C1: Import edge targets now reference the target file's file node
+	fmtID := types.GenerateNodeID("fmt", "fmt")
+	stringsID := types.GenerateNodeID("strings", "strings")
+	osID := types.GenerateNodeID("os", "os")
 	if !importPaths[fmtID] {
 		t.Error("missing import edge for 'fmt'")
 	}
@@ -1005,5 +1005,425 @@ namespace App\Controllers;
 	}
 	if findNodeBySymbol(result.Nodes, "indentedHelper") == nil {
 		t.Error("expected indented PHP function 'indentedHelper' to be found")
+	}
+}
+
+// ===========================================================================
+// C1: File-level nodes for import edge anchoring
+// ===========================================================================
+
+func TestParseFile_Go_FileNode(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "sample.go", sampleGoContent)
+
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile Go: %v", err)
+	}
+
+	fileNode := findNodeBySymbol(result.Nodes, "sample.go")
+	if fileNode == nil {
+		t.Fatal("expected file-level node 'sample.go'")
+	}
+	if fileNode.NodeType != types.NodeTypeFile {
+		t.Errorf("file node type = %v, want file", fileNode.NodeType)
+	}
+	if fileNode.StartByte != 0 {
+		t.Errorf("file node StartByte = %d, want 0", fileNode.StartByte)
+	}
+	if fileNode.ID != types.GenerateNodeID("sample.go", "sample.go") {
+		t.Error("file node ID does not match GenerateNodeID(relPath, relPath)")
+	}
+}
+
+func TestParseFile_JS_FileNode(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "app.js", sampleJSContent)
+
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile JS: %v", err)
+	}
+
+	fileNode := findNodeBySymbol(result.Nodes, "app.js")
+	if fileNode == nil {
+		t.Fatal("expected file-level node 'app.js'")
+	}
+	if fileNode.NodeType != types.NodeTypeFile {
+		t.Errorf("file node type = %v, want file", fileNode.NodeType)
+	}
+}
+
+func TestParseFile_PHP_FileNode(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "service.php", samplePHPContent)
+
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile PHP: %v", err)
+	}
+
+	fileNode := findNodeBySymbol(result.Nodes, "service.php")
+	if fileNode == nil {
+		t.Fatal("expected file-level node 'service.php'")
+	}
+	if fileNode.NodeType != types.NodeTypeFile {
+		t.Errorf("file node type = %v, want file", fileNode.NodeType)
+	}
+}
+
+// ===========================================================================
+// C1: Import edges reference target file nodes
+// ===========================================================================
+
+func TestParseFile_Go_ImportEdgeTargets(t *testing.T) {
+	dir := t.TempDir()
+	const goWithImports = `package main
+
+import "fmt"
+
+func main() { fmt.Println("hi") }
+`
+	path := writeFile(t, dir, "main.go", goWithImports)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	for _, e := range result.Edges {
+		if e.EdgeType == types.EdgeTypeImports {
+			// Source should be this file's file node
+			if e.SourceID != types.GenerateNodeID("main.go", "main.go") {
+				t.Errorf("import edge source = %q, want file node ID", e.SourceID)
+			}
+			// Target should be the imported package's file node
+			expected := types.GenerateNodeID("fmt", "fmt")
+			if e.TargetID != expected {
+				t.Errorf("import edge target = %q, want GenerateNodeID('fmt','fmt')=%q", e.TargetID, expected)
+			}
+		}
+	}
+}
+
+// ===========================================================================
+// H22: NodeTypeInterface in Go parser
+// ===========================================================================
+
+func TestParseFile_Go_Interface(t *testing.T) {
+	dir := t.TempDir()
+	const goWithInterface = `package sample
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+type Writer interface {
+	Write(p []byte) (n int, err error)
+}
+`
+	path := writeFile(t, dir, "iface.go", goWithInterface)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile Go interfaces: %v", err)
+	}
+
+	if !hasNodeType(result.Nodes, types.NodeTypeInterface) {
+		t.Error("expected NodeTypeInterface for Go interface declarations")
+	}
+	reader := findNodeBySymbol(result.Nodes, "Reader")
+	if reader == nil {
+		t.Fatal("expected 'Reader' interface node")
+	}
+	if reader.NodeType != types.NodeTypeInterface {
+		t.Errorf("Reader node type = %v, want interface", reader.NodeType)
+	}
+}
+
+// ===========================================================================
+// H21: Go named types (type aliases)
+// ===========================================================================
+
+func TestParseFile_Go_NamedTypes(t *testing.T) {
+	dir := t.TempDir()
+	const goWithNamedTypes = `package sample
+
+type Handler func(w http.ResponseWriter, r *http.Request)
+
+type UserID string
+
+type Count int64
+`
+	path := writeFile(t, dir, "named.go", goWithNamedTypes)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile Go named types: %v", err)
+	}
+
+	// Named types should be captured (not skipped)
+	if findNodeBySymbol(result.Nodes, "Handler") == nil {
+		t.Error("expected 'Handler' named type node")
+	}
+	if findNodeBySymbol(result.Nodes, "UserID") == nil {
+		t.Error("expected 'UserID' named type node")
+	}
+	if findNodeBySymbol(result.Nodes, "Count") == nil {
+		t.Error("expected 'Count' named type node")
+	}
+}
+
+// ===========================================================================
+// H4: findBlockEnd handles template literal ${} interpolation
+// ===========================================================================
+
+func TestFindBlockEnd_TemplateLiteralInterpolation(t *testing.T) {
+	src := []byte("function f() { let s = `hello ${name + `nested`} world`; return s; }")
+	end := findBlockEnd(src, 0)
+	expected := uint32(len(src))
+	if end != expected {
+		t.Errorf("findBlockEnd with template literal interpolation: got %d, want %d", end, expected)
+	}
+}
+
+func TestFindBlockEnd_TemplateLiteralBracesInInterpolation(t *testing.T) {
+	src := []byte("function f() { let s = `${obj.map(x => { return x; })}`; return s; }")
+	end := findBlockEnd(src, 0)
+	expected := uint32(len(src))
+	if end != expected {
+		t.Errorf("findBlockEnd with nested braces in template interpolation: got %d, want %d", end, expected)
+	}
+}
+
+// ===========================================================================
+// H5: PHP methods without visibility keywords
+// ===========================================================================
+
+func TestParsePHP_MethodsWithoutVisibility(t *testing.T) {
+	dir := t.TempDir()
+	const phpNoVisibility = `<?php
+
+class MyController {
+    function handle() {
+        return true;
+    }
+
+    static function create() {
+        return new self();
+    }
+
+    public function destroy() {
+        return false;
+    }
+}
+`
+	path := writeFile(t, dir, "ctrl.php", phpNoVisibility)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile PHP no visibility: %v", err)
+	}
+
+	if findNodeBySymbol(result.Nodes, "MyController.handle") == nil {
+		t.Error("expected method 'MyController.handle' without visibility keyword")
+	}
+	if findNodeBySymbol(result.Nodes, "MyController.create") == nil {
+		t.Error("expected method 'MyController.create' with static but no visibility")
+	}
+	if findNodeBySymbol(result.Nodes, "MyController.destroy") == nil {
+		t.Error("expected method 'MyController.destroy' with public visibility")
+	}
+}
+
+// ===========================================================================
+// C11: PHP parser deduplication
+// ===========================================================================
+
+func TestParsePHP_NoDuplicateNodes(t *testing.T) {
+	dir := t.TempDir()
+	const phpWithFuncs = `<?php
+
+class Service {
+    public function process() {
+        return true;
+    }
+
+    function helper() {
+        return false;
+    }
+}
+
+function standalone() {
+    return 42;
+}
+`
+	path := writeFile(t, dir, "dedup.php", phpWithFuncs)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile PHP dedup: %v", err)
+	}
+
+	// Count occurrences of each symbol name
+	nameCount := map[string]int{}
+	for _, n := range result.Nodes {
+		nameCount[n.SymbolName]++
+	}
+	for name, count := range nameCount {
+		if count > 1 {
+			t.Errorf("duplicate node for %q: appeared %d times", name, count)
+		}
+	}
+}
+
+// ===========================================================================
+// M9: Call edge deduplication
+// ===========================================================================
+
+func TestParseFile_Go_CallEdgeDedup(t *testing.T) {
+	dir := t.TempDir()
+	const goWithRepeatedCalls = `package main
+
+func process() {
+	validate()
+	validate()
+	validate()
+	transform()
+}
+
+func validate() {}
+func transform() {}
+`
+	path := writeFile(t, dir, "dedup.go", goWithRepeatedCalls)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile Go dedup: %v", err)
+	}
+
+	// Count call edges from process
+	processID := types.GenerateNodeID("dedup.go", "process")
+	callCount := 0
+	for _, e := range result.Edges {
+		if e.SourceID == processID && e.EdgeType == types.EdgeTypeCalls {
+			callCount++
+		}
+	}
+	// Should be 2 (validate + transform), not 4 (validate x3 + transform)
+	if callCount != 2 {
+		t.Errorf("expected 2 deduplicated call edges from process, got %d", callCount)
+	}
+}
+
+// ===========================================================================
+// M14: buildContentSum blank-line separation
+// ===========================================================================
+
+func TestBuildContentSum_BlankLineSeparation(t *testing.T) {
+	lines := []string{
+		"// This is an unrelated comment about something else",
+		"// It should NOT be included",
+		"",
+		"function targetFunc() {",
+		"    return true;",
+		"}",
+	}
+	// byte offset of "function targetFunc() {" line
+	offset := 0
+	for i := 0; i < 3; i++ {
+		offset += len(lines[i]) + 1
+	}
+
+	summary := buildContentSum(lines, offset, "targetFunc")
+	// The comment block is separated by a blank line, so it should NOT be captured
+	if strings.Contains(summary, "unrelated") {
+		t.Errorf("expected blank line to prevent doc block capture, got: %q", summary)
+	}
+}
+
+// ===========================================================================
+// L17: TypeScript constructs (interfaces, enums, type aliases)
+// ===========================================================================
+
+func TestParseFile_TS_Constructs(t *testing.T) {
+	dir := t.TempDir()
+	const tsContent = `
+export interface UserProfile {
+    name: string;
+    email: string;
+}
+
+export const enum Status {
+    Active = "active",
+    Inactive = "inactive",
+}
+
+export type UserID = string;
+
+export type Handler<T> = (req: T) => void;
+
+function processUser(id: UserID): void {
+    return;
+}
+`
+	path := writeFile(t, dir, "types.ts", tsContent)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile TS constructs: %v", err)
+	}
+
+	if findNodeBySymbol(result.Nodes, "UserProfile") == nil {
+		t.Error("expected TS interface 'UserProfile'")
+	}
+	if findNodeBySymbol(result.Nodes, "Status") == nil {
+		t.Error("expected TS enum 'Status'")
+	}
+	if findNodeBySymbol(result.Nodes, "UserID") == nil {
+		t.Error("expected TS type alias 'UserID'")
+	}
+	if findNodeBySymbol(result.Nodes, "Handler") == nil {
+		t.Error("expected TS generic type alias 'Handler'")
+	}
+
+	// Check correct node types
+	up := findNodeBySymbol(result.Nodes, "UserProfile")
+	if up != nil && up.NodeType != types.NodeTypeInterface {
+		t.Errorf("UserProfile type = %v, want interface", up.NodeType)
+	}
+	st := findNodeBySymbol(result.Nodes, "Status")
+	if st != nil && st.NodeType != types.NodeTypeStruct {
+		t.Errorf("Status type = %v, want struct", st.NodeType)
+	}
+}
+
+// ===========================================================================
+// M10: findBlockEnd fallback returns end of content
+// ===========================================================================
+
+func TestFindBlockEnd_NoBlock(t *testing.T) {
+	src := []byte("no braces at all here")
+	end := findBlockEnd(src, 0)
+	expected := uint32(len(src))
+	if end != expected {
+		t.Errorf("findBlockEnd with no braces: got %d, want %d (len of content)", end, expected)
+	}
+}
+
+// ===========================================================================
+// M15: GenerateNodeID null byte separator
+// ===========================================================================
+
+func TestGenerateNodeID_SeparatorCollision(t *testing.T) {
+	// With colon separator: "a:b" + "c" and "a" + "b:c" would collide
+	// With null byte separator they should not
+	id1 := types.GenerateNodeID("a:b", "c")
+	id2 := types.GenerateNodeID("a", "b:c")
+	if id1 == id2 {
+		t.Error("GenerateNodeID should not collide for inputs with colons")
 	}
 }

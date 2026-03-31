@@ -9,10 +9,12 @@ import (
 type NodeType uint8
 
 const (
-	NodeTypeFunction NodeType = iota + 1
+	NodeTypeFunction  NodeType = iota + 1
 	NodeTypeClass
 	NodeTypeStruct
 	NodeTypeMethod
+	NodeTypeInterface // H22: distinct type for interfaces
+	NodeTypeFile      // C1: file-level node for import edge anchoring
 )
 
 // String returns the string representation of a NodeType
@@ -26,6 +28,10 @@ func (nt NodeType) String() string {
 		return "struct"
 	case NodeTypeMethod:
 		return "method"
+	case NodeTypeInterface:
+		return "interface"
+	case NodeTypeFile:
+		return "file"
 	default:
 		return "unknown"
 	}
@@ -89,10 +95,13 @@ type FileEvent struct {
 	Action FileEventAction
 }
 
-// GenerateNodeID creates a deterministic SHA-256 hash ID from file path and symbol name
+// GenerateNodeID creates a deterministic SHA-256 hash ID from file path and symbol name.
+// Uses a null byte separator to prevent collisions (e.g., "a:b"+"c" vs "a"+":b:c").
 func GenerateNodeID(filePath, symbolName string) string {
 	h := sha256.New()
-	h.Write([]byte(filePath + ":" + symbolName))
+	h.Write([]byte(filePath))
+	h.Write([]byte{0}) // null byte separator prevents collision
+	h.Write([]byte(symbolName))
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
