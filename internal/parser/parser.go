@@ -802,7 +802,7 @@ var (
 	phpFuncDeclRe     = regexp.MustCompile(`(?m)(?:^|\n)\s*function\s+(\w+)\s*\(`)
 	phpNewExprRe      = regexp.MustCompile(`new\s+(\w+)\s*\(`)
 	phpUseRe          = regexp.MustCompile(`(?m)^use\s+([\w\\]+)`)
-	phpMethodCallRe   = regexp.MustCompile(`(?:\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
+	phpMethodCallRe   = regexp.MustCompile(`(\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
 	phpStaticCallRe   = regexp.MustCompile(`([A-Z]\w+)\s*::\s*(\w+)\s*\(`)
 	phpFuncCallRe     = regexp.MustCompile(`(?:^|[^>\w])(\w+)\s*\(`)
 )
@@ -1065,21 +1065,42 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		}
 
 		// M5: Method call edges — $this->method(), $obj->method(), self::method()
-		for _, callMatch := range phpMethodCallRe.FindAllStringSubmatch(bodyText, -1) {
-			target := callMatch[1]
-			if !phpCallKeywords[target] {
-				targetID := types.GenerateNodeID(relPath, target)
-				edgeKey := node.ID + ":" + targetID
-				if callSeen[edgeKey] {
-					continue
-				}
-				callSeen[edgeKey] = true
-				result.Edges = append(result.Edges, types.ASTEdge{
-					SourceID: node.ID,
-					TargetID: targetID,
-					EdgeType: types.EdgeTypeCalls,
-				})
+		// Determine enclosing class from the node's SymbolName (e.g., "User.save" -> "User")
+		var enclosingClass string
+		if node.NodeType == types.NodeTypeMethod {
+			if dotIdx := strings.Index(node.SymbolName, "."); dotIdx >= 0 {
+				enclosingClass = node.SymbolName[:dotIdx]
 			}
+		}
+		for _, callMatch := range phpMethodCallRe.FindAllStringSubmatch(bodyText, -1) {
+			caller := callMatch[1]  // "$this", "$obj", "self", "static", "parent"
+			methodName := callMatch[2] // bare method name
+			if phpCallKeywords[methodName] {
+				continue
+			}
+			isSelfCall := caller == "$this" || caller == "self" || caller == "static" || caller == "parent"
+			var target string
+			var targetSymbol string
+			if isSelfCall && enclosingClass != "" {
+				// $this->method() / self::method() — qualify with enclosing class
+				target = enclosingClass + "." + methodName
+			} else {
+				// $obj->method() — use bare name for local lookup, TargetSymbol for cross-file
+				target = methodName
+				targetSymbol = methodName
+			}
+			targetID := types.GenerateNodeID(relPath, target)
+			edgeKey := node.ID + ":" + targetID
+			if callSeen[edgeKey] {
+				continue
+			}
+			callSeen[edgeKey] = true
+			result.Edges = append(result.Edges, types.ASTEdge{
+				SourceID:     node.ID,
+				TargetID:     targetID,
+				EdgeType:     types.EdgeTypeCalls,
+				TargetSymbol: targetSymbol,
+			})
 		}
 
 		// M5: Static call edges — ClassName::method()
