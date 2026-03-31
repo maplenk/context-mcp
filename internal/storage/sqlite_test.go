@@ -984,12 +984,19 @@ func TestSanitizeFTSStorage(t *testing.T) {
 		input string
 		want  string
 	}{
-		{`hello "world"`, `hello  world `},
-		{`func(a)`, `func a `},
+		{`hello "world"`, `hello world`},
+		{`func(a)`, `func a`},
 		{`test+case-two`, `test case two`},
 		{`normal query`, `normal query`},
-		{`prefix*`, `prefix `},
+		{`prefix*`, `prefix`},
 		{`col:value`, `col value`},
+		// Boolean operators are neutralized by lowercasing
+		{`NOT checksum`, `not checksum`},
+		{`foo OR bar`, `foo or bar`},
+		{`foo AND bar`, `foo and bar`},
+		{`NEAR test`, `near test`},
+		// Mixed case operators
+		{`Or something`, `or something`},
 	}
 	for _, tc := range tests {
 		got := sanitizeFTSStorage(tc.input)
