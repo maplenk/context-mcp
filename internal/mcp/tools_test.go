@@ -995,7 +995,7 @@ func TestIndexHandler_WithFunc(t *testing.T) {
 
 	handler, _ := server.GetHandler("index")
 
-	params, _ := json.Marshal(IndexParams{Path: "/some/path"})
+	params, _ := json.Marshal(IndexParams{Path: filepath.Join(deps.RepoRoot, "subdir")})
 	result, err := handler(params)
 	if err != nil {
 		t.Fatalf("indexHandler error: %v", err)

@@ -589,10 +589,36 @@ func registerHealthTool(s *Server, deps ToolDeps) {
 
 // ----- Tool 6: index -----
 
-func indexHandler(indexFn IndexFunc, p IndexParams) (interface{}, error) {
+func indexHandler(indexFn IndexFunc, p IndexParams, repoRoot string) (interface{}, error) {
 	if indexFn == nil {
 		return nil, fmt.Errorf("index function not configured")
 	}
+
+	if p.Path != "" {
+		absPath, err := filepath.Abs(p.Path)
+		if err != nil {
+			return nil, fmt.Errorf("invalid path: %w", err)
+		}
+		resolvedRoot, _ := filepath.EvalSymlinks(repoRoot)
+		if resolvedRoot == "" {
+			resolvedRoot = repoRoot
+		}
+		// Resolve symlinks on the path if it exists; otherwise use Abs path
+		resolvedPath, err := filepath.EvalSymlinks(absPath)
+		if err != nil {
+			// Path doesn't exist yet — resolve parent to normalize symlinks
+			resolvedParent, perr := filepath.EvalSymlinks(filepath.Dir(absPath))
+			if perr != nil {
+				resolvedPath = absPath
+			} else {
+				resolvedPath = filepath.Join(resolvedParent, filepath.Base(absPath))
+			}
+		}
+		if !strings.HasPrefix(resolvedPath, resolvedRoot+string(filepath.Separator)) && resolvedPath != resolvedRoot {
+			return nil, fmt.Errorf("path traversal detected: %s is outside repo root", p.Path)
+		}
+	}
+
 	if err := indexFn(p.Path); err != nil {
 		return nil, fmt.Errorf("indexing failed: %w", err)
 	}
@@ -608,7 +634,7 @@ func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid parameters: %w", err)
 		}
-		return indexHandler(indexFn, p)
+		return indexHandler(indexFn, p, deps.RepoRoot)
 	}
 
 	s.RegisterTool(ToolDefinition{
@@ -627,7 +653,7 @@ func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
 
 	// SDK handler
 	if err := s.RegisterSDKTool("index", desc, func(p IndexParams) (*mcp_golang.ToolResponse, error) {
-		result, err := indexHandler(indexFn, p)
+		result, err := indexHandler(indexFn, p, deps.RepoRoot)
 		if err != nil {
 			return nil, err
 		}
