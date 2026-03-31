@@ -3,19 +3,22 @@
 package embedding
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"path/filepath"
 	"sync"
 
-	ort "github.com/yalue/onnxruntime_go"
+	ort "github.com/shota3506/onnxruntime-purego/onnxruntime"
 )
 
 // ONNXEmbedder runs a quantized ONNX model for embedding generation.
 // Implements the Embedder interface with last-token pooling (causal LM)
 // and Matryoshka dimension truncation.
 type ONNXEmbedder struct {
-	session   *ort.DynamicAdvancedSession
+	runtime   *ort.Runtime
+	env       *ort.Env
+	session   *ort.Session
 	tokenizer *BPETokenizer
 	dim       int // output dimension (Matryoshka truncation)
 	mu        sync.Mutex
@@ -34,42 +37,42 @@ func NewONNXEmbedder(modelDir string, dim int, libPath string) (*ONNXEmbedder, e
 		return nil, fmt.Errorf("invalid Matryoshka dimension %d; valid: 64, 128, 256, 512, 896", dim)
 	}
 
-	// Initialize ONNX Runtime if not already done
-	if !ort.IsInitialized() {
-		ort.SetSharedLibraryPath(libPath)
-		if err := ort.InitializeEnvironment(); err != nil {
-			return nil, fmt.Errorf("initializing ONNX Runtime: %w", err)
-		}
+	// Initialize ONNX Runtime (purego — no CGO required)
+	rt, err := ort.NewRuntime(libPath, 23)
+	if err != nil {
+		return nil, fmt.Errorf("initializing ONNX Runtime: %w", err)
+	}
+
+	env, err := rt.NewEnv("qb-context", ort.LoggingLevelWarning)
+	if err != nil {
+		rt.Close()
+		return nil, fmt.Errorf("creating ONNX environment: %w", err)
 	}
 
 	// Load tokenizer
 	tokenizer, err := NewBPETokenizer(modelDir)
 	if err != nil {
+		env.Close()
+		rt.Close()
 		return nil, fmt.Errorf("loading tokenizer: %w", err)
 	}
 
-	// Create session — only request last_hidden_state output (skip KV cache)
+	// Create session with thread configuration
 	modelPath := filepath.Join(modelDir, "model_quantized.onnx")
-	inputNames := []string{"input_ids", "attention_mask", "position_ids"}
-	outputNames := []string{"last_hidden_state"}
-
-	opts, err := ort.NewSessionOptions()
-	if err != nil {
-		return nil, fmt.Errorf("creating session options: %w", err)
+	opts := &ort.SessionOptions{
+		IntraOpNumThreads: 2,
 	}
-	defer opts.Destroy()
 
-	// Use single thread for inference (embedding is not latency-critical)
-	opts.SetIntraOpNumThreads(2)
-	opts.SetInterOpNumThreads(1)
-
-	session, err := ort.NewDynamicAdvancedSession(modelPath,
-		inputNames, outputNames, opts)
+	session, err := rt.NewSession(env, modelPath, opts)
 	if err != nil {
+		env.Close()
+		rt.Close()
 		return nil, fmt.Errorf("creating ONNX session: %w", err)
 	}
 
 	return &ONNXEmbedder{
+		runtime:   rt,
+		env:       env,
 		session:   session,
 		tokenizer: tokenizer,
 		dim:       dim,
@@ -90,56 +93,52 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 	}
 
 	// Create input tensors [1, seqLen]
-	shape := ort.Shape{1, seqLen}
-	inputIDsTensor, err := ort.NewTensor(shape, inputIDs)
+	shape := []int64{1, seqLen}
+
+	inputIDsTensor, err := ort.NewTensorValue(e.runtime, inputIDs, shape)
 	if err != nil {
 		return nil, fmt.Errorf("creating input_ids tensor: %w", err)
 	}
-	defer inputIDsTensor.Destroy()
+	defer inputIDsTensor.Close()
 
-	maskTensor, err := ort.NewTensor(shape, attentionMask)
+	maskTensor, err := ort.NewTensorValue(e.runtime, attentionMask, shape)
 	if err != nil {
 		return nil, fmt.Errorf("creating attention_mask tensor: %w", err)
 	}
-	defer maskTensor.Destroy()
+	defer maskTensor.Close()
 
-	posIDsTensor, err := ort.NewTensor(shape, positionIDs)
+	posIDsTensor, err := ort.NewTensorValue(e.runtime, positionIDs, shape)
 	if err != nil {
 		return nil, fmt.Errorf("creating position_ids tensor: %w", err)
 	}
-	defer posIDsTensor.Destroy()
+	defer posIDsTensor.Close()
 
 	// Run inference (session is not thread-safe)
+	inputs := map[string]*ort.Value{
+		"input_ids":      inputIDsTensor,
+		"attention_mask":  maskTensor,
+		"position_ids":    posIDsTensor,
+	}
+
 	e.mu.Lock()
-	inputs := []ort.Value{inputIDsTensor, maskTensor, posIDsTensor}
-	outputs := []ort.Value{nil} // let ONNX Runtime allocate
-	err = e.session.Run(inputs, outputs)
+	outputs, err := e.session.Run(context.Background(), inputs, ort.WithOutputNames("last_hidden_state"))
 	e.mu.Unlock()
 
 	if err != nil {
-		// Clean up any partially allocated output tensors
-		for _, o := range outputs {
-			if o != nil {
-				o.Destroy()
-			}
-		}
 		return nil, fmt.Errorf("ONNX inference: %w", err)
 	}
 
 	// Extract last_hidden_state [1, seqLen, hiddenDim]
-	outputTensor, ok := outputs[0].(*ort.Tensor[float32])
+	outputValue, ok := outputs["last_hidden_state"]
 	if !ok {
-		// Clean up non-nil outputs that aren't the expected type
-		for _, o := range outputs {
-			if o != nil {
-				o.Destroy()
-			}
-		}
-		return nil, fmt.Errorf("unexpected output type (expected float32 tensor)")
+		return nil, fmt.Errorf("missing last_hidden_state output")
 	}
-	defer outputTensor.Destroy()
+	defer outputValue.Close()
 
-	hiddenData := outputTensor.GetData()
+	hiddenData, _, err := ort.GetTensorData[float32](outputValue)
+	if err != nil {
+		return nil, fmt.Errorf("extracting output tensor data: %w", err)
+	}
 
 	// Derive hidden dimension from output data size instead of hardcoding.
 	// Output shape is [1, seqLen, hiddenDim], so hiddenDim = len(data) / seqLen.
@@ -186,10 +185,16 @@ func (e *ONNXEmbedder) Dim() int {
 	return e.dim
 }
 
-// Close destroys the ONNX session and frees resources.
+// Close destroys the ONNX session, environment, and runtime, freeing resources.
 func (e *ONNXEmbedder) Close() error {
 	if e.session != nil {
-		return e.session.Destroy()
+		e.session.Close()
+	}
+	if e.env != nil {
+		e.env.Close()
+	}
+	if e.runtime != nil {
+		return e.runtime.Close()
 	}
 	return nil
 }
