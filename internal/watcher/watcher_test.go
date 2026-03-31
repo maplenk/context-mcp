@@ -296,6 +296,61 @@ func TestWatcher_WalkExisting(t *testing.T) {
 	}
 }
 
+func TestWatcher_FileRenamed(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-create a file before starting the watcher
+	oldPath := filepath.Join(dir, "old_name.go")
+	if err := os.WriteFile(oldPath, []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newTestWatcher(t, dir, 50*time.Millisecond)
+
+	// Rename the file
+	newPath := filepath.Join(dir, "new_name.go")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// A rename produces a Remove event for the old name and a Create for the new name.
+	// We should get at least one event. Collect events for a short window.
+	var events []types.FileEvent
+	timeout := time.After(3 * time.Second)
+	collecting := true
+	for collecting {
+		select {
+		case ev := <-w.Events():
+			events = append(events, ev)
+			// After getting one event, briefly wait for any more
+			if len(events) >= 2 {
+				collecting = false
+			}
+		case <-timeout:
+			collecting = false
+		}
+	}
+
+	if len(events) == 0 {
+		t.Fatal("expected at least 1 event after file rename, got 0")
+	}
+
+	// Verify we see a Deleted event for old_name.go or a Created event for new_name.go
+	hasDelete := false
+	hasCreate := false
+	for _, ev := range events {
+		if ev.Path == "old_name.go" && ev.Action == types.FileEventDeleted {
+			hasDelete = true
+		}
+		if ev.Path == "new_name.go" && ev.Action == types.FileEventCreated {
+			hasCreate = true
+		}
+	}
+	if !hasDelete && !hasCreate {
+		t.Errorf("expected Delete(old_name.go) or Create(new_name.go) event, got: %+v", events)
+	}
+}
+
 func TestWatcher_SubdirectoryEvents(t *testing.T) {
 	dir := t.TempDir()
 

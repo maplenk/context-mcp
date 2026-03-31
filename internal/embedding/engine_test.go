@@ -356,6 +356,45 @@ func TestTokenize(t *testing.T) {
 	}
 }
 
+// TestCosineSimilarity_DimensionMismatch verifies that CosineSimilarity returns 0
+// when given vectors of different dimensions rather than panicking.
+func TestCosineSimilarity_DimensionMismatch(t *testing.T) {
+	vecA := []float32{0.1, 0.2, 0.3}
+	vecB := []float32{0.4, 0.5}
+
+	// Must not panic
+	sim := CosineSimilarity(vecA, vecB)
+	if sim != 0 {
+		t.Errorf("expected 0 for dimension mismatch, got %f", sim)
+	}
+}
+
+// TestEmbeddingDimMismatch_StorageSafe verifies that embedding operations handle
+// dimension mismatches gracefully (e.g., if dim changes between embed and store).
+func TestEmbeddingDimMismatch_StorageSafe(t *testing.T) {
+	e := NewHashEmbedder()
+
+	// Generate a vector at current dim
+	vec, err := e.Embed("test")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	// Serialize and deserialize should preserve exact dimensions
+	blob := SerializeFloat32(vec)
+	recovered := DeserializeFloat32(blob)
+	if len(recovered) != len(vec) {
+		t.Errorf("deserialized dim %d != original dim %d", len(recovered), len(vec))
+	}
+
+	// A truncated blob should produce a shorter vector (not panic)
+	truncated := blob[:len(blob)/2]
+	short := DeserializeFloat32(truncated)
+	if len(short) != len(vec)/2 {
+		t.Errorf("truncated deserialization: expected dim %d, got %d", len(vec)/2, len(short))
+	}
+}
+
 // TestSplitCamelCase verifies CamelCase splitting.
 func TestSplitCamelCase(t *testing.T) {
 	tests := []struct {

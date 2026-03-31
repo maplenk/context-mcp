@@ -1,6 +1,6 @@
 module github.com/naman/qb-context
 
-go 1.25.0
+go 1.25
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
@@ -10,7 +10,7 @@ require (
 	github.com/metoro-io/mcp-golang v0.16.1
 	github.com/shota3506/onnxruntime-purego v0.0.0-20260315223538-8db8bd7424b2
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
-	golang.org/x/text v0.35.0
+	golang.org/x/text v0.23.0
 	gonum.org/v1/gonum v0.17.0
 )
 

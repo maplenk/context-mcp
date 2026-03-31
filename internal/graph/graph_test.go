@@ -625,6 +625,67 @@ func TestComputeBetweenness_TheoreticalNormalization(t *testing.T) {
 	}
 }
 
+// ---- H28: BuildFromEdges invalidates caches (stale data test) ----
+
+// TestBuildFromEdges_InvalidatesCaches verifies that calling BuildFromEdges
+// invalidates all cached data (PPR, in-degree, betweenness, communities) so
+// subsequent queries reflect the new topology, not stale cached results.
+func TestBuildFromEdges_InvalidatesCaches(t *testing.T) {
+	g := New()
+
+	// Phase 1: build a small graph and compute all cached signals
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+	})
+
+	ppr1 := g.PersonalizedPageRank([]string{"node-a"})
+	inDeg1 := g.ComputeInDegree()
+	btwn1 := g.ComputeBetweenness()
+
+	if ppr1 == nil || inDeg1 == nil || btwn1 == nil {
+		t.Fatal("initial signal computation returned nil")
+	}
+
+	// Phase 2: rebuild with a completely different topology
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-x", TargetID: "node-y", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-y", TargetID: "node-z", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-z", TargetID: "node-x", EdgeType: types.EdgeTypeCalls},
+	})
+
+	// Phase 3: verify new signals reflect the new topology
+	ppr2 := g.PersonalizedPageRank([]string{"node-x"})
+	inDeg2 := g.ComputeInDegree()
+	btwn2 := g.ComputeBetweenness()
+
+	if ppr2 == nil || inDeg2 == nil || btwn2 == nil {
+		t.Fatal("post-rebuild signal computation returned nil")
+	}
+
+	// Old nodes should not appear in new results
+	if _, ok := ppr2["node-a"]; ok {
+		t.Error("stale PPR: node-a from old graph found in new PPR results")
+	}
+	if _, ok := inDeg2["node-a"]; ok {
+		t.Error("stale in-degree: node-a from old graph found in new in-degree results")
+	}
+	if _, ok := btwn2["node-a"]; ok {
+		t.Error("stale betweenness: node-a from old graph found in new betweenness results")
+	}
+
+	// New nodes must be present
+	if _, ok := ppr2["node-x"]; !ok {
+		t.Error("node-x missing from PPR after rebuild")
+	}
+	if _, ok := inDeg2["node-y"]; !ok {
+		t.Error("node-y missing from in-degree after rebuild")
+	}
+	if _, ok := btwn2["node-z"]; !ok {
+		t.Error("node-z missing from betweenness after rebuild")
+	}
+}
+
 // ---- L8: Benchmark tests ----
 
 func BenchmarkPageRank(b *testing.B) {
