@@ -3,15 +3,21 @@ package embedding
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 )
+
+// unknownTokenCount tracks total unknown tokens dropped across all Encode calls.
+// Used for periodic warning logging to avoid excessive log spam.
+var unknownTokenCount atomic.Int64
 
 // BPETokenizer implements byte-level BPE tokenization compatible with
 // HuggingFace tokenizer.json (Qwen2/GPT-style). Pure Go, no CGO deps.
@@ -152,8 +158,13 @@ func (t *BPETokenizer) Encode(text string) []int {
 		for _, tok := range merged {
 			if id, ok := t.vocab[tok]; ok {
 				ids = append(ids, id)
+			} else {
+				// Unknown token: count and periodically warn (avoid log spam)
+				count := unknownTokenCount.Add(1)
+				if count == 1 || count%1000 == 0 {
+					log.Printf("Warning: BPE tokenizer dropped unknown token (total dropped: %d)", count)
+				}
 			}
-			// Unknown tokens are silently dropped (byte fallback not enabled)
 		}
 
 		if t.maxLen > 0 && len(ids) >= t.maxLen {

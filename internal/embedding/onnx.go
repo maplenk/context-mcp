@@ -117,21 +117,39 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 	e.mu.Unlock()
 
 	if err != nil {
+		// Clean up any partially allocated output tensors
+		for _, o := range outputs {
+			if o != nil {
+				o.Destroy()
+			}
+		}
 		return nil, fmt.Errorf("ONNX inference: %w", err)
 	}
 
-	// Extract last_hidden_state [1, seqLen, 896]
+	// Extract last_hidden_state [1, seqLen, hiddenDim]
 	outputTensor, ok := outputs[0].(*ort.Tensor[float32])
 	if !ok {
-		if outputs[0] != nil {
-			outputs[0].Destroy()
+		// Clean up non-nil outputs that aren't the expected type
+		for _, o := range outputs {
+			if o != nil {
+				o.Destroy()
+			}
 		}
 		return nil, fmt.Errorf("unexpected output type (expected float32 tensor)")
 	}
 	defer outputTensor.Destroy()
 
 	hiddenData := outputTensor.GetData()
-	hiddenDim := 896 // full hidden size
+
+	// Derive hidden dimension from output data size instead of hardcoding.
+	// Output shape is [1, seqLen, hiddenDim], so hiddenDim = len(data) / seqLen.
+	hiddenDim := 896 // default fallback for Qwen2 model
+	if seqLen > 0 && len(hiddenData) > 0 {
+		computed := len(hiddenData) / int(seqLen)
+		if computed > 0 {
+			hiddenDim = computed
+		}
+	}
 
 	// Last-token pooling: take the hidden state of the last token
 	lastTokenIdx := int(seqLen - 1)

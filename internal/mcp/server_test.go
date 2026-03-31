@@ -6,11 +6,42 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	mcp_golang "github.com/metoro-io/mcp-golang"
 )
+
+// syncBuffer wraps bytes.Buffer with a mutex for thread-safe reads/writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (n int, err error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) Read(p []byte) (n int, err error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Read(p)
+}
+
+func (sb *syncBuffer) Bytes() []byte {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Bytes()
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
 
 // TestNewServerWithIO verifies that NewServerWithIO creates a non-nil server.
 func TestNewServerWithIO(t *testing.T) {
@@ -167,9 +198,15 @@ func sendJSONRPC(w io.Writer, id interface{}, method string, params interface{})
 	return err
 }
 
+// readableBuffer is an interface for buffers that support concurrent-safe Bytes() and String().
+type readableBuffer interface {
+	Bytes() []byte
+	String() string
+}
+
 // readJSONRPCResponse reads newline-delimited JSON-RPC responses from the
 // output buffer until the expected count is reached or a timeout fires.
-func readJSONRPCResponses(t *testing.T, buf *bytes.Buffer, want int, timeout time.Duration) []map[string]interface{} {
+func readJSONRPCResponses(t *testing.T, buf readableBuffer, want int, timeout time.Duration) []map[string]interface{} {
 	t.Helper()
 	deadline := time.After(timeout)
 	var responses []map[string]interface{}
@@ -209,7 +246,7 @@ func readJSONRPCResponses(t *testing.T, buf *bytes.Buffer, want int, timeout tim
 // an initialize request with the correct protocol version and server info.
 func TestSDKServe_Initialize(t *testing.T) {
 	input := &bytes.Buffer{}
-	output := &bytes.Buffer{}
+	output := &syncBuffer{}
 
 	// Write initialize request
 	sendJSONRPC(input, 1, "initialize", map[string]interface{}{
@@ -242,6 +279,16 @@ func TestSDKServe_Initialize(t *testing.T) {
 	responses := readJSONRPCResponses(t, output, 1, 3*time.Second)
 	if len(responses) < 1 {
 		t.Fatal("no response received for initialize")
+	}
+
+	// Check server finished without fatal error
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("server exited with: %v", err)
+		}
+	default:
+		// Server may still be running, that's OK
 	}
 
 	resp := responses[0]
@@ -282,7 +329,7 @@ func TestSDKServe_ToolsList(t *testing.T) {
 	fmt.Fprintf(input, "%s\n", notif)
 	sendJSONRPC(input, 2, "tools/list", map[string]interface{}{})
 
-	output := &bytes.Buffer{}
+	output := &syncBuffer{}
 	server := NewServerWithIO(input, output)
 
 	// Register via SDK
@@ -297,6 +344,15 @@ func TestSDKServe_ToolsList(t *testing.T) {
 
 	// We expect at least 2 responses (initialize + tools/list)
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
+
+	// Check server finished without fatal error
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("server exited with: %v", err)
+		}
+	default:
+	}
 
 	// Find the tools/list response (id=2)
 	var toolsResp map[string]interface{}
@@ -355,7 +411,7 @@ func TestSDKServe_ToolsCall(t *testing.T) {
 		"arguments": map[string]interface{}{"message": "hello SDK"},
 	})
 
-	output := &bytes.Buffer{}
+	output := &syncBuffer{}
 	server := NewServerWithIO(input, output)
 
 	handlerCalled := false
@@ -371,6 +427,15 @@ func TestSDKServe_ToolsCall(t *testing.T) {
 
 	// Wait for 2 responses (initialize + tools/call)
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
+
+	// Check server finished without fatal error
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("server exited with: %v", err)
+		}
+	default:
+	}
 
 	if !handlerCalled {
 		t.Error("SDK tool handler was not invoked")

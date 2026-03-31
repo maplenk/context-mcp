@@ -63,6 +63,12 @@ func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 func (s *Server) RegisterTool(def ToolDefinition, handler ToolHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Prevent duplicate registrations
+	for _, t := range s.tools {
+		if t.Name == def.Name {
+			return // Already registered
+		}
+	}
 	s.tools = append(s.tools, def)
 	s.handlers[def.Name] = handler
 }
