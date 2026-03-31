@@ -7,7 +7,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/mattn/go-sqlite3 v1.14.38
 	github.com/metoro-io/mcp-golang v0.16.1
-	github.com/yalue/onnxruntime_go v1.27.0
+	github.com/shota3506/onnxruntime-purego v0.0.0-20260315223538-8db8bd7424b2
 	golang.org/x/text v0.35.0
 	gonum.org/v1/gonum v0.17.0
 )
@@ -15,6 +15,7 @@ require (
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
+	github.com/ebitengine/purego v0.9.0 // indirect
 	github.com/invopop/jsonschema v0.12.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
