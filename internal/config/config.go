@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 )
@@ -58,20 +59,26 @@ func DefaultConfig() *Config {
 	}
 }
 
-// ParseFlags populates the config from command-line flags
+// ParseFlags populates the config from command-line flags.
+// Uses a dedicated FlagSet so qb-context can be embedded in programs that also
+// use the global flag package, and returns an error on unknown flags instead of
+// calling os.Exit(2).
 func ParseFlags() *Config {
 	cfg := DefaultConfig()
 
-	flag.StringVar(&cfg.RepoRoot, "repo", cfg.RepoRoot, "Path to the repository root")
-	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to the SQLite database file")
-	flag.DurationVar(&cfg.DebounceInterval, "debounce", cfg.DebounceInterval, "Filesystem event debounce interval")
-	flag.IntVar(&cfg.MaxBFSDepth, "max-depth", cfg.MaxBFSDepth, "Maximum BFS traversal depth for impact analysis")
-	flag.IntVar(&cfg.EmbeddingBatchSize, "batch-size", cfg.EmbeddingBatchSize, "Embedding batch size")
-	flag.IntVar(&cfg.WorkerCount, "workers", cfg.WorkerCount, "Number of parallel parsing workers")
-	flag.StringVar(&cfg.ONNXModelDir, "onnx-model", cfg.ONNXModelDir, "Path to ONNX model directory (enables neural embeddings)")
-	flag.StringVar(&cfg.ONNXLibPath, "onnx-lib", cfg.ONNXLibPath, "Path to ONNX Runtime shared library")
-	flag.IntVar(&cfg.EmbeddingDim, "embedding-dim", cfg.EmbeddingDim, "Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896)")
-	flag.Parse()
+	fs := flag.NewFlagSet("qb-context", flag.ContinueOnError)
+	fs.StringVar(&cfg.RepoRoot, "repo", cfg.RepoRoot, "Path to the repository root")
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to the SQLite database file")
+	fs.DurationVar(&cfg.DebounceInterval, "debounce", cfg.DebounceInterval, "Filesystem event debounce interval")
+	fs.IntVar(&cfg.MaxBFSDepth, "max-depth", cfg.MaxBFSDepth, "Maximum BFS traversal depth for impact analysis")
+	fs.IntVar(&cfg.EmbeddingBatchSize, "batch-size", cfg.EmbeddingBatchSize, "Embedding batch size")
+	fs.IntVar(&cfg.WorkerCount, "workers", cfg.WorkerCount, "Number of parallel parsing workers")
+	fs.StringVar(&cfg.ONNXModelDir, "onnx-model", cfg.ONNXModelDir, "Path to ONNX model directory (enables neural embeddings)")
+	fs.StringVar(&cfg.ONNXLibPath, "onnx-lib", cfg.ONNXLibPath, "Path to ONNX Runtime shared library")
+	fs.IntVar(&cfg.EmbeddingDim, "embedding-dim", cfg.EmbeddingDim, "Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896)")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		log.Fatalf("parsing flags: %v", err)
+	}
 
 	// H21: Prevent zero or negative batch-size causing infinite loop
 	if cfg.EmbeddingBatchSize < 1 {
