@@ -47,22 +47,32 @@ func TestGenerateNodeID_DifferentInputs(t *testing.T) {
 	}
 }
 
-// TestGenerateNodeID_KnownValue pins the SHA-256 output for a known input so we catch
-// any accidental changes to the hashing logic.
+// TestGenerateNodeID_KnownValue verifies determinism, collision resistance,
+// and that the output is a valid 64-char hex SHA-256 digest.
 func TestGenerateNodeID_KnownValue(t *testing.T) {
-	// sha256("file.go:MyFunc") = computed once and pinned here
-	// We recompute it via the function and compare against a second call to confirm
-	// both calls are equal AND that the input separator is ":" (as documented).
-	id := GenerateNodeID("file.go", "MyFunc")
-	// Expected: sha256("file.go:MyFunc")
-	const expected = "3b9c4e7f6a2d1c8b5e0a9f4d3c2b1a0e9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4" // placeholder
-	// Rather than hard-coding the exact digest (which requires running the code),
-	// we verify the property by ensuring a different separator would differ.
-	idWithColon := GenerateNodeID("file.go", "MyFunc")
-	if id != idWithColon {
-		t.Error("same inputs produced different IDs on repeated call")
+	id := GenerateNodeID("main.go", "main")
+	if id == "" {
+		t.Fatal("GenerateNodeID returned empty string")
 	}
-	_ = expected
+	// Verify determinism: same inputs = same output
+	id2 := GenerateNodeID("main.go", "main")
+	if id != id2 {
+		t.Errorf("GenerateNodeID not deterministic: %s != %s", id, id2)
+	}
+	// Different inputs = different output
+	id3 := GenerateNodeID("main.go", "other")
+	if id == id3 {
+		t.Errorf("GenerateNodeID collision: %s == %s for different symbols", id, id3)
+	}
+	// Verify it's a valid hex string of expected length (SHA-256 = 64 hex chars)
+	if len(id) != 64 {
+		t.Errorf("expected 64-char hex string, got %d chars: %s", len(id), id)
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("non-hex character %q in ID %q", c, id)
+		}
+	}
 }
 
 // ---- NodeType.String tests ----

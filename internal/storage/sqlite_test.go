@@ -717,6 +717,86 @@ func TestRawQuery_RespectsExistingLimit(t *testing.T) {
 	}
 }
 
+// ---- L11: Store recovery / error recovery ----
+
+func TestStoreRecovery_UpsertAndSearchFTS(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a node normally
+	node := types.ASTNode{
+		ID:         types.GenerateNodeID("test.go", "Func1"),
+		FilePath:   "test.go",
+		SymbolName: "Func1",
+		NodeType:   types.NodeTypeFunction,
+		StartByte:  0,
+		EndByte:    50,
+		ContentSum: "Func1 performs important calculations",
+	}
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify it can be searched via FTS
+	results, err := s.SearchLexical("Func1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Error("expected FTS result for Func1")
+	}
+
+	// Upsert the same node again (update) — should not break FTS
+	node.ContentSum = "Func1 updated content summary"
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err = s.SearchLexical("updated", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Error("expected FTS result for updated content")
+	}
+}
+
+// ---- L22: RawQuery write rejection + dangerous function blocking ----
+
+func TestRawQuery_RejectsWrites(t *testing.T) {
+	s := newTestStore(t)
+
+	writeQueries := []string{
+		"INSERT INTO nodes VALUES ('x','y','z',1,0,0,'')",
+		"UPDATE nodes SET symbol_name = 'hacked' WHERE 1=1",
+		"DELETE FROM nodes",
+		"DROP TABLE nodes",
+		"CREATE TABLE evil (id TEXT)",
+	}
+
+	for _, q := range writeQueries {
+		_, err := s.RawQuery(q)
+		if err == nil {
+			t.Errorf("expected RawQuery to reject write query: %s", q)
+		}
+	}
+}
+
+func TestRawQuery_BlocksDangerousFunctions(t *testing.T) {
+	s := newTestStore(t)
+
+	dangerousQueries := []string{
+		"SELECT load_extension('evil')",
+		"SELECT writefile('/tmp/evil', 'data')",
+	}
+
+	for _, q := range dangerousQueries {
+		_, err := s.RawQuery(q)
+		if err == nil {
+			t.Errorf("expected RawQuery to block dangerous query: %s", q)
+		}
+	}
+}
+
 // ---- C4: Foreign key removal — edges with non-existent node IDs ----
 
 func TestUpsertEdge_NoForeignKeyEnforcement(t *testing.T) {

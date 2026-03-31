@@ -52,6 +52,8 @@ func validateOrder(order Order) bool {
 	}
 
 	// Define sample nodes
+	// Note: byte ranges are synthetic — they don't correspond to real file content.
+	// Byte-range correctness is tested in integration tests with real parsed files.
 	nodes := []types.ASTNode{
 		{
 			ID:         types.GenerateNodeID("main.go", "processOrder"),
@@ -825,6 +827,187 @@ func TestGraphEngine_CollectDeps(t *testing.T) {
 }
 
 // Test storage helper methods
+// ---- L1: Handler tests for context, impact, read_symbol, query, index ----
+
+func TestContextHandler_SearchMode(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("context")
+	if !ok {
+		t.Fatal("context handler not registered")
+	}
+
+	params, _ := json.Marshal(ContextParams{Query: "processOrder", Limit: 5})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("contextHandler search mode error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestContextHandler_ArchitectureMode(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("context")
+
+	params, _ := json.Marshal(ContextParams{Query: "test", Mode: "architecture"})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("contextHandler architecture mode error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result from architecture mode")
+	}
+
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map result, got %T", result)
+	}
+	if m["mode"] != "architecture" {
+		t.Errorf("expected mode='architecture', got %v", m["mode"])
+	}
+}
+
+func TestImpactHandler_Basic(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("impact")
+	if !ok {
+		t.Fatal("impact handler not registered")
+	}
+
+	params, _ := json.Marshal(ImpactParams{SymbolID: "processOrder", Depth: 3})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("impactHandler error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestReadSymbolHandler_Basic(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("read_symbol")
+	if !ok {
+		t.Fatal("read_symbol handler not registered")
+	}
+
+	params, _ := json.Marshal(ReadSymbolParams{SymbolID: "processOrder"})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("readSymbolHandler error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestQueryHandler_Basic(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("query")
+	if !ok {
+		t.Fatal("query handler not registered")
+	}
+
+	params, _ := json.Marshal(QueryParams{SQL: "SELECT id, symbol_name FROM nodes"})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("queryHandler error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestQueryHandler_RejectsWrite(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("query")
+
+	params, _ := json.Marshal(QueryParams{SQL: "DELETE FROM nodes"})
+	_, err := handler(params)
+	if err == nil {
+		t.Fatal("expected error for write query")
+	}
+}
+
+func TestIndexHandler_NilFunc(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	// Register with nil indexFn
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("index")
+	if !ok {
+		t.Fatal("index handler not registered")
+	}
+
+	params, _ := json.Marshal(IndexParams{})
+	_, err := handler(params)
+	if err == nil {
+		t.Fatal("expected error when indexFn is nil")
+	}
+}
+
+func TestIndexHandler_WithFunc(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	called := false
+	indexFn := func(path string) error {
+		called = true
+		return nil
+	}
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, indexFn)
+
+	handler, _ := server.GetHandler("index")
+
+	params, _ := json.Marshal(IndexParams{Path: "/some/path"})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("indexHandler error: %v", err)
+	}
+	if !called {
+		t.Error("expected indexFn to be called")
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
 func TestStore_GetAllFilePaths(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
