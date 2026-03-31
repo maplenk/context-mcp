@@ -347,19 +347,20 @@ func TestBuildFTSQuery_CamelCase(t *testing.T) {
 
 // TestBuildFTSQuery_StopWords verifies that common stop words are filtered out.
 func TestBuildFTSQuery_StopWords(t *testing.T) {
-	result := buildFTSQuery("the function that reads a file")
-
-	// "the", "that", "a" should be filtered
-	lower := strings.ToLower(result)
-	for _, stopWord := range []string{" the ", " that ", " a "} {
-		// Check for stop word as standalone term (surrounded by spaces or at boundaries)
-		// We look for the stop word followed by * (prefix) or as part of OR expression
-		// The easiest check: if result only has stop-word-prefixed terms, that's bad
-		// Instead verify the important terms are present and stop words absent as standalone terms
-		_ = stopWord
+	stopWordQueries := []string{"the database", "a function", "is being called"}
+	for _, query := range stopWordQueries {
+		result := buildFTSQuery(query)
+		// Stop words should be filtered out — they should not appear as prefix-matched terms
+		for _, sw := range []string{"the", "a", "is", "being"} {
+			if strings.Contains(strings.ToLower(result), sw+"*") {
+				t.Errorf("buildFTSQuery(%q) = %q, should not contain stop word %q with prefix", query, result, sw)
+			}
+		}
 	}
 
-	// "function", "reads", "file" should be present
+	// Verify important content words are preserved
+	result := buildFTSQuery("the function that reads a file")
+	lower := strings.ToLower(result)
 	if !strings.Contains(lower, "function") {
 		t.Errorf("expected 'function' in FTS query, got: %s", result)
 	}

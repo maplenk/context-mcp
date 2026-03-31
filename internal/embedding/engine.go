@@ -101,14 +101,15 @@ func (e *TFIDFEmbedder) Embed(text string) ([]float32, error) {
 	}
 
 	// Generate character trigrams for subword-level similarity
-	lower := strings.ToLower(text)
+	// Use runes instead of bytes for correct Unicode handling
+	lowerRunes := []rune(strings.ToLower(text))
 	trigrams := make(map[string]int)
-	for i := 0; i <= len(lower)-3; i++ {
-		tri := lower[i : i+3]
+	for i := 0; i <= len(lowerRunes)-3; i++ {
+		tri := string(lowerRunes[i : i+3])
 		trigrams[tri]++
 	}
 
-	totalTrigrams := float64(len(lower) - 2)
+	totalTrigrams := float64(len(lowerRunes) - 2)
 	if totalTrigrams < 1 {
 		totalTrigrams = 1
 	}
@@ -119,11 +120,11 @@ func (e *TFIDFEmbedder) Embed(text string) ([]float32, error) {
 
 	// Generate character bigrams for additional overlap
 	bigrams := make(map[string]int)
-	for i := 0; i <= len(lower)-2; i++ {
-		bi := lower[i : i+2]
+	for i := 0; i <= len(lowerRunes)-2; i++ {
+		bi := string(lowerRunes[i : i+2])
 		bigrams[bi]++
 	}
-	totalBigrams := float64(len(lower) - 1)
+	totalBigrams := float64(len(lowerRunes) - 1)
 	if totalBigrams < 1 {
 		totalBigrams = 1
 	}
