@@ -181,8 +181,14 @@ func (t *BPETokenizer) Encode(text string) []int {
 func (t *BPETokenizer) EncodeWithSpecial(text string) (inputIDs, attentionMask []int64) {
 	ids := t.Encode(text)
 	if len(ids) == 0 {
-		// Return at least one token
+		// Return at least one token (EOS only)
 		ids = []int{t.eosID}
+	} else {
+		// Ensure room for EOS token within maxLen
+		if t.maxLen > 0 && len(ids) >= t.maxLen {
+			ids = ids[:t.maxLen-1]
+		}
+		ids = append(ids, t.eosID) // Append EOS for last-token pooling
 	}
 
 	inputIDs = make([]int64, len(ids))
