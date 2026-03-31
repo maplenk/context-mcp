@@ -425,6 +425,20 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 	}
 	defer f.Close()
 
+	// Check for stale byte offsets (file may have changed since indexing)
+	fi, statErr := f.Stat()
+	if statErr != nil {
+		return nil, fmt.Errorf("stat file %s: %w", node.FilePath, statErr)
+	}
+	if int64(node.EndByte) > fi.Size() {
+		return map[string]interface{}{
+			"symbol_name": node.SymbolName,
+			"file_path":   node.FilePath,
+			"error":       "file modified since indexing — byte offsets are stale",
+			"stale":       true,
+		}, nil
+	}
+
 	if node.EndByte <= node.StartByte {
 		return nil, fmt.Errorf("invalid byte range for %s: start=%d end=%d", node.SymbolName, node.StartByte, node.EndByte)
 	}
@@ -978,6 +992,9 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 	validRef := regexp.MustCompile(`^[a-zA-Z0-9~^.\-/]+$`)
 	if !validRef.MatchString(p.Since) {
 		return nil, fmt.Errorf("invalid git ref: %s", p.Since)
+	}
+	if strings.HasPrefix(p.Since, "-") {
+		return nil, fmt.Errorf("invalid git ref (must not start with dash): %s", p.Since)
 	}
 
 	// Run git diff to get changed files
