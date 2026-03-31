@@ -1,10 +1,12 @@
 package parser
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"log"
 	"os"
@@ -99,6 +101,16 @@ func IsSupported(filePath string) bool {
 	return false
 }
 
+// exprToString renders a Go AST expression as source text using go/printer.
+// Falls back to fmt.Sprintf if printing fails.
+func exprToString(fset *token.FileSet, expr ast.Expr) string {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, expr); err != nil {
+		return fmt.Sprintf("%v", expr)
+	}
+	return buf.String()
+}
+
 // parseGo uses Go's native AST parser for accurate Go file parsing
 func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 	fset := token.NewFileSet()
@@ -155,7 +167,7 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 			if decl.Type != nil && decl.Type.Params != nil {
 				var params []string
 				for _, param := range decl.Type.Params.List {
-					params = append(params, fmt.Sprintf("%v", param.Type))
+					params = append(params, exprToString(fset, param.Type))
 				}
 				contentSum = name + "(" + strings.Join(params, ", ") + ")"
 			}
