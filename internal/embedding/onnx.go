@@ -92,6 +92,16 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 		positionIDs[i] = i
 	}
 
+	// Lock covers tensor creation through session.Run — both use e.runtime/e.session
+	// which are not thread-safe.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Check if closed (Close() nils out session under the same mutex)
+	if e.session == nil {
+		return nil, fmt.Errorf("embedder is closed")
+	}
+
 	// Create input tensors [1, seqLen]
 	shape := []int64{1, seqLen}
 
@@ -113,16 +123,14 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 	}
 	defer posIDsTensor.Close()
 
-	// Run inference (session is not thread-safe)
+	// Run inference
 	inputs := map[string]*ort.Value{
 		"input_ids":      inputIDsTensor,
 		"attention_mask":  maskTensor,
 		"position_ids":    posIDsTensor,
 	}
 
-	e.mu.Lock()
 	outputs, err := e.session.Run(context.Background(), inputs, ort.WithOutputNames("last_hidden_state"))
-	e.mu.Unlock()
 
 	if err != nil {
 		return nil, fmt.Errorf("ONNX inference: %w", err)
@@ -200,7 +208,10 @@ func (e *ONNXEmbedder) Dim() int {
 
 // Close destroys the ONNX session, environment, and runtime, freeing resources.
 // Nils out fields after closing to prevent double-close panics.
+// Acquires the mutex to avoid racing with concurrent Embed() calls.
 func (e *ONNXEmbedder) Close() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.session != nil {
 		e.session.Close()
 		e.session = nil
