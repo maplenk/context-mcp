@@ -45,6 +45,9 @@ const (
 	EdgeTypeImports
 	EdgeTypeImplements
 	EdgeTypeInstantiates
+	EdgeTypeDefines       // file → class/function (containment)
+	EdgeTypeDefinesMethod // class → method (containment)
+	EdgeTypeInherits      // class → parent class (extends)
 )
 
 // String returns the string representation of an EdgeType
@@ -58,6 +61,12 @@ func (et EdgeType) String() string {
 		return "implements"
 	case EdgeTypeInstantiates:
 		return "instantiates"
+	case EdgeTypeDefines:
+		return "defines"
+	case EdgeTypeDefinesMethod:
+		return "defines_method"
+	case EdgeTypeInherits:
+		return "inherits"
 	default:
 		return "unknown"
 	}

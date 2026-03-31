@@ -449,6 +449,19 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				ContentSum: contentSum,
 			})
 
+			// Check for extends (INHERITS edge)
+			superNode := n.ChildByFieldName("superclass")
+			if superNode != nil {
+				parentName := superNode.Content(content)
+				if parentName != "" {
+					result.Edges = append(result.Edges, types.ASTEdge{
+						SourceID: types.GenerateNodeID(relPath, className),
+						TargetID: types.GenerateNodeID(relPath, parentName),
+						EdgeType: types.EdgeTypeInherits,
+					})
+				}
+			}
+
 			// Extract methods from class body
 			bodyNode := n.ChildByFieldName("body")
 			if bodyNode != nil {

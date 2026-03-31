@@ -269,6 +269,133 @@ func (g *GraphEngine) personalizedPageRankLocked(activeNodeIDs []string) map[str
 	return result
 }
 
+// PersonalizedPageRankSubgraph runs PPR on a subgraph induced by candidateIDs.
+// Only candidate nodes participate in the random walk, dramatically reducing
+// computation for large graphs (12K nodes → ~100 candidate nodes).
+func (g *GraphEngine) PersonalizedPageRankSubgraph(seedIDs, candidateIDs []string) map[string]float64 {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	return g.personalizedPageRankSubgraphLocked(seedIDs, candidateIDs)
+}
+
+// personalizedPageRankSubgraphLocked runs PPR on the subgraph induced by candidateIDs.
+// Caller must hold at least g.mu.RLock().
+func (g *GraphEngine) personalizedPageRankSubgraphLocked(seedIDs, candidateIDs []string) map[string]float64 {
+	if len(candidateIDs) == 0 {
+		return nil
+	}
+
+	// Build candidate set for O(1) lookup
+	candidateSet := make(map[int64]bool, len(candidateIDs))
+	for _, hashID := range candidateIDs {
+		if id, ok := g.idMap[hashID]; ok {
+			candidateSet[id] = true
+		}
+	}
+
+	n := len(candidateSet)
+	if n == 0 {
+		return nil
+	}
+
+	const (
+		alpha   = 0.85
+		epsilon = 1e-4
+		maxIter = 15
+	)
+
+	// Build teleportation vector from seeds (only those in candidate set)
+	teleport := make(map[int64]float64)
+	for _, hashID := range seedIDs {
+		if id, ok := g.idMap[hashID]; ok {
+			if candidateSet[id] {
+				teleport[id] += 1.0
+			}
+		}
+	}
+	// Normalize teleport vector
+	if len(teleport) == 0 {
+		// Fall back to uniform over candidates
+		weight := 1.0 / float64(n)
+		for id := range candidateSet {
+			teleport[id] = weight
+		}
+	} else {
+		sum := 0.0
+		for _, v := range teleport {
+			sum += v
+		}
+		for id := range teleport {
+			teleport[id] /= sum
+		}
+	}
+
+	// Initialize rank uniformly over candidates
+	rank := make(map[int64]float64, n)
+	initVal := 1.0 / float64(n)
+	for id := range candidateSet {
+		rank[id] = initVal
+	}
+
+	// Power iteration on subgraph
+	for iter := 0; iter < maxIter; iter++ {
+		newRank := make(map[int64]float64, n)
+
+		// Teleportation component
+		for id, t := range teleport {
+			newRank[id] = (1 - alpha) * t
+		}
+
+		// Random walk: only traverse edges within candidate set
+		for nodeID := range candidateSet {
+			succs := g.dg.From(nodeID)
+			// Count out-degree within candidate subgraph
+			var subgraphSuccs []int64
+			for succs.Next() {
+				succID := succs.Node().ID()
+				if candidateSet[succID] {
+					subgraphSuccs = append(subgraphSuccs, succID)
+				}
+			}
+			if len(subgraphSuccs) == 0 {
+				// Dangling node in subgraph: distribute to teleport
+				for id, t := range teleport {
+					newRank[id] += alpha * rank[nodeID] * t
+				}
+			} else {
+				share := alpha * rank[nodeID] / float64(len(subgraphSuccs))
+				for _, succID := range subgraphSuccs {
+					newRank[succID] += share
+				}
+			}
+		}
+
+		// Check convergence
+		diff := 0.0
+		for id, r := range newRank {
+			d := r - rank[id]
+			if d < 0 {
+				d = -d
+			}
+			diff += d
+		}
+		rank = newRank
+		if diff < epsilon {
+			break
+		}
+	}
+
+	// Convert to hash IDs
+	result := make(map[string]float64, n)
+	for id, r := range rank {
+		if hashID, ok := g.reverseMap[id]; ok {
+			result[hashID] = r
+		}
+	}
+	return result
+}
+
 // ComputeBetweenness computes betweenness centrality for all nodes using
 // Brandes' algorithm (via gonum), normalized to [0,1] using the graph-theoretic
 // maximum for directed graphs: (n-1)*(n-2), where n = number of nodes.
@@ -473,6 +600,39 @@ func (g *GraphEngine) ComputeSearchSignals(activeNodeIDs []string) (ppr map[stri
 	// Need write lock to compute and cache in-degree
 	g.mu.Lock()
 	// Double-check after acquiring write lock (another goroutine may have computed it)
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		inDegree = make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			inDegree[k] = v
+		}
+		g.mu.Unlock()
+	} else {
+		inDegree = g.computeInDegreeLocked()
+		g.mu.Unlock()
+	}
+
+	return ppr, inDegree
+}
+
+// ComputeSearchSignalsSubgraph computes PPR on the candidate subgraph and returns
+// InDegree from cache. This is much faster than ComputeSearchSignals for large graphs
+// because PPR only iterates over ~100 candidate nodes instead of all nodes.
+func (g *GraphEngine) ComputeSearchSignalsSubgraph(seedIDs, candidateIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
+	g.mu.RLock()
+	ppr = g.personalizedPageRankSubgraphLocked(seedIDs, candidateIDs)
+
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		inDegree = make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			inDegree[k] = v
+		}
+		g.mu.RUnlock()
+		return ppr, inDegree
+	}
+	g.mu.RUnlock()
+
+	// Need write lock to compute and cache in-degree
+	g.mu.Lock()
 	if g.inDegreeValid && g.inDegreeCache != nil {
 		inDegree = make(map[string]float64, len(g.inDegreeCache))
 		for k, v := range g.inDegreeCache {

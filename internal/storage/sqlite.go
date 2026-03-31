@@ -500,7 +500,7 @@ func (s *Store) SearchLexical(query string, limit int) ([]types.SearchResult, er
 
 	rows, err := s.db.Query(`
 		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
-		       bm25(nodes_fts) as score
+		       bm25(nodes_fts, 10.0, 1.0, 0.0) as score
 		FROM nodes_fts fts
 		JOIN nodes n ON n.id = fts.node_id
 		WHERE nodes_fts MATCH ?

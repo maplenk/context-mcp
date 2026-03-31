@@ -51,6 +51,9 @@ var stopWords = map[string]bool{
 	"it": true, "its": true, "if": true, "then": true, "else": true,
 	"when": true, "where": true, "how": true, "what": true, "which": true,
 	"who": true, "whom": true, "why": true,
+	// Domain stop words: query-structure noise that doesn't help code search
+	"complete": true, "flow": true, "end": true, "logic": true,
+	"entire": true, "full": true, "whole": true,
 }
 
 // stopWordsMu protects concurrent access to the stopWords map.
@@ -121,8 +124,8 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	}
 
 	candidateLimit := limit * 5
-	if candidateLimit < 30 {
-		candidateLimit = 30
+	if candidateLimit < 100 {
+		candidateLimit = 100
 	}
 
 	// Enhance query for FTS5
@@ -163,8 +166,8 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// Normalize semantic scores to [0,1]
 	semanticScores := normalizeScores(semanticResults)
 
-	// Compute graph-derived signals (PPR + InDegree) under a single lock
-	// acquisition to prevent race conditions from concurrent graph mutations.
+	// Compute graph-derived signals (PPR + InDegree).
+	// PPR runs on the candidate subgraph only (not the full graph) for speed.
 	var pprScores map[string]float64
 	var inDegreeScores map[string]float64
 	if h.graph != nil && len(lexicalResults) > 0 {
@@ -188,7 +191,14 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 				seedSet[id] = true
 			}
 		}
-		rawPPR, rawInDegree := h.graph.ComputeSearchSignals(seeds)
+
+		// Collect candidate IDs from lexical + semantic results
+		candidateIDs := make([]string, 0, len(candidates))
+		for id := range candidates {
+			candidateIDs = append(candidateIDs, id)
+		}
+
+		rawPPR, rawInDegree := h.graph.ComputeSearchSignalsSubgraph(seeds, candidateIDs)
 		pprScores = normalizeMap(rawPPR)
 		inDegreeScores = rawInDegree // already [0,1] normalized
 	} else if h.graph != nil {
@@ -413,18 +423,42 @@ func safeGet(m map[string]float64, key string) float64 {
 	return m[key]
 }
 
-// applyPerFileCap limits results to maxPerFile entries per unique file_path
+// applyPerFileCap limits results to maxPerFile entries per unique file_path.
+// Helper files (_ide_helper, generated, .d.ts) are capped at 1 to prevent
+// large auto-generated files from dominating results.
 func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
 	fileCounts := make(map[string]int)
 	var capped []types.SearchResult
 
 	for _, r := range results {
+		cap := maxPerFile
+		if isHelperFile(r.Node.FilePath) {
+			cap = 1
+		}
 		count := fileCounts[r.Node.FilePath]
-		if count < maxPerFile {
+		if count < cap {
 			capped = append(capped, r)
 			fileCounts[r.Node.FilePath] = count + 1
 		}
 	}
 
 	return capped
+}
+
+// isHelperFile returns true for auto-generated or helper files that should
+// have reduced per-file caps in search results.
+func isHelperFile(filePath string) bool {
+	lower := strings.ToLower(filePath)
+	if strings.Contains(lower, "_ide_helper") || strings.HasSuffix(lower, ".d.ts") {
+		return true
+	}
+	// Match "generated" only as a path component or file prefix to avoid false positives
+	// like "UserGeneratedContent.php"
+	for _, part := range strings.Split(lower, "/") {
+		if part == "generated" || strings.HasPrefix(part, "generated.") ||
+			strings.HasPrefix(part, "generated_") {
+			return true
+		}
+	}
+	return false
 }
