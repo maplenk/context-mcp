@@ -190,7 +190,7 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 	graphEngine.BuildFromEdges(storedEdges)
 
 	// Create embedder and search engine
-	embedder := embedding.NewTFIDFEmbedder()
+	embedder := embedding.NewTFIDFEmbedder(384)
 	searchEng := search.New(store, embedder, graphEngine)
 
 	// Set up MCP server with tool handlers

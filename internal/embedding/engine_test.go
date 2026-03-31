@@ -178,7 +178,7 @@ func TestCosineSimilarity_DifferentIsLessThanOne(t *testing.T) {
 
 // TestTFIDFEmbedder_Dimension verifies that Embed returns a 384-dimensional vector.
 func TestTFIDFEmbedder_Dimension(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 	vec, err := e.Embed("hello world")
 	if err != nil {
 		t.Fatalf("Embed error: %v", err)
@@ -190,7 +190,7 @@ func TestTFIDFEmbedder_Dimension(t *testing.T) {
 
 // TestTFIDFEmbedder_Deterministic verifies same input always produces same output.
 func TestTFIDFEmbedder_Deterministic(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 	const text = "deterministic embedding test"
 
 	vec1, err := e.Embed(text)
@@ -211,7 +211,7 @@ func TestTFIDFEmbedder_Deterministic(t *testing.T) {
 
 // TestTFIDFEmbedder_Normalized verifies that the L2 norm is approximately 1.0.
 func TestTFIDFEmbedder_Normalized(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 	vec, err := e.Embed("test normalization of embedding vector")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
@@ -230,7 +230,7 @@ func TestTFIDFEmbedder_Normalized(t *testing.T) {
 // TestTFIDFEmbedder_SemanticLocality verifies that similar inputs produce more similar
 // vectors than dissimilar inputs. This is the KEY property that HashEmbedder lacks.
 func TestTFIDFEmbedder_SemanticLocality(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 
 	// Two similar code descriptions
 	vecA, _ := e.Embed("ReadFile reads a file from disk")
@@ -250,7 +250,7 @@ func TestTFIDFEmbedder_SemanticLocality(t *testing.T) {
 // TestTFIDFEmbedder_CamelCaseSimilarity verifies that CamelCase identifiers with
 // shared components produce similar vectors.
 func TestTFIDFEmbedder_CamelCaseSimilarity(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 
 	vecA, _ := e.Embed("ComputeChecksum")
 	vecB, _ := e.Embed("ComputeHash")
@@ -266,7 +266,7 @@ func TestTFIDFEmbedder_CamelCaseSimilarity(t *testing.T) {
 
 // TestTFIDFEmbedder_EmptyString verifies that empty input returns a valid vector.
 func TestTFIDFEmbedder_EmptyString(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 	vec, err := e.Embed("")
 	if err != nil {
 		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
@@ -278,7 +278,7 @@ func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 
 // TestTFIDFEmbedder_EmbedBatch verifies batch embedding works correctly.
 func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 	texts := []string{
 		"first text about reading files",
 		"second text about database queries",
@@ -301,7 +301,7 @@ func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
 
 // TestTFIDFEmbedder_SelfSimilarityIsOne verifies cosine similarity of a vector with itself is ~1.0.
 func TestTFIDFEmbedder_SelfSimilarityIsOne(t *testing.T) {
-	e := NewTFIDFEmbedder()
+	e := NewTFIDFEmbedder(384)
 	vec, err := e.Embed("cosine similarity self test for tfidf")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
