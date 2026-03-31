@@ -2,7 +2,9 @@ package types
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 // NodeType represents the type of an AST node
@@ -35,6 +37,51 @@ func (nt NodeType) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// MarshalJSON encodes a NodeType as its string name (H46).
+func (nt NodeType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(nt.String())
+}
+
+// UnmarshalJSON decodes a NodeType from its string name or numeric value (H46).
+func (nt *NodeType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		switch s {
+		case "function":
+			*nt = NodeTypeFunction
+		case "class":
+			*nt = NodeTypeClass
+		case "struct":
+			*nt = NodeTypeStruct
+		case "method":
+			*nt = NodeTypeMethod
+		case "interface":
+			*nt = NodeTypeInterface
+		case "file":
+			*nt = NodeTypeFile
+		case "unknown":
+			*nt = 0
+		default:
+			return fmt.Errorf("unknown NodeType: %q", s)
+		}
+		return nil
+	}
+	// Numeric fallback for backwards compatibility
+	var n uint8
+	if err := json.Unmarshal(data, &n); err != nil {
+		return fmt.Errorf("cannot unmarshal NodeType from %s", string(data))
+	}
+	*nt = NodeType(n)
+	return nil
+}
+
+// nodeTypeFromString parses a string into a NodeType (used internally).
+func nodeTypeFromString(s string) (NodeType, error) {
+	var nt NodeType
+	err := nt.UnmarshalJSON([]byte(strconv.Quote(s)))
+	return nt, err
 }
 
 // EdgeType represents the type of relationship between AST nodes
@@ -70,6 +117,53 @@ func (et EdgeType) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// MarshalJSON encodes an EdgeType as its string name (H46).
+func (et EdgeType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(et.String())
+}
+
+// UnmarshalJSON decodes an EdgeType from its string name or numeric value (H46).
+func (et *EdgeType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		switch s {
+		case "calls":
+			*et = EdgeTypeCalls
+		case "imports":
+			*et = EdgeTypeImports
+		case "implements":
+			*et = EdgeTypeImplements
+		case "instantiates":
+			*et = EdgeTypeInstantiates
+		case "defines":
+			*et = EdgeTypeDefines
+		case "defines_method":
+			*et = EdgeTypeDefinesMethod
+		case "inherits":
+			*et = EdgeTypeInherits
+		case "unknown":
+			*et = 0
+		default:
+			return fmt.Errorf("unknown EdgeType: %q", s)
+		}
+		return nil
+	}
+	// Numeric fallback for backwards compatibility
+	var n uint8
+	if err := json.Unmarshal(data, &n); err != nil {
+		return fmt.Errorf("cannot unmarshal EdgeType from %s", string(data))
+	}
+	*et = EdgeType(n)
+	return nil
+}
+
+// edgeTypeFromString parses a string into an EdgeType (used internally).
+func edgeTypeFromString(s string) (EdgeType, error) {
+	var et EdgeType
+	err := et.UnmarshalJSON([]byte(strconv.Quote(s)))
+	return et, err
 }
 
 // ASTNode represents a parsed code symbol (function, class, struct, method)
