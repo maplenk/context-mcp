@@ -537,6 +537,283 @@ func TestSearch_WhitespaceOnlyQuery(t *testing.T) {
 	t.Logf("Search('   ') returned %d results", len(results))
 }
 
+// ---- M7: Direct unit tests for isHelperFile and applyPerFileCap ----
+
+// TestIsHelperFile verifies that auto-generated and IDE helper files are correctly
+// identified, and regular source files are not misclassified.
+func TestIsHelperFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		want     bool
+	}{
+		// Positive cases: should be classified as helper files
+		{"ide helper PHP", "_ide_helper.php", true},
+		{"ide helper models", "_ide_helper_models.php", true},
+		{"nested ide helper", "vendor/laravel/_ide_helper.php", true},
+		{"ide helper mixed case", "src/_IDE_Helper.php", true},
+		{"TypeScript declaration", "types/react.d.ts", true},
+		{"nested d.ts", "node_modules/@types/node/index.d.ts", true},
+		{"generated directory", "generated/models.go", true},
+		{"generated prefix with dot", "src/generated.pb.go", true},
+		{"generated prefix with underscore", "src/generated_types.go", true},
+		{"generated dir nested", "api/generated/client.ts", true},
+
+		// Negative cases: should NOT be classified as helper files
+		{"regular Go file", "main.go", false},
+		{"regular TypeScript", "app.ts", false},
+		{"regular PHP", "Controller.php", false},
+		{"file with generate in name", "UserGeneratedContent.php", false},
+		{"code generator", "codegenerator.go", false},
+		{"regenerate script", "regenerate.sh", false},
+		{"path with generated substring", "src/regenerated/foo.go", false},
+		{"empty path", "", false},
+		{"just a dot ts", "foo.ts", false},
+		{"d.tsx file", "component.d.tsx", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isHelperFile(tt.filePath)
+			if got != tt.want {
+				t.Errorf("isHelperFile(%q) = %v, want %v", tt.filePath, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyPerFileCap verifies that per-file result capping works correctly
+// for various input distributions.
+func TestApplyPerFileCap(t *testing.T) {
+	// Helper to build search results with given file paths and scores.
+	makeResults := func(entries []struct {
+		filePath string
+		score    float64
+	}) []types.SearchResult {
+		var results []types.SearchResult
+		for i, e := range entries {
+			results = append(results, types.SearchResult{
+				Node: types.ASTNode{
+					ID:       string(rune('A' + i)),
+					FilePath: e.filePath,
+				},
+				Score: e.score,
+			})
+		}
+		return results
+	}
+
+	t.Run("empty input", func(t *testing.T) {
+		result := applyPerFileCap(nil, 3)
+		if len(result) != 0 {
+			t.Errorf("expected 0 results for nil input, got %d", len(result))
+		}
+		result2 := applyPerFileCap([]types.SearchResult{}, 3)
+		if len(result2) != 0 {
+			t.Errorf("expected 0 results for empty input, got %d", len(result2))
+		}
+	})
+
+	t.Run("single file exceeds cap", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"main.go", 1.0},
+			{"main.go", 0.9},
+			{"main.go", 0.8},
+			{"main.go", 0.7},
+			{"main.go", 0.6},
+		})
+		result := applyPerFileCap(input, 3)
+		if len(result) != 3 {
+			t.Errorf("expected 3 results with cap=3, got %d", len(result))
+		}
+	})
+
+	t.Run("single file under cap", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"main.go", 1.0},
+			{"main.go", 0.9},
+		})
+		result := applyPerFileCap(input, 3)
+		if len(result) != 2 {
+			t.Errorf("expected 2 results (under cap), got %d", len(result))
+		}
+	})
+
+	t.Run("multiple files each under cap", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"a.go", 1.0},
+			{"b.go", 0.9},
+			{"a.go", 0.8},
+			{"b.go", 0.7},
+		})
+		result := applyPerFileCap(input, 3)
+		if len(result) != 4 {
+			t.Errorf("expected all 4 results (each file has <=3), got %d", len(result))
+		}
+	})
+
+	t.Run("multiple files with mixed counts", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"a.go", 1.0},
+			{"a.go", 0.9},
+			{"a.go", 0.8},
+			{"a.go", 0.7}, // 4th from a.go, should be capped
+			{"b.go", 0.6},
+			{"b.go", 0.5},
+		})
+		result := applyPerFileCap(input, 3)
+		// a.go: 3 kept, b.go: 2 kept = 5 total
+		if len(result) != 5 {
+			t.Errorf("expected 5 results, got %d", len(result))
+		}
+		// Verify a.go count
+		aCount := 0
+		for _, r := range result {
+			if r.Node.FilePath == "a.go" {
+				aCount++
+			}
+		}
+		if aCount != 3 {
+			t.Errorf("expected 3 results from a.go, got %d", aCount)
+		}
+	})
+
+	t.Run("helper file capped at 1", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"_ide_helper.php", 1.0},
+			{"_ide_helper.php", 0.9},
+			{"_ide_helper.php", 0.8},
+			{"regular.go", 0.7},
+			{"regular.go", 0.6},
+		})
+		result := applyPerFileCap(input, 3)
+		// _ide_helper.php: capped at 1, regular.go: 2 (under cap of 3) = 3 total
+		helperCount := 0
+		regularCount := 0
+		for _, r := range result {
+			switch r.Node.FilePath {
+			case "_ide_helper.php":
+				helperCount++
+			case "regular.go":
+				regularCount++
+			}
+		}
+		if helperCount != 1 {
+			t.Errorf("expected 1 result from _ide_helper.php (helper cap=1), got %d", helperCount)
+		}
+		if regularCount != 2 {
+			t.Errorf("expected 2 results from regular.go, got %d", regularCount)
+		}
+	})
+
+	t.Run("d.ts helper file capped at 1", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"types/index.d.ts", 1.0},
+			{"types/index.d.ts", 0.9},
+			{"src/main.ts", 0.8},
+			{"src/main.ts", 0.7},
+			{"src/main.ts", 0.6},
+		})
+		result := applyPerFileCap(input, 3)
+		dtsCount := 0
+		mainCount := 0
+		for _, r := range result {
+			switch r.Node.FilePath {
+			case "types/index.d.ts":
+				dtsCount++
+			case "src/main.ts":
+				mainCount++
+			}
+		}
+		if dtsCount != 1 {
+			t.Errorf("expected 1 result from d.ts file (helper cap=1), got %d", dtsCount)
+		}
+		if mainCount != 3 {
+			t.Errorf("expected 3 results from src/main.ts, got %d", mainCount)
+		}
+	})
+
+	t.Run("generated file capped at 1", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"generated/models.go", 1.0},
+			{"generated/models.go", 0.9},
+			{"app.go", 0.8},
+		})
+		result := applyPerFileCap(input, 3)
+		genCount := 0
+		for _, r := range result {
+			if r.Node.FilePath == "generated/models.go" {
+				genCount++
+			}
+		}
+		if genCount != 1 {
+			t.Errorf("expected 1 result from generated/ file (helper cap=1), got %d", genCount)
+		}
+	})
+
+	t.Run("cap of 1 for all files", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"a.go", 1.0},
+			{"a.go", 0.9},
+			{"b.go", 0.8},
+			{"b.go", 0.7},
+		})
+		result := applyPerFileCap(input, 1)
+		if len(result) != 2 {
+			t.Errorf("expected 2 results with cap=1 across 2 files, got %d", len(result))
+		}
+	})
+
+	t.Run("preserves order", func(t *testing.T) {
+		input := makeResults([]struct {
+			filePath string
+			score    float64
+		}{
+			{"a.go", 1.0},
+			{"b.go", 0.9},
+			{"a.go", 0.8},
+			{"b.go", 0.7},
+			{"a.go", 0.6}, // capped
+		})
+		result := applyPerFileCap(input, 2)
+		// Should keep: a.go(1.0), b.go(0.9), a.go(0.8), b.go(0.7)
+		if len(result) != 4 {
+			t.Fatalf("expected 4 results, got %d", len(result))
+		}
+		// Verify order is preserved
+		for i := 1; i < len(result); i++ {
+			if result[i].Score > result[i-1].Score {
+				t.Errorf("order not preserved: result[%d].Score=%f > result[%d].Score=%f",
+					i, result[i].Score, i-1, result[i-1].Score)
+			}
+		}
+	})
+}
+
 // TestBuildFTSQuery_AllStopWords verifies that buildFTSQuery returns a
 // non-empty fallback when every token is a stop word (prevents empty FTS query).
 func TestBuildFTSQuery_AllStopWords(t *testing.T) {
