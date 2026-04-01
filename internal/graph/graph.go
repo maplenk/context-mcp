@@ -621,40 +621,469 @@ func (g *GraphEngine) ResetChangeCount() {
 	g.changeCount = 0
 }
 
-// ComputeSearchSignals computes PPR and InDegree for search under a single write lock
-// to prevent race conditions where BuildFromEdges could replace the graph between
-// the PPR computation and in-degree read.
+// ComputeSearchSignals computes PPR and InDegree for search. Takes a brief read
+// lock to snapshot graph data and in-degree cache, then releases the lock before
+// running the iterative PPR computation. This avoids serializing concurrent searches.
 func (g *GraphEngine) ComputeSearchSignals(activeNodeIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	ppr = g.personalizedPageRankLocked(activeNodeIDs)
-	if g.inDegreeValid && g.inDegreeCache != nil {
-		inDegree = make(map[string]float64, len(g.inDegreeCache))
-		for k, v := range g.inDegreeCache {
-			inDegree[k] = v
+	// Phase 1: snapshot full graph data and in-degree under a read lock
+	snap, inDeg, needInDegree := g.snapshotFullGraphData(activeNodeIDs)
+
+	// Phase 2: if in-degree cache was not populated, compute under write lock
+	if needInDegree {
+		g.mu.Lock()
+		if g.inDegreeValid && g.inDegreeCache != nil {
+			inDeg = make(map[string]float64, len(g.inDegreeCache))
+			for k, v := range g.inDegreeCache {
+				inDeg[k] = v
+			}
+		} else {
+			inDeg = g.computeInDegreeLocked()
 		}
-	} else {
-		inDegree = g.computeInDegreeLocked()
+		g.mu.Unlock()
 	}
+	inDegree = inDeg
+
+	// Phase 3: run PPR on the snapshot with no lock held
+	ppr = computeFullPPROnSnapshot(snap)
 	return ppr, inDegree
 }
 
-// ComputeSearchSignalsSubgraph computes PPR on the candidate subgraph and returns
-// InDegree from cache. Uses a single write lock to prevent race conditions where
-// BuildFromEdges could replace the graph between PPR and in-degree computations.
-func (g *GraphEngine) ComputeSearchSignalsSubgraph(seedIDs, candidateIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	ppr = g.personalizedPageRankSubgraphLocked(seedIDs, candidateIDs)
+// fullGraphSnapshot holds a deep-copied graph needed for full PPR computation.
+type fullGraphSnapshot struct {
+	// allNodeIDs: every node ID in the graph
+	allNodeIDs []int64
+	// adjacency: for each node, its list of successor node IDs
+	adjacency map[int64][]int64
+	// outDegree: for each node, its out-degree (needed to distinguish 0-successors from missing)
+	outDegree map[int64]int
+	// activeInt64s: the active/seed node IDs mapped to int64
+	activeInt64s []int64
+	// reverseMap: int64 → hash ID for all nodes
+	reverseMap map[int64]string
+	// totalNodes: total node count
+	totalNodes int
+}
+
+// snapshotFullGraphData takes a read lock to deep-copy the full graph structure.
+func (g *GraphEngine) snapshotFullGraphData(activeNodeIDs []string) (fullGraphSnapshot, map[string]float64, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	n := g.dg.Nodes().Len()
+	snap := fullGraphSnapshot{
+		allNodeIDs: make([]int64, 0, n),
+		adjacency:  make(map[int64][]int64, n),
+		outDegree:  make(map[int64]int, n),
+		reverseMap: make(map[int64]string, n),
+		totalNodes: n,
+	}
+
+	if n == 0 {
+		// Copy in-degree
+		var inDegree map[string]float64
+		needInDegree := false
+		if g.inDegreeValid && g.inDegreeCache != nil {
+			inDegree = make(map[string]float64, len(g.inDegreeCache))
+			for k, v := range g.inDegreeCache {
+				inDegree[k] = v
+			}
+		} else {
+			needInDegree = true
+		}
+		return snap, inDegree, needInDegree
+	}
+
+	// Copy all node IDs, reverse map, and adjacency lists
+	nodes := g.dg.Nodes()
+	for nodes.Next() {
+		id := nodes.Node().ID()
+		snap.allNodeIDs = append(snap.allNodeIDs, id)
+		if hashID, ok := g.reverseMap[id]; ok {
+			snap.reverseMap[id] = hashID
+		}
+		succs := g.dg.From(id)
+		outDeg := succs.Len()
+		snap.outDegree[id] = outDeg
+		if outDeg > 0 {
+			succList := make([]int64, 0, outDeg)
+			succs.Reset()
+			for succs.Next() {
+				succList = append(succList, succs.Node().ID())
+			}
+			snap.adjacency[id] = succList
+		}
+	}
+
+	// Map active node hash IDs to int64
+	for _, hashID := range activeNodeIDs {
+		if id, ok := g.idMap[hashID]; ok {
+			snap.activeInt64s = append(snap.activeInt64s, id)
+		}
+	}
+
+	// Copy in-degree cache if valid
+	var inDegree map[string]float64
+	needInDegree := false
 	if g.inDegreeValid && g.inDegreeCache != nil {
 		inDegree = make(map[string]float64, len(g.inDegreeCache))
 		for k, v := range g.inDegreeCache {
 			inDegree[k] = v
 		}
 	} else {
-		inDegree = g.computeInDegreeLocked()
+		needInDegree = true
 	}
+
+	return snap, inDegree, needInDegree
+}
+
+// computeFullPPROnSnapshot runs personalized PageRank on a pre-snapshotted full graph.
+// No locks are needed — all data is owned by the caller.
+func computeFullPPROnSnapshot(snap fullGraphSnapshot) map[string]float64 {
+	n := snap.totalNodes
+	if n == 0 {
+		return nil
+	}
+
+	const (
+		alpha   = 0.85  // damping factor
+		epsilon = 1e-6  // convergence threshold
+		maxIter = 100   // max iterations
+	)
+
+	// Build teleportation vector (personalization)
+	teleport := make(map[int64]float64)
+	if len(snap.activeInt64s) > 0 {
+		weight := 1.0 / float64(len(snap.activeInt64s))
+		for _, id := range snap.activeInt64s {
+			teleport[id] += weight
+		}
+	}
+	// If no active nodes mapped, fall back to uniform teleportation
+	if len(teleport) == 0 {
+		weight := 1.0 / float64(n)
+		for _, id := range snap.allNodeIDs {
+			teleport[id] = weight
+		}
+	}
+
+	// Initialize rank vector uniformly
+	rank := make(map[int64]float64, n)
+	initVal := 1.0 / float64(n)
+	for _, id := range snap.allNodeIDs {
+		rank[id] = initVal
+	}
+
+	// Power iteration
+	for iter := 0; iter < maxIter; iter++ {
+		newRank := make(map[int64]float64, n)
+
+		// Teleportation component: (1 - alpha) * teleport[id]
+		for id, t := range teleport {
+			newRank[id] = (1 - alpha) * t
+		}
+
+		// Random walk component
+		for _, nodeID := range snap.allNodeIDs {
+			outDeg := snap.outDegree[nodeID]
+			if outDeg == 0 {
+				// Dangling node: distribute its rank to the teleportation vector
+				for id, t := range teleport {
+					newRank[id] += alpha * rank[nodeID] * t
+				}
+			} else {
+				// Distribute rank equally to successors
+				share := alpha * rank[nodeID] / float64(outDeg)
+				for _, succID := range snap.adjacency[nodeID] {
+					newRank[succID] += share
+				}
+			}
+		}
+
+		// Check convergence (L1 norm of difference)
+		diff := 0.0
+		for id, r := range newRank {
+			d := r - rank[id]
+			if d < 0 {
+				d = -d
+			}
+			diff += d
+		}
+		// Also count mass lost from nodes in rank but not in newRank
+		for id, r := range rank {
+			if _, ok := newRank[id]; !ok {
+				diff += r
+			}
+		}
+		rank = newRank
+		if diff < epsilon {
+			break
+		}
+	}
+
+	// Convert to hash IDs
+	result := make(map[string]float64, n)
+	for id, r := range rank {
+		if hashID, ok := snap.reverseMap[id]; ok {
+			result[hashID] = r
+		}
+	}
+	return result
+}
+
+// ComputeSearchSignalsSubgraph computes PPR on the candidate subgraph and returns
+// InDegree from cache. Takes a brief read lock to snapshot the subgraph data and
+// in-degree cache, then releases the lock before running PPR computation.
+// This avoids holding any lock during the iterative PPR walk, which would serialize
+// all concurrent searches unnecessarily.
+func (g *GraphEngine) ComputeSearchSignalsSubgraph(seedIDs, candidateIDs []string) (ppr map[string]float64, inDegree map[string]float64) {
+	// Phase 1: snapshot subgraph data and in-degree under a read lock
+	snap, inDeg, needInDegree := g.snapshotSubgraphData(seedIDs, candidateIDs)
+
+	// Phase 2: if in-degree cache was not populated, compute it under a write lock
+	// (computeInDegreeLocked mutates the cache). This is rare — only on first call
+	// after a graph rebuild.
+	if needInDegree {
+		g.mu.Lock()
+		if g.inDegreeValid && g.inDegreeCache != nil {
+			// Another goroutine populated it while we waited
+			inDeg = make(map[string]float64, len(g.inDegreeCache))
+			for k, v := range g.inDegreeCache {
+				inDeg[k] = v
+			}
+		} else {
+			inDeg = g.computeInDegreeLocked()
+		}
+		g.mu.Unlock()
+	}
+	inDegree = inDeg
+
+	// Phase 3: run PPR on the snapshot with no lock held
+	ppr = computePPROnSnapshot(snap)
 	return ppr, inDegree
+}
+
+// subgraphSnapshot holds a deep-copied subset of the graph needed for PPR computation.
+type subgraphSnapshot struct {
+	// candidateSet: int64 node IDs that are candidates
+	candidateSet map[int64]bool
+	// adjacency: for each candidate node, the list of successor node IDs within the candidate set
+	adjacency map[int64][]int64
+	// seedIDs mapped to int64
+	seedInt64s []int64
+	// seedSuccessors: for seeds not in candidate set, their successors in candidate set
+	seedSuccessors map[int64][]int64
+	// seedPredecessors: for seeds not in candidate set, their predecessors in candidate set
+	seedPredecessors map[int64][]int64
+	// reverseMap subset: int64 → hash ID for candidates only
+	reverseMap map[int64]string
+}
+
+// snapshotSubgraphData takes a read lock, deep-copies the subgraph data needed
+// for PPR computation, copies the in-degree cache, and returns everything.
+// Returns (snapshot, inDegree, needInDegree). If needInDegree is true, the caller
+// must compute in-degree separately (requires a write lock).
+func (g *GraphEngine) snapshotSubgraphData(seedIDs, candidateIDs []string) (subgraphSnapshot, map[string]float64, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	snap := subgraphSnapshot{
+		candidateSet:     make(map[int64]bool, len(candidateIDs)),
+		adjacency:        make(map[int64][]int64),
+		seedSuccessors:   make(map[int64][]int64),
+		seedPredecessors: make(map[int64][]int64),
+		reverseMap:       make(map[int64]string),
+	}
+
+	// Map candidate hash IDs to int64 IDs
+	for _, hashID := range candidateIDs {
+		if id, ok := g.idMap[hashID]; ok {
+			snap.candidateSet[id] = true
+			// Copy reverse map entry
+			snap.reverseMap[id] = hashID
+		}
+	}
+
+	// Map seed hash IDs to int64 IDs
+	for _, hashID := range seedIDs {
+		if id, ok := g.idMap[hashID]; ok {
+			snap.seedInt64s = append(snap.seedInt64s, id)
+		}
+	}
+
+	// Copy adjacency lists for each candidate node (successors within candidate set)
+	for nodeID := range snap.candidateSet {
+		succs := g.dg.From(nodeID)
+		var subgraphSuccs []int64
+		for succs.Next() {
+			succID := succs.Node().ID()
+			if snap.candidateSet[succID] {
+				subgraphSuccs = append(subgraphSuccs, succID)
+			}
+		}
+		// Always store the entry (even if nil) so we can distinguish "no successors" from "missing"
+		snap.adjacency[nodeID] = subgraphSuccs
+	}
+
+	// Copy seed neighbor lists (for seeds not in candidate set, used for teleport proxy)
+	for _, seedID := range snap.seedInt64s {
+		if !snap.candidateSet[seedID] {
+			succs := g.dg.From(seedID)
+			var filteredSuccs []int64
+			for succs.Next() {
+				succID := succs.Node().ID()
+				if snap.candidateSet[succID] {
+					filteredSuccs = append(filteredSuccs, succID)
+				}
+			}
+			snap.seedSuccessors[seedID] = filteredSuccs
+
+			preds := g.dg.To(seedID)
+			var filteredPreds []int64
+			for preds.Next() {
+				predID := preds.Node().ID()
+				if snap.candidateSet[predID] {
+					filteredPreds = append(filteredPreds, predID)
+				}
+			}
+			snap.seedPredecessors[seedID] = filteredPreds
+		}
+	}
+
+	// Copy in-degree cache if valid
+	var inDegree map[string]float64
+	needInDegree := false
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		inDegree = make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			inDegree[k] = v
+		}
+	} else {
+		needInDegree = true
+	}
+
+	return snap, inDegree, needInDegree
+}
+
+// computePPROnSnapshot runs personalized PageRank on a pre-snapshotted subgraph.
+// No locks are needed — all data is owned by the caller.
+func computePPROnSnapshot(snap subgraphSnapshot) map[string]float64 {
+	if len(snap.candidateSet) == 0 {
+		return nil
+	}
+
+	n := len(snap.candidateSet)
+
+	const (
+		alpha   = 0.85
+		epsilon = 1e-4
+		maxIter = 15
+	)
+
+	// Build teleportation vector from seeds (only those in candidate set)
+	teleport := make(map[int64]float64)
+	for _, id := range snap.seedInt64s {
+		if snap.candidateSet[id] {
+			teleport[id] += 1.0
+		}
+	}
+
+	// Normalize teleport vector
+	if len(teleport) == 0 {
+		// Seeds are outside candidate set — use their neighbors in candidates as proxies
+		for _, seedID := range snap.seedInt64s {
+			for _, succID := range snap.seedSuccessors[seedID] {
+				teleport[succID] += 1.0
+			}
+			for _, predID := range snap.seedPredecessors[seedID] {
+				teleport[predID] += 1.0
+			}
+		}
+		// If still empty, fall back to uniform; otherwise normalize proxy weights
+		if len(teleport) == 0 {
+			weight := 1.0 / float64(n)
+			for id := range snap.candidateSet {
+				teleport[id] = weight
+			}
+		} else {
+			sum := 0.0
+			for _, v := range teleport {
+				sum += v
+			}
+			for id := range teleport {
+				teleport[id] /= sum
+			}
+		}
+	} else {
+		sum := 0.0
+		for _, v := range teleport {
+			sum += v
+		}
+		for id := range teleport {
+			teleport[id] /= sum
+		}
+	}
+
+	// Initialize rank uniformly over candidates
+	rank := make(map[int64]float64, n)
+	initVal := 1.0 / float64(n)
+	for id := range snap.candidateSet {
+		rank[id] = initVal
+	}
+
+	// Power iteration on subgraph
+	for iter := 0; iter < maxIter; iter++ {
+		newRank := make(map[int64]float64, n)
+
+		// Teleportation component
+		for id, t := range teleport {
+			newRank[id] = (1 - alpha) * t
+		}
+
+		// Random walk: only traverse edges within candidate set
+		for nodeID := range snap.candidateSet {
+			subgraphSuccs := snap.adjacency[nodeID]
+			if len(subgraphSuccs) == 0 {
+				// Dangling node in subgraph: distribute to teleport
+				for id, t := range teleport {
+					newRank[id] += alpha * rank[nodeID] * t
+				}
+			} else {
+				share := alpha * rank[nodeID] / float64(len(subgraphSuccs))
+				for _, succID := range subgraphSuccs {
+					newRank[succID] += share
+				}
+			}
+		}
+
+		// Check convergence
+		diff := 0.0
+		for id, r := range newRank {
+			d := r - rank[id]
+			if d < 0 {
+				d = -d
+			}
+			diff += d
+		}
+		// Also count mass lost from nodes in rank but not in newRank
+		for id, r := range rank {
+			if _, ok := newRank[id]; !ok {
+				diff += r
+			}
+		}
+		rank = newRank
+		if diff < epsilon {
+			break
+		}
+	}
+
+	// Convert to hash IDs
+	result := make(map[string]float64, n)
+	for id, r := range rank {
+		if hashID, ok := snap.reverseMap[id]; ok {
+			result[hashID] = r
+		}
+	}
+	return result
 }
 
 // HasNode checks if a node exists in the graph
