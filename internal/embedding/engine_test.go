@@ -114,7 +114,10 @@ func TestSerializeDeserialize_Roundtrip(t *testing.T) {
 	}
 
 	blob := SerializeFloat32(original)
-	recovered := DeserializeFloat32(blob)
+	recovered, err := DeserializeFloat32(blob)
+	if err != nil {
+		t.Fatalf("DeserializeFloat32: %v", err)
+	}
 
 	if len(recovered) != len(original) {
 		t.Fatalf("length mismatch: got %d, want %d", len(recovered), len(original))
@@ -264,7 +267,7 @@ func TestTFIDFEmbedder_CamelCaseSimilarity(t *testing.T) {
 	}
 }
 
-// TestTFIDFEmbedder_EmptyString verifies that empty input returns a valid vector.
+// TestTFIDFEmbedder_EmptyString verifies that empty input returns a zero vector (M52).
 func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 	e := NewTFIDFEmbedder(384)
 	vec, err := e.Embed("")
@@ -273,6 +276,13 @@ func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 	}
 	if len(vec) != GetEmbeddingDim() {
 		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	}
+	// M52: Verify it's a zero vector so empty chunks don't falsely match each other
+	for i, v := range vec {
+		if v != 0 {
+			t.Errorf("expected zero vector for empty input, but dim %d = %f", i, v)
+			break
+		}
 	}
 }
 
@@ -356,16 +366,17 @@ func TestTokenize(t *testing.T) {
 	}
 }
 
-// TestCosineSimilarity_DimensionMismatch verifies that CosineSimilarity returns 0
-// when given vectors of different dimensions rather than panicking.
+// TestCosineSimilarity_DimensionMismatch verifies that CosineSimilarity returns -2
+// (M50: sentinel value outside valid [-1, 1] range) when given vectors of different
+// dimensions rather than silently returning 0 which hides bugs.
 func TestCosineSimilarity_DimensionMismatch(t *testing.T) {
 	vecA := []float32{0.1, 0.2, 0.3}
 	vecB := []float32{0.4, 0.5}
 
 	// Must not panic
 	sim := CosineSimilarity(vecA, vecB)
-	if sim != 0 {
-		t.Errorf("expected 0 for dimension mismatch, got %f", sim)
+	if sim != -2 {
+		t.Errorf("expected -2 for dimension mismatch, got %f", sim)
 	}
 }
 
@@ -382,16 +393,29 @@ func TestEmbeddingDimMismatch_StorageSafe(t *testing.T) {
 
 	// Serialize and deserialize should preserve exact dimensions
 	blob := SerializeFloat32(vec)
-	recovered := DeserializeFloat32(blob)
+	recovered, err := DeserializeFloat32(blob)
+	if err != nil {
+		t.Fatalf("DeserializeFloat32: %v", err)
+	}
 	if len(recovered) != len(vec) {
 		t.Errorf("deserialized dim %d != original dim %d", len(recovered), len(vec))
 	}
 
-	// A truncated blob should produce a shorter vector (not panic)
-	truncated := blob[:len(blob)/2]
-	short := DeserializeFloat32(truncated)
+	// A truncated blob that is a multiple of 4 should produce a shorter vector
+	truncated := blob[:len(blob)/2] // len(blob)/2 is still a multiple of 4 for 384-dim
+	short, err := DeserializeFloat32(truncated)
+	if err != nil {
+		t.Fatalf("DeserializeFloat32 truncated: %v", err)
+	}
 	if len(short) != len(vec)/2 {
 		t.Errorf("truncated deserialization: expected dim %d, got %d", len(vec)/2, len(short))
+	}
+
+	// M46: A blob with non-multiple-of-4 length should return an error
+	corrupted := blob[:len(blob)-1]
+	_, err = DeserializeFloat32(corrupted)
+	if err == nil {
+		t.Error("expected error for non-multiple-of-4 buffer length, got nil")
 	}
 }
 

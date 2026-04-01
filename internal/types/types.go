@@ -73,7 +73,12 @@ func (nt *NodeType) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &n); err != nil {
 		return fmt.Errorf("cannot unmarshal NodeType from %s", string(data))
 	}
-	*nt = NodeType(n)
+	// M54: Validate numeric value is within the valid range
+	candidate := NodeType(n)
+	if candidate.String() == "unknown" && n != 0 {
+		return fmt.Errorf("invalid NodeType numeric value: %d (valid range: %d–%d)", n, NodeTypeFunction, NodeTypeFile)
+	}
+	*nt = candidate
 	return nil
 }
 
@@ -155,7 +160,12 @@ func (et *EdgeType) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &n); err != nil {
 		return fmt.Errorf("cannot unmarshal EdgeType from %s", string(data))
 	}
-	*et = EdgeType(n)
+	// M54: Validate numeric value is within the valid range
+	candidate := EdgeType(n)
+	if candidate.String() == "unknown" && n != 0 {
+		return fmt.Errorf("invalid EdgeType numeric value: %d (valid range: %d–%d)", n, EdgeTypeCalls, EdgeTypeInherits)
+	}
+	*et = candidate
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unicode/utf8"
 
@@ -31,6 +32,10 @@ type BPETokenizer struct {
 	eosID      int
 	padID      int
 	maxLen     int // max sequence length (0 = no limit)
+
+	// M49: Lazily-built reverse vocab map (id → token string), cached after first use.
+	reverseVocab     map[int]string
+	reverseVocabOnce sync.Once
 }
 
 type bpeMerge struct {
@@ -70,17 +75,23 @@ func NewBPETokenizer(modelDir string) (*BPETokenizer, error) {
 	}
 
 	t := &BPETokenizer{
-		vocab:    tj.Model.Vocab,
-		maxLen:   512, // sensible default for embedding
-		eosID:    151643,
-		padID:    151643,
+		vocab:  tj.Model.Vocab,
+		maxLen: 512, // sensible default for embedding
+		// M55: Defaults are Qwen2-specific (151643). Overridden below if
+		// tokenizer.json contains <|endoftext|> or <|padding|> in added_tokens.
+		eosID: 151643,
+		padID: 151643,
 	}
 
-	// Add special tokens to vocab
+	// Add special tokens to vocab and detect EOS/PAD token IDs from config
 	for _, at := range tj.AddedTokens {
 		t.vocab[at.Content] = at.ID
-		if at.Content == "<|endoftext|>" {
+		switch at.Content {
+		case "<|endoftext|>":
 			t.eosID = at.ID
+			// Default PAD to EOS unless a dedicated pad token is found
+			t.padID = at.ID
+		case "<|padding|>", "<pad>", "[PAD]":
 			t.padID = at.ID
 		}
 	}
@@ -90,6 +101,7 @@ func NewBPETokenizer(modelDir string) (*BPETokenizer, error) {
 	// 2. String format: ["a b", ...] (older HuggingFace)
 	t.merges = make([]bpeMerge, 0, len(tj.Model.Merges))
 	t.mergeRank = make(map[bpeMerge]int, len(tj.Model.Merges))
+	var skippedMerges int
 	for i, raw := range tj.Model.Merges {
 		var merge bpeMerge
 
@@ -103,16 +115,25 @@ func NewBPETokenizer(modelDir string) (*BPETokenizer, error) {
 			if err := json.Unmarshal(raw, &s); err == nil {
 				parts := strings.SplitN(s, " ", 2)
 				if len(parts) != 2 {
+					// M53: Log warning for unparseable merge rules
+					skippedMerges++
+					log.Printf("Warning: skipping unparseable merge rule at index %d: %s", i, string(raw))
 					continue
 				}
 				merge = bpeMerge{a: parts[0], b: parts[1]}
 			} else {
+				// M53: Log warning for unparseable merge rules
+				skippedMerges++
+				log.Printf("Warning: skipping unparseable merge rule at index %d: %s", i, string(raw))
 				continue
 			}
 		}
 
 		t.merges = append(t.merges, merge)
 		t.mergeRank[merge] = i
+	}
+	if skippedMerges > 0 {
+		log.Printf("Warning: skipped %d unparseable merge rules out of %d total", skippedMerges, len(tj.Model.Merges))
 	}
 
 	// Build byte-to-unicode mapping (GPT-2 style)
@@ -229,31 +250,37 @@ func (t *BPETokenizer) applyBPE(text string) []string {
 		tokens[i] = string(r)
 	}
 
-	// Iteratively apply the highest-priority (lowest-rank) merge
+	// M51: Iteratively apply the highest-priority (lowest-rank) merge.
+	// Merge ALL occurrences of the best pair per iteration to reduce
+	// complexity from O(n^2) to O(n*k) where k = number of merge rounds.
 	for len(tokens) > 1 {
 		// Find the merge with the lowest rank among all adjacent pairs
 		bestRank := len(t.merges) // sentinel: higher than any valid rank
-		bestIdx := -1
+		var bestMerge bpeMerge
 
 		for i := 0; i < len(tokens)-1; i++ {
 			m := bpeMerge{a: tokens[i], b: tokens[i+1]}
 			if rank, ok := t.mergeRank[m]; ok && rank < bestRank {
 				bestRank = rank
-				bestIdx = i
+				bestMerge = m
 			}
 		}
 
-		if bestIdx == -1 {
+		if bestRank == len(t.merges) {
 			break // no more applicable merges
 		}
 
-		// Apply the merge at bestIdx
-		merged := tokens[bestIdx] + tokens[bestIdx+1]
-		newTokens := make([]string, 0, len(tokens)-1)
-		newTokens = append(newTokens, tokens[:bestIdx]...)
-		newTokens = append(newTokens, merged)
-		if bestIdx+2 < len(tokens) {
-			newTokens = append(newTokens, tokens[bestIdx+2:]...)
+		// Apply the merge at ALL positions where the best pair occurs
+		newTokens := make([]string, 0, len(tokens))
+		i := 0
+		for i < len(tokens) {
+			if i < len(tokens)-1 && tokens[i] == bestMerge.a && tokens[i+1] == bestMerge.b {
+				newTokens = append(newTokens, tokens[i]+tokens[i+1])
+				i += 2
+			} else {
+				newTokens = append(newTokens, tokens[i])
+				i++
+			}
 		}
 		tokens = newTokens
 	}
@@ -351,16 +378,18 @@ func (t *BPETokenizer) TokenizeToStrings(text string) []string {
 }
 
 // DecodeTokenIDs converts token IDs back to a string (best-effort).
+// M49: The reverse vocab map is built lazily on first call and cached.
 func (t *BPETokenizer) DecodeTokenIDs(ids []int) string {
-	// Build reverse vocab
-	idToToken := make(map[int]string, len(t.vocab))
-	for tok, id := range t.vocab {
-		idToToken[id] = tok
-	}
+	t.reverseVocabOnce.Do(func() {
+		t.reverseVocab = make(map[int]string, len(t.vocab))
+		for tok, id := range t.vocab {
+			t.reverseVocab[id] = tok
+		}
+	})
 
 	var byteChars []rune
 	for _, id := range ids {
-		tok, ok := idToToken[id]
+		tok, ok := t.reverseVocab[id]
 		if !ok {
 			continue
 		}
