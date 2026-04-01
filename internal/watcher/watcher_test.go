@@ -351,6 +351,51 @@ func TestWatcher_FileRenamed(t *testing.T) {
 	}
 }
 
+// M70: .gitignore hot-reload behavior test
+func TestWatcher_GitignoreHotReload(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create initial .gitignore that does NOT exclude "gen/" directory
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("build/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the gen directory before starting the watcher
+	genDir := filepath.Join(dir, "gen")
+	if err := os.MkdirAll(genDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newTestWatcher(t, dir, 50*time.Millisecond)
+
+	// Create a .go file in gen/ — should produce an event (not ignored)
+	genFile := filepath.Join(genDir, "generated.go")
+	if err := os.WriteFile(genFile, []byte("package gen\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := expectEvent(t, w, 3*time.Second)
+	if ev.Path != filepath.Join("gen", "generated.go") {
+		t.Errorf("expected path 'gen/generated.go', got %q", ev.Path)
+	}
+
+	// Now modify .gitignore to exclude gen/
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("build/\ngen/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the watcher to detect and reload the .gitignore
+	// The watcher detects .gitignore modifications and calls reloadGitignore
+	time.Sleep(500 * time.Millisecond)
+
+	// Now modify the file in gen/ — should NOT produce an event (now ignored)
+	if err := os.WriteFile(genFile, []byte("package gen\n\nfunc F() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	expectNoEvent(t, w, 1*time.Second)
+}
+
 func TestWatcher_SubdirectoryEvents(t *testing.T) {
 	dir := t.TempDir()
 

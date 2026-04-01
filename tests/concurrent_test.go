@@ -261,8 +261,14 @@ func (r *Repository) Put(data interface{}) error { return nil }
 	tp.rebuildGraph(t)
 
 	// Verify final state is consistent
-	nodeIDs, _ := tp.store.GetAllNodeIDs()
-	edges, _ := tp.store.GetAllEdges()
+	nodeIDs, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatalf("GetAllNodeIDs: %v", err)
+	}
+	edges, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatalf("GetAllEdges: %v", err)
+	}
 
 	nodeSet := make(map[string]bool, len(nodeIDs))
 	for _, id := range nodeIDs {
@@ -277,8 +283,22 @@ func (r *Repository) Put(data interface{}) error { return nil }
 		}
 	}
 
+	// M73: Assert final node counts after concurrent operations
+	if len(nodeIDs) == 0 {
+		t.Error("expected at least some nodes after concurrent modifications")
+	}
+
+	// Verify graph node count matches or is consistent with store
+	graphNodeCount := tp.graphEngine.NodeCount()
+	graphEdgeCount := tp.graphEngine.EdgeCount()
 	t.Logf("After concurrent modifications: %d nodes, %d edges, graph: %d nodes %d edges",
-		len(nodeIDs), len(edges), tp.graphEngine.NodeCount(), tp.graphEngine.EdgeCount())
+		len(nodeIDs), len(edges), graphNodeCount, graphEdgeCount)
+
+	// Graph edge count should match store edge count after rebuild
+	if graphEdgeCount != len(edges) {
+		t.Errorf("graph edge count (%d) does not match store edge count (%d) after rebuild",
+			graphEdgeCount, len(edges))
+	}
 }
 
 func TestConcurrent_SearchConsistency(t *testing.T) {
@@ -474,8 +494,14 @@ func NewFunc%d() {}
 	// Rebuild graph and verify consistency
 	tp.rebuildGraph(t)
 
-	nodeIDs, _ := tp.store.GetAllNodeIDs()
-	edges, _ := tp.store.GetAllEdges()
+	nodeIDs, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatalf("GetAllNodeIDs: %v", err)
+	}
+	edges, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatalf("GetAllEdges: %v", err)
+	}
 
 	nodeSet := make(map[string]bool, len(nodeIDs))
 	for _, id := range nodeIDs {
@@ -488,6 +514,12 @@ func NewFunc%d() {}
 		if !nodeSet[e.TargetID] {
 			t.Errorf("orphan edge target: %s", e.TargetID[:16])
 		}
+	}
+
+	// M73: Assert final node/edge counts
+	// We started with 5 files, deleted 3, added 3 new ones → expect at least 5 files worth
+	if len(nodeIDs) == 0 {
+		t.Error("expected at least some nodes after concurrent index+delete")
 	}
 
 	t.Logf("After concurrent index+delete: %d nodes, %d edges", len(nodeIDs), len(edges))

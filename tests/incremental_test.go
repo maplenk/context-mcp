@@ -156,7 +156,10 @@ func (c *Calculator) Add(a, b float64) float64 {
 `)
 	tp.indexFile(t, "calc.go")
 
-	initialNodeIDs, _ := tp.store.GetAllNodeIDs()
+	initialNodeIDs, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
 	initialNodeCount := len(initialNodeIDs)
 	if initialNodeCount == 0 {
 		t.Fatal("expected at least 1 node after indexing calc.go")
@@ -176,7 +179,10 @@ func (h *Helper) Double(x float64) float64 {
 `)
 	tp.indexFile(t, "helper.go")
 
-	afterNodeIDs, _ := tp.store.GetAllNodeIDs()
+	afterNodeIDs, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
 	afterNodeCount := len(afterNodeIDs)
 	if afterNodeCount <= initialNodeCount {
 		t.Errorf("expected more nodes after adding helper.go: initial=%d, after=%d", initialNodeCount, afterNodeCount)
@@ -280,14 +286,20 @@ func Triple(x int) int { return x * 3 }
 	tp.indexFile(t, "calc.go")
 	tp.indexFile(t, "helper.go")
 
-	allNodesBefore, _ := tp.store.GetAllNodeIDs()
+	allNodesBefore, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
 	nodeCountBefore := len(allNodesBefore)
 	t.Logf("Before delete: %d nodes, graph has %d nodes", nodeCountBefore, tp.graphEngine.NodeCount())
 
 	// Delete calc.go from the store (simulating a file deletion event)
 	tp.deleteFile(t, "calc.go")
 
-	allNodesAfter, _ := tp.store.GetAllNodeIDs()
+	allNodesAfter, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
 	nodeCountAfter := len(allNodesAfter)
 	if nodeCountAfter >= nodeCountBefore {
 		t.Errorf("expected fewer nodes after deleting calc.go: before=%d, after=%d", nodeCountBefore, nodeCountAfter)
@@ -295,7 +307,7 @@ func Triple(x int) int { return x * 3 }
 
 	// Verify the "Add" node is gone
 	addNodeID := types.GenerateNodeID("calc.go", "Add")
-	_, err := tp.store.GetNode(addNodeID)
+	_, err = tp.store.GetNode(addNodeID)
 	if err == nil {
 		t.Error("expected 'Add' node to be deleted")
 	}
@@ -313,13 +325,24 @@ func Triple(x int) int { return x * 3 }
 
 	// Verify Triple is still there
 	tripleNodeID := types.GenerateNodeID("helper.go", "Triple")
-	tripleNode, err := tp.store.GetNode(tripleNodeID)
-	if err != nil {
-		t.Errorf("expected Triple to still exist: %v", err)
+	tripleNode, err2 := tp.store.GetNode(tripleNodeID)
+	if err2 != nil {
+		t.Errorf("expected Triple to still exist: %v", err2)
 	} else if tripleNode.SymbolName != "Triple" {
 		t.Errorf("expected symbol name 'Triple', got %q", tripleNode.SymbolName)
 	}
 	t.Logf("After delete: %d nodes", nodeCountAfter)
+
+	// M76: Verify FTS entries for deleted nodes are cleaned up
+	ftsResults, ftsErr := tp.store.SearchLexical("Add", 10)
+	if ftsErr != nil {
+		t.Fatalf("SearchLexical after delete: %v", ftsErr)
+	}
+	for _, r := range ftsResults {
+		if r.Node.FilePath == "calc.go" {
+			t.Errorf("FTS still contains deleted node from calc.go: %s", r.Node.SymbolName)
+		}
+	}
 }
 
 func TestIncremental_GraphConsistency(t *testing.T) {
@@ -350,8 +373,14 @@ func (h *Helper) Help() {}
 	tp.indexFile(t, "helper.go")
 
 	// Check initial consistency
-	storeNodeIDs, _ := tp.store.GetAllNodeIDs()
-	storeEdges, _ := tp.store.GetAllEdges()
+	storeNodeIDs, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeEdges, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	t.Logf("Store: %d nodes, %d edges", len(storeNodeIDs), len(storeEdges))
 	t.Logf("Graph: %d nodes, %d edges", tp.graphEngine.NodeCount(), tp.graphEngine.EdgeCount())
@@ -383,8 +412,14 @@ func (h *Helper) Assist() {}
 	tp.indexFile(t, "helper.go")
 
 	// Re-verify consistency after modification
-	storeNodeIDs2, _ := tp.store.GetAllNodeIDs()
-	storeEdges2, _ := tp.store.GetAllEdges()
+	storeNodeIDs2, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeEdges2, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	nodeSet2 := make(map[string]bool, len(storeNodeIDs2))
 	for _, id := range storeNodeIDs2 {
@@ -402,8 +437,14 @@ func (h *Helper) Assist() {}
 	// Now delete helper.go
 	tp.deleteFile(t, "helper.go")
 
-	storeNodeIDs3, _ := tp.store.GetAllNodeIDs()
-	storeEdges3, _ := tp.store.GetAllEdges()
+	storeNodeIDs3, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeEdges3, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	nodeSet3 := make(map[string]bool, len(storeNodeIDs3))
 	for _, id := range storeNodeIDs3 {
@@ -443,7 +484,10 @@ func Stop() {}
 `)
 	tp.indexFile(t, "app.go")
 
-	nodeIDs1, _ := tp.store.GetAllNodeIDs()
+	nodeIDs1, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(nodeIDs1) < 2 {
 		t.Fatalf("expected at least 2 nodes (Start, Stop), got %d", len(nodeIDs1))
 	}
@@ -459,7 +503,7 @@ func Shutdown() {}
 
 	// Verify Shutdown exists, Stop doesn't
 	shutdownID := types.GenerateNodeID("app.go", "Shutdown")
-	_, err := tp.store.GetNode(shutdownID)
+	_, err = tp.store.GetNode(shutdownID)
 	if err != nil {
 		t.Error("expected Shutdown to exist after modification")
 	}
@@ -473,7 +517,10 @@ func Shutdown() {}
 	// Phase 3: Delete the file entirely
 	tp.deleteFile(t, "app.go")
 
-	nodeIDs3, _ := tp.store.GetAllNodeIDs()
+	nodeIDs3, err := tp.store.GetAllNodeIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(nodeIDs3) != 0 {
 		t.Errorf("expected 0 nodes after file deletion, got %d", len(nodeIDs3))
 	}

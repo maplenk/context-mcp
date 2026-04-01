@@ -692,6 +692,9 @@ func TestAllToolsRegistered(t *testing.T) {
 	server := NewServerWithIO(nil, nil)
 	RegisterTools(server, deps, nil)
 
+	// M71: Dynamically get the registered tool list and compare against
+	// the expected set. This way, adding a new tool without updating
+	// this test will be caught (the counts will differ).
 	expectedTools := []string{
 		"context",
 		"impact",
@@ -716,12 +719,30 @@ func TestAllToolsRegistered(t *testing.T) {
 
 	for _, name := range expectedTools {
 		if !toolNames[name] {
-			t.Errorf("tool %q not registered", name)
+			t.Errorf("expected tool %q not registered", name)
+		}
+	}
+
+	// Check for tools that are registered but not in our expected list
+	expectedSet := make(map[string]bool)
+	for _, name := range expectedTools {
+		expectedSet[name] = true
+	}
+	for name := range toolNames {
+		if !expectedSet[name] {
+			t.Errorf("tool %q is registered but not in expected list — update expectedTools", name)
 		}
 	}
 
 	if len(tools) != len(expectedTools) {
-		t.Errorf("expected %d tools, got %d", len(expectedTools), len(tools))
+		t.Errorf("tool count mismatch: registered %d tools, expected %d — update expectedTools list", len(tools), len(expectedTools))
+		t.Logf("registered tools: %v", func() []string {
+			var names []string
+			for n := range toolNames {
+				names = append(names, n)
+			}
+			return names
+		}())
 	}
 }
 
@@ -1083,6 +1104,154 @@ func TestIndexHandler_WithFunc(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")
+	}
+}
+
+// ---- M69: Empty/nil input tests for tool handlers ----
+
+func TestContextHandler_EmptyQuery(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("context")
+
+	// Empty query string
+	params, _ := json.Marshal(ContextParams{Query: "", Limit: 5})
+	_, err := handler(params)
+	// Should either return an error or handle gracefully (no panic)
+	if err != nil {
+		t.Logf("context with empty query returned expected error: %v", err)
+	}
+}
+
+func TestContextHandler_ZeroLimit(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("context")
+
+	params, _ := json.Marshal(ContextParams{Query: "test", Limit: 0})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("context with zero limit error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result with zero limit (should use default)")
+	}
+}
+
+func TestImpactHandler_EmptySymbolID(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("impact")
+
+	params, _ := json.Marshal(ImpactParams{SymbolID: "", Depth: 3})
+	_, err := handler(params)
+	// Empty symbol_id should return an error
+	if err == nil {
+		t.Logf("impact with empty symbol_id did not return error (may return empty result)")
+	}
+}
+
+func TestImpactHandler_NegativeDepth(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("impact")
+
+	params, _ := json.Marshal(ImpactParams{SymbolID: "processOrder", Depth: -1})
+	result, err := handler(params)
+	// Should handle gracefully (use default depth or return empty)
+	if err != nil {
+		t.Logf("impact with negative depth returned error: %v", err)
+	} else if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestReadSymbolHandler_EmptySymbolID(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("read_symbol")
+
+	params, _ := json.Marshal(ReadSymbolParams{SymbolID: ""})
+	_, err := handler(params)
+	if err == nil {
+		t.Fatal("expected error for empty symbol_id")
+	}
+}
+
+func TestTraceCallPath_EmptyFromTo(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("trace_call_path")
+
+	// Empty 'from'
+	params, _ := json.Marshal(TraceCallPathParams{From: "", To: "processOrder", MaxDepth: 10})
+	_, err := handler(params)
+	if err == nil {
+		t.Fatal("expected error for empty 'from' parameter")
+	}
+
+	// Empty 'to'
+	params, _ = json.Marshal(TraceCallPathParams{From: "processOrder", To: "", MaxDepth: 10})
+	_, err = handler(params)
+	if err == nil {
+		t.Fatal("expected error for empty 'to' parameter")
+	}
+}
+
+func TestExplore_EmptySymbol(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("explore")
+
+	params, _ := json.Marshal(ExploreParams{Symbol: ""})
+	_, err := handler(params)
+	if err == nil {
+		t.Fatal("expected error for empty symbol")
+	}
+}
+
+func TestSearchCode_EmptyPattern(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("search_code")
+
+	params, _ := json.Marshal(SearchCodeParams{Pattern: "", Limit: 10})
+	_, err := handler(params)
+	// Empty pattern should return error or be handled gracefully
+	if err != nil {
+		t.Logf("search_code with empty pattern returned expected error: %v", err)
 	}
 }
 
