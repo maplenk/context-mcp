@@ -489,11 +489,24 @@ func (g *GraphEngine) ComputeBetweenness() map[string]float64 {
 // In-degree counts how many other nodes have edges pointing TO each node.
 // Results are cached and invalidated on graph mutations.
 func (g *GraphEngine) ComputeInDegree() map[string]float64 {
+	// Fast path: return cached data under read lock
+	g.mu.RLock()
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		result := make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			result[k] = v
+		}
+		g.mu.RUnlock()
+		return result
+	}
+	g.mu.RUnlock()
+
+	// Slow path: recompute under write lock
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// Double-check after acquiring write lock (another goroutine may have computed)
 	if g.inDegreeValid && g.inDegreeCache != nil {
-		// Return a copy of the cache to avoid races
 		result := make(map[string]float64, len(g.inDegreeCache))
 		for k, v := range g.inDegreeCache {
 			result[k] = v
@@ -1097,8 +1110,38 @@ func (g *GraphEngine) HasNode(hashID string) bool {
 // DetectCommunities uses Louvain community detection to find tightly coupled
 // clusters of code symbols. Results are cached and invalidated on graph rebuild.
 func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
+	// Fast path: return cached results under read lock
+	g.mu.RLock()
+	if g.communityValid {
+		var result []types.Community
+		for i, nodeIDs := range g.communities {
+			result = append(result, types.Community{
+				ID:      i,
+				NodeIDs: nodeIDs,
+			})
+		}
+		mod := g.modularity
+		g.mu.RUnlock()
+		return result, mod
+	}
+	g.mu.RUnlock()
+
+	// Slow path: recompute under write lock
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// Double-check after acquiring write lock (another goroutine may have computed)
+	if g.communityValid {
+		var result []types.Community
+		for i, nodeIDs := range g.communities {
+			result = append(result, types.Community{
+				ID:      i,
+				NodeIDs: nodeIDs,
+			})
+		}
+		return result, g.modularity
+	}
+
 	return g.detectCommunitiesLocked()
 }
 
