@@ -90,6 +90,10 @@ func TestBenchmarkQueries(t *testing.T) {
 			if elapsed > 30*time.Second {
 				t.Errorf("query %s took %v (expected < 30s)", q.id, elapsed)
 			}
+			// Tighter performance bound for normal operation.
+			if elapsed > 5*time.Second {
+				t.Errorf("query %s took %v (expected < 5s) — possible performance regression", q.id, elapsed)
+			}
 
 			// Marshal result to inspect structure
 			raw, marshalErr := json.Marshal(result)

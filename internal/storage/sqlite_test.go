@@ -1103,6 +1103,28 @@ func TestRawQuery_AttachBlocked(t *testing.T) {
 	}
 }
 
+// ---- M75: SearchSemantic when vec0 unavailable ----
+
+func TestSearchSemantic_NoVecTable(t *testing.T) {
+	s := newTestStore(t)
+
+	// The test store likely doesn't have vec0 extension loaded.
+	// SearchSemantic should return nil, nil (not an error) when hasVecTable is false.
+	queryVec := make([]float32, 384)
+	queryVec[0] = 1.0
+
+	results, err := s.SearchSemantic(queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchSemantic without vec0 should return nil error, got: %v", err)
+	}
+	if results != nil {
+		t.Errorf("SearchSemantic without vec0 should return nil results, got %d results", len(results))
+	}
+
+	// Also verify HasVecTable returns the expected value
+	t.Logf("HasVecTable: %v", s.HasVecTable())
+}
+
 // ---- H25: Double Close safety ----
 
 func TestStore_DoubleClose(t *testing.T) {

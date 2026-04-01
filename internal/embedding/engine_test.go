@@ -8,12 +8,14 @@ import (
 // TestHashEmbedder_Embed_Dimension verifies that Embed returns a 384-dimensional vector.
 func TestHashEmbedder_Embed_Dimension(t *testing.T) {
 	e := NewHashEmbedder()
+	// M77: Use the embedder's own Dim() method instead of global atomic GetEmbeddingDim()
+	expectedDim := e.Dim()
 	vec, err := e.Embed("hello world")
 	if err != nil {
 		t.Fatalf("Embed error: %v", err)
 	}
-	if len(vec) != GetEmbeddingDim() {
-		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	if len(vec) != expectedDim {
+		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
 	}
 }
 
@@ -84,6 +86,8 @@ func TestHashEmbedder_Embed_Normalized(t *testing.T) {
 // TestHashEmbedder_EmbedBatch_Count verifies that EmbedBatch returns the correct number of vectors.
 func TestHashEmbedder_EmbedBatch_Count(t *testing.T) {
 	e := NewHashEmbedder()
+	// M77: Use test-local expected dimension from the embedder itself
+	expectedDim := e.Dim()
 	texts := []string{
 		"first text",
 		"second text",
@@ -99,8 +103,8 @@ func TestHashEmbedder_EmbedBatch_Count(t *testing.T) {
 		t.Errorf("expected %d vectors, got %d", len(texts), len(vecs))
 	}
 	for i, v := range vecs {
-		if len(v) != GetEmbeddingDim() {
-			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), GetEmbeddingDim())
+		if len(v) != expectedDim {
+			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), expectedDim)
 		}
 	}
 }
@@ -149,12 +153,13 @@ func TestCosineSimilarity_SelfIsOne(t *testing.T) {
 // acceptable as long as the slice length is correct and no error is returned.
 func TestHashEmbedder_EmptyString(t *testing.T) {
 	e := NewHashEmbedder()
+	expectedDim := e.Dim()
 	vec, err := e.Embed("")
 	if err != nil {
 		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
 	}
-	if len(vec) != GetEmbeddingDim() {
-		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	if len(vec) != expectedDim {
+		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
 	}
 }
 
@@ -182,12 +187,13 @@ func TestCosineSimilarity_DifferentIsLessThanOne(t *testing.T) {
 // TestTFIDFEmbedder_Dimension verifies that Embed returns a 384-dimensional vector.
 func TestTFIDFEmbedder_Dimension(t *testing.T) {
 	e := NewTFIDFEmbedder(384)
+	expectedDim := e.Dim()
 	vec, err := e.Embed("hello world")
 	if err != nil {
 		t.Fatalf("Embed error: %v", err)
 	}
-	if len(vec) != GetEmbeddingDim() {
-		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	if len(vec) != expectedDim {
+		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
 	}
 }
 
@@ -270,12 +276,13 @@ func TestTFIDFEmbedder_CamelCaseSimilarity(t *testing.T) {
 // TestTFIDFEmbedder_EmptyString verifies that empty input returns a zero vector (M52).
 func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 	e := NewTFIDFEmbedder(384)
+	expectedDim := e.Dim()
 	vec, err := e.Embed("")
 	if err != nil {
 		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
 	}
-	if len(vec) != GetEmbeddingDim() {
-		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	if len(vec) != expectedDim {
+		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
 	}
 	// M52: Verify it's a zero vector so empty chunks don't falsely match each other
 	for i, v := range vec {
@@ -289,6 +296,7 @@ func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 // TestTFIDFEmbedder_EmbedBatch verifies batch embedding works correctly.
 func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
 	e := NewTFIDFEmbedder(384)
+	expectedDim := e.Dim()
 	texts := []string{
 		"first text about reading files",
 		"second text about database queries",
@@ -303,8 +311,8 @@ func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
 		t.Errorf("expected %d vectors, got %d", len(texts), len(vecs))
 	}
 	for i, v := range vecs {
-		if len(v) != GetEmbeddingDim() {
-			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), GetEmbeddingDim())
+		if len(v) != expectedDim {
+			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), expectedDim)
 		}
 	}
 }
@@ -329,13 +337,14 @@ func TestNewEmbedder_ReturnsTFIDF(t *testing.T) {
 	if e == nil {
 		t.Fatal("NewEmbedder returned nil")
 	}
-	// Verify it's a TFIDFEmbedder by checking it implements Embedder and produces valid output
+	// M77: Use the embedder's own Dim() method instead of global atomic
+	expectedDim := e.Dim()
 	vec, err := e.Embed("test")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if len(vec) != GetEmbeddingDim() {
-		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	if len(vec) != expectedDim {
+		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
 	}
 }
 
