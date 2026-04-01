@@ -743,32 +743,48 @@ func TestRemoveEdge_DecrementsEdgeCount(t *testing.T) {
 
 func TestGetConnectors_BasicBridge(t *testing.T) {
 	g := New()
-	// Two clusters connected by B: A↔B↔C, D↔B
-	// B bridges between them and should have high betweenness
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-c", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-d", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
-	})
+	// Two dense clusters connected only by node-b (the bridge).
+	// Cluster 1: a1, a2, a3 (fully interconnected)
+	// Cluster 2: c1, c2, c3 (fully interconnected)
+	// Bridge: node-b connects to a1 in cluster 1 and c1 in cluster 2
+	edges := []types.ASTEdge{
+		// Cluster 1: a1 ↔ a2 ↔ a3 ↔ a1
+		{SourceID: "a1", TargetID: "a2", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "a2", TargetID: "a1", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "a2", TargetID: "a3", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "a3", TargetID: "a2", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "a3", TargetID: "a1", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "a1", TargetID: "a3", EdgeType: types.EdgeTypeCalls},
+		// Cluster 2: c1 ↔ c2 ↔ c3 ↔ c1
+		{SourceID: "c1", TargetID: "c2", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "c2", TargetID: "c1", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "c2", TargetID: "c3", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "c3", TargetID: "c2", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "c3", TargetID: "c1", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "c1", TargetID: "c3", EdgeType: types.EdgeTypeCalls},
+		// Bridge: node-b connects the two clusters
+		{SourceID: "a1", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "a1", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "c1", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "c1", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+	}
+	g.BuildFromEdges(edges)
 
 	betweenness := g.ComputeBetweenness()
 	connectors := g.GetConnectors(betweenness, 5)
 
-	// B should appear as a connector (bridges communities)
+	// node-b should appear as a connector (bridges two communities)
 	found := false
 	for _, c := range connectors {
 		if c == "node-b" {
 			found = true
 		}
 	}
-	if !found && len(connectors) > 0 {
-		t.Logf("connectors: %v (node-b may not be a connector if communities aren't separated)", connectors)
+	if !found {
+		t.Errorf("expected node-b to be a connector, got connectors: %v", connectors)
 	}
 	// At minimum, should not panic and should return a slice
-	t.Logf("GetConnectors returned %d connectors", len(connectors))
+	t.Logf("GetConnectors returned %d connectors: %v", len(connectors), connectors)
 }
 
 func TestGetConnectors_EmptyBetweenness(t *testing.T) {

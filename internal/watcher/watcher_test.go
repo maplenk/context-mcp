@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -124,7 +125,7 @@ func TestWatcher_Debounce(t *testing.T) {
 
 	// Rapidly overwrite the file multiple times within the debounce window
 	for i := 1; i <= 10; i++ {
-		if err := os.WriteFile(filePath, []byte("v"+string(rune('0'+i))), 0644); err != nil {
+		if err := os.WriteFile(filePath, []byte(fmt.Sprintf("v%d", i)), 0644); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond) // well within 200ms debounce

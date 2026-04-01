@@ -424,6 +424,18 @@ func (m *Mod%d) Init%d() {}
 
 	wg.Wait()
 	t.Log("Race stress test completed without panics or data races")
+
+	// Post-race behavioral assertions: verify graph and search still work correctly
+	if nc := tp.graphEngine.NodeCount(); nc == 0 {
+		t.Error("expected NodeCount > 0 after race stress test, got 0")
+	}
+	results, err := tp.search.Search("Mod", 5, nil)
+	if err != nil {
+		t.Errorf("search after race stress test returned error: %v", err)
+	}
+	if results == nil {
+		t.Error("search after race stress test returned nil results")
+	}
 }
 
 func TestConcurrent_IndexAndDeleteSimultaneous(t *testing.T) {
@@ -601,4 +613,16 @@ func (c *CG%d) Process%d() {}
 
 	wg.Wait()
 	t.Log("Concurrent graph rebuild + search + signals test completed without panics")
+
+	// Post-concurrency behavioral assertions: verify graph and search still work correctly
+	if nc := tp.graphEngine.NodeCount(); nc == 0 {
+		t.Error("expected NodeCount > 0 after concurrent graph rebuild test, got 0")
+	}
+	results, err := tp.search.Search("CG", 5, nil)
+	if err != nil {
+		t.Errorf("search after concurrent graph rebuild test returned error: %v", err)
+	}
+	if results == nil {
+		t.Error("search after concurrent graph rebuild test returned nil results")
+	}
 }
