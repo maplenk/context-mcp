@@ -316,21 +316,15 @@ func TestDeleteByFile_RemovesNodesAndEdges(t *testing.T) {
 		t.Errorf("nodeC (keep.go) should survive DeleteByFile, but got error: %v", err)
 	}
 
-	// Outgoing edges from del.go (A->C) should be gone.
-	// Incoming edges from other files (C->B) should be preserved — they are owned
-	// by the source file (keep.go) and will become stale if the target is removed,
-	// but they are NOT deleted here to avoid destroying cross-file graph integrity.
+	// Both outgoing edges from del.go (A->C) and incoming edges to del.go (C->B)
+	// should be deleted. This prevents orphaned edges that would create ghost nodes
+	// in the in-memory graph.
 	allEdges, err := s.GetAllEdges()
 	if err != nil {
 		t.Fatalf("GetAllEdges after delete: %v", err)
 	}
-	if len(allEdges) != 1 {
-		t.Errorf("expected 1 edge (incoming C->B preserved) after DeleteByFile, got %d", len(allEdges))
-	}
-	if len(allEdges) == 1 {
-		if allEdges[0].SourceID != nodeC.ID || allEdges[0].TargetID != nodeB.ID {
-			t.Errorf("expected preserved edge C->B, got %s->%s", allEdges[0].SourceID, allEdges[0].TargetID)
-		}
+	if len(allEdges) != 0 {
+		t.Errorf("expected 0 edges (both outgoing and incoming deleted) after DeleteByFile, got %d", len(allEdges))
 	}
 }
 

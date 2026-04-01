@@ -249,11 +249,16 @@ func (s *Store) DeleteByFile(filePath string) error {
 	}
 	defer tx.Rollback()
 
-	// Delete only outgoing edges (where source belongs to this file).
-	// Incoming edges from other files are preserved — they may become stale if
-	// target nodes are removed, but that is handled by graph pruning, not here.
+	// Delete outgoing edges (where source belongs to this file)
 	_, err = tx.Exec(`
 		DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
+	if err != nil {
+		return err
+	}
+
+	// Also delete incoming edges (where target belongs to this file)
+	_, err = tx.Exec(`
+		DELETE FROM edges WHERE target_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
 	if err != nil {
 		return err
 	}

@@ -312,12 +312,17 @@ func runCLI(cfg *config.Config, args []string) {
 	if !forceReindex {
 		nodeIDs, _ := store.GetAllNodeIDs()
 		if len(nodeIDs) > 0 {
+			// Build valid node ID set for ghost-node filtering
+			validIDs := make(map[string]bool, len(nodeIDs))
+			for _, id := range nodeIDs {
+				validIDs[id] = true
+			}
 			// Rebuild in-memory graph from stored edges
 			edges, edgeErr := store.GetAllEdges()
 			if edgeErr != nil {
 				log.Printf("Failed to load edges from DB: %v", edgeErr)
 			} else {
-				graphEngine.BuildFromEdges(edges)
+				graphEngine.BuildFromEdges(edges, validIDs)
 			}
 			log.Printf("Loaded %d nodes from existing index (use --reindex to force)", len(nodeIDs))
 		} else {
@@ -583,7 +588,7 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 	if err != nil {
 		log.Printf("Failed to load edges for graph: %v", err)
 	} else {
-		graphEngine.BuildFromEdges(edges)
+		graphEngine.BuildFromEdges(edges, nodeIDSet)
 		log.Printf("Graph built with %d nodes, %d edges", graphEngine.NodeCount(), graphEngine.EdgeCount())
 	}
 
@@ -771,7 +776,13 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 	// Rebuild graph after targeted re-index
 	edges, err := store.GetAllEdges()
 	if err == nil {
-		graphEngine.BuildFromEdges(edges)
+		// Build valid node ID set for ghost-node filtering
+		allNodeIDs, _ := store.GetAllNodeIDs()
+		validIDs := make(map[string]bool, len(allNodeIDs))
+		for _, id := range allNodeIDs {
+			validIDs[id] = true
+		}
+		graphEngine.BuildFromEdges(edges, validIDs)
 		log.Printf("Graph rebuilt with %d nodes, %d edges", graphEngine.NodeCount(), graphEngine.EdgeCount())
 
 		// M17: Recompute and store betweenness/PageRank after targeted re-index

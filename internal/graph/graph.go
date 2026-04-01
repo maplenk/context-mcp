@@ -48,8 +48,10 @@ func (g *GraphEngine) ensureNode(hashID string) int64 {
 	return id
 }
 
-// BuildFromEdges reconstructs the entire graph from a slice of edges
-func (g *GraphEngine) BuildFromEdges(edges []types.ASTEdge) {
+// BuildFromEdges reconstructs the entire graph from a slice of edges.
+// If validNodeIDs is non-nil, edges referencing unknown nodes are skipped
+// to prevent ghost nodes from orphaned database rows.
+func (g *GraphEngine) BuildFromEdges(edges []types.ASTEdge, validNodeIDs ...map[string]bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -60,7 +62,18 @@ func (g *GraphEngine) BuildFromEdges(edges []types.ASTEdge) {
 	g.communityValid = false
 	g.inDegreeValid = false
 
+	var valid map[string]bool
+	if len(validNodeIDs) > 0 {
+		valid = validNodeIDs[0]
+	}
+
 	for _, edge := range edges {
+		// Skip edges referencing unknown nodes to prevent ghost nodes
+		if valid != nil {
+			if !valid[edge.SourceID] || !valid[edge.TargetID] {
+				continue
+			}
+		}
 		srcID := g.ensureNode(edge.SourceID)
 		tgtID := g.ensureNode(edge.TargetID)
 		if srcID != tgtID && !g.dg.HasEdgeFromTo(srcID, tgtID) {
