@@ -1178,3 +1178,89 @@ func TestStore_DoubleClose(t *testing.T) {
 		_ = s.Close()
 	}()
 }
+
+// ---- SearchNodesByName LIKE-escape ----
+
+func TestSearchNodesByName_EscapesLIKEWildcards(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert nodes: one with underscores, one without.
+	// Without escaping, searching for "my_func" would also match "myXfunc"
+	// because _ is a single-character wildcard in SQL LIKE.
+	nodes := []types.ASTNode{
+		sampleNode(types.GenerateNodeID("a.go", "my_func"), "a.go", "my_func", types.NodeTypeFunction),
+		sampleNode(types.GenerateNodeID("b.go", "myXfunc"), "b.go", "myXfunc", types.NodeTypeFunction),
+		sampleNode(types.GenerateNodeID("c.go", "prefix_my_func_suffix"), "c.go", "prefix_my_func_suffix", types.NodeTypeFunction),
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	// Search for the literal underscore pattern "my_func".
+	results, err := s.SearchNodesByName("my_func")
+	if err != nil {
+		t.Fatalf("SearchNodesByName: %v", err)
+	}
+
+	// Should match "my_func" and "prefix_my_func_suffix" (contains literal "my_func"),
+	// but NOT "myXfunc" (would only match if _ were treated as wildcard).
+	got := map[string]bool{}
+	for _, n := range results {
+		got[n.SymbolName] = true
+	}
+	if !got["my_func"] {
+		t.Error("expected my_func in results")
+	}
+	if !got["prefix_my_func_suffix"] {
+		t.Error("expected prefix_my_func_suffix in results (contains 'my_func' literally)")
+	}
+	if got["myXfunc"] {
+		t.Error("myXfunc should NOT match — _ must be escaped in LIKE pattern")
+	}
+}
+
+func TestSearchNodesByName_EscapesPercent(t *testing.T) {
+	s := newTestStore(t)
+
+	nodes := []types.ASTNode{
+		sampleNode(types.GenerateNodeID("a.go", "rate100%done"), "a.go", "rate100%done", types.NodeTypeFunction),
+		sampleNode(types.GenerateNodeID("b.go", "rate100Xdone"), "b.go", "rate100Xdone", types.NodeTypeFunction),
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	results, err := s.SearchNodesByName("100%d")
+	if err != nil {
+		t.Fatalf("SearchNodesByName: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, n := range results {
+		got[n.SymbolName] = true
+	}
+	if !got["rate100%done"] {
+		t.Error("expected symbol with percent sign in results")
+	}
+	if got["rate100Xdone"] {
+		t.Error("rate100Xdone should NOT match — % must be escaped in LIKE pattern")
+	}
+}
+
+func TestEscapeLIKE(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"hello", "hello"},
+		{"my_func", `my\_func`},
+		{"100%", `100\%`},
+		{`a\b`, `a\\b`},
+		{`_%\`, `\_\%\\`},
+	}
+	for _, tt := range tests {
+		got := escapeLIKE(tt.input)
+		if got != tt.want {
+			t.Errorf("escapeLIKE(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
