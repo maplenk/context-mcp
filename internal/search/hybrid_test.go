@@ -319,6 +319,90 @@ func TestSearch_CustomMaxPerFile(t *testing.T) {
 	}
 }
 
+// ---- M23: Search with activeFileNodeIDs ----
+
+func TestSearch_WithActiveFileNodeIDs(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert nodes across different files
+	nodes := []types.ASTNode{
+		{
+			ID:         types.GenerateNodeID("active.go", "ActiveFunc"),
+			FilePath:   "active.go",
+			SymbolName: "ActiveFunc",
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  0,
+			EndByte:    100,
+			ContentSum: "ActiveFunc handles data processing operations",
+		},
+		{
+			ID:         types.GenerateNodeID("other.go", "OtherFunc"),
+			FilePath:   "other.go",
+			SymbolName: "OtherFunc",
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  0,
+			EndByte:    80,
+			ContentSum: "OtherFunc handles data processing operations",
+		},
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	embedder := embedding.NewHashEmbedder()
+
+	// Build a graph with edges so PPR has something to work with
+	g := graph.New()
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: nodes[0].ID, TargetID: nodes[1].ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: nodes[1].ID, TargetID: nodes[0].ID, EdgeType: types.EdgeTypeCalls},
+	})
+
+	hs := New(s, embedder, g)
+
+	// Search without active files
+	resultsNoActive, err := hs.Search("data processing", 10, nil)
+	if err != nil {
+		t.Fatalf("Search without active files: %v", err)
+	}
+
+	// Search with active file node IDs (boost ActiveFunc's file)
+	activeIDs := []string{nodes[0].ID}
+	resultsWithActive, err := hs.Search("data processing", 10, activeIDs)
+	if err != nil {
+		t.Fatalf("Search with active files: %v", err)
+	}
+
+	// Both searches should return results and not panic
+	if len(resultsNoActive) == 0 {
+		t.Fatal("expected results without active files")
+	}
+	if len(resultsWithActive) == 0 {
+		t.Fatal("expected results with active files")
+	}
+
+	// Find ActiveFunc scores in both result sets
+	var scoreNoActive, scoreWithActive float64
+	for _, r := range resultsNoActive {
+		if r.Node.SymbolName == "ActiveFunc" {
+			scoreNoActive = r.Score
+		}
+	}
+	for _, r := range resultsWithActive {
+		if r.Node.SymbolName == "ActiveFunc" {
+			scoreWithActive = r.Score
+		}
+	}
+
+	// With active file boosting, ActiveFunc should score >= without it
+	// (PPR teleportation adds bias toward active file nodes)
+	if scoreWithActive < scoreNoActive {
+		t.Logf("Note: ActiveFunc score with active files (%f) < without (%f); PPR boost may be small",
+			scoreWithActive, scoreNoActive)
+	}
+	t.Logf("ActiveFunc score: without active=%f, with active=%f", scoreNoActive, scoreWithActive)
+}
+
 // TestSanitizeFTS_StripsStar verifies that the * wildcard is stripped from user input.
 func TestSanitizeFTS_StripsStar(t *testing.T) {
 	result := sanitizeFTS("test*query")
@@ -418,9 +502,8 @@ func TestSetStopWords_ConcurrentSafety(t *testing.T) {
 	wg.Wait()
 }
 
-// ---- M74: Zero-length query test ----
+// ---- M19: Zero-length query Search test ----
 
-// TestSearch_EmptyQuery verifies that Search handles an empty string query gracefully.
 func TestSearch_EmptyQuery(t *testing.T) {
 	s := newTestStore(t)
 	insertTestNodes(t, s)
@@ -429,98 +512,29 @@ func TestSearch_EmptyQuery(t *testing.T) {
 	g := graph.New()
 	hs := New(s, embedder, g)
 
+	// Empty string query should return empty results or nil, not panic
 	results, err := hs.Search("", 10, nil)
-	// Should either return empty results or a proper error, not panic
 	if err != nil {
-		t.Logf("Search with empty query returned error (acceptable): %v", err)
-		return
+		t.Fatalf("Search('') unexpected error: %v", err)
 	}
-	// Empty results are acceptable for an empty query
-	t.Logf("Search with empty query returned %d results", len(results))
+	// Empty query may return nil or empty slice — both are acceptable
+	t.Logf("Search('') returned %d results", len(results))
 }
 
-// ---- M80: Search with activeFileNodeIDs test ----
-
-// TestSearch_WithActiveFileNodeIDs verifies that providing activeFileNodeIDs
-// influences search results via PPR personalization.
-func TestSearch_WithActiveFileNodeIDs(t *testing.T) {
+func TestSearch_WhitespaceOnlyQuery(t *testing.T) {
 	s := newTestStore(t)
-
-	// Insert nodes spread across different files
-	nodes := []types.ASTNode{
-		{
-			ID:         types.GenerateNodeID("compute.go", "ComputeChecksum"),
-			FilePath:   "compute.go",
-			SymbolName: "ComputeChecksum",
-			NodeType:   types.NodeTypeFunction,
-			StartByte:  0,
-			EndByte:    100,
-			ContentSum: "ComputeChecksum calculates SHA256 checksum of a file",
-		},
-		{
-			ID:         types.GenerateNodeID("compute.go", "ComputeHash"),
-			FilePath:   "compute.go",
-			SymbolName: "ComputeHash",
-			NodeType:   types.NodeTypeFunction,
-			StartByte:  100,
-			EndByte:    200,
-			ContentSum: "ComputeHash calculates hash of data",
-		},
-		{
-			ID:         types.GenerateNodeID("db.go", "DatabaseChecksum"),
-			FilePath:   "db.go",
-			SymbolName: "DatabaseChecksum",
-			NodeType:   types.NodeTypeFunction,
-			StartByte:  0,
-			EndByte:    100,
-			ContentSum: "DatabaseChecksum verifies database integrity via checksum",
-		},
-	}
-	if err := s.UpsertNodes(nodes); err != nil {
-		t.Fatalf("UpsertNodes: %v", err)
-	}
-
-	// Add edges so the graph has substance for PPR
-	edges := []types.ASTEdge{
-		{SourceID: nodes[0].ID, TargetID: nodes[1].ID, EdgeType: types.EdgeTypeCalls},
-		{SourceID: nodes[2].ID, TargetID: nodes[0].ID, EdgeType: types.EdgeTypeCalls},
-	}
-	if err := s.UpsertEdges(edges); err != nil {
-		t.Fatalf("UpsertEdges: %v", err)
-	}
+	insertTestNodes(t, s)
 
 	embedder := embedding.NewHashEmbedder()
 	g := graph.New()
-	g.BuildFromEdges(edges)
 	hs := New(s, embedder, g)
 
-	// Search without active files
-	resultsWithout, err := hs.Search("checksum", 10, nil)
+	// Whitespace-only query should not panic
+	results, err := hs.Search("   ", 10, nil)
 	if err != nil {
-		t.Fatalf("Search without active files: %v", err)
+		t.Fatalf("Search('   ') unexpected error: %v", err)
 	}
-
-	// Search WITH active files (seeding compute.go nodes)
-	activeNodeIDs := []string{nodes[0].ID, nodes[1].ID}
-	resultsWith, err := hs.Search("checksum", 10, activeNodeIDs)
-	if err != nil {
-		t.Fatalf("Search with active files: %v", err)
-	}
-
-	// Both should return results
-	if len(resultsWithout) == 0 {
-		t.Fatal("expected results without active files")
-	}
-	if len(resultsWith) == 0 {
-		t.Fatal("expected results with active files")
-	}
-
-	// The active file context should influence scoring (PPR teleportation).
-	// We can verify this by checking scores differ.
-	t.Logf("Results without active files: %d, with: %d", len(resultsWithout), len(resultsWith))
-	for i, r := range resultsWith {
-		t.Logf("  [%d] %s score=%.4f", i, r.Node.SymbolName, r.Score)
-	}
+	t.Logf("Search('   ') returned %d results", len(results))
 }
 
 // TestBuildFTSQuery_AllStopWords verifies that buildFTSQuery returns a

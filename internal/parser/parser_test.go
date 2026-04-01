@@ -795,7 +795,7 @@ function helperFunc() {
 	for _, e := range result.Edges {
 		if e.EdgeType == types.EdgeTypeCalls {
 			callCount++
-			// Check for $this->validate call (qualified with enclosing class)
+			// Check for $this->validate call (qualified as OrderService.validate)
 			validateID := types.GenerateNodeID("order.php", "OrderService.validate")
 			loggerInfoID := types.GenerateNodeID("order.php", "Logger.info")
 			strlenID := types.GenerateNodeID("order.php", "strlen")
@@ -822,6 +822,167 @@ function helperFunc() {
 	}
 	if !hasFuncCall {
 		t.Error("expected strlen() function call edge")
+	}
+}
+
+// ===========================================================================
+// M1: Call extraction skips function calls inside comments
+// ===========================================================================
+
+func TestParseFile_JS_CallsInComments_Skipped(t *testing.T) {
+	dir := t.TempDir()
+	const jsCode = `
+function processData(input) {
+  // fetch(url) should not produce a call edge
+  /* anotherFunc(x) inside block comment */
+  realCall(input);
+}
+`
+	path := writeFile(t, dir, "commented.js", jsCode)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	fetchID := types.GenerateNodeID("commented.js", "fetch")
+	anotherID := types.GenerateNodeID("commented.js", "anotherFunc")
+	realCallID := types.GenerateNodeID("commented.js", "realCall")
+
+	hasFetch := false
+	hasAnother := false
+	hasRealCall := false
+	for _, e := range result.Edges {
+		if e.EdgeType == types.EdgeTypeCalls {
+			if e.TargetID == fetchID {
+				hasFetch = true
+			}
+			if e.TargetID == anotherID {
+				hasAnother = true
+			}
+			if e.TargetID == realCallID {
+				hasRealCall = true
+			}
+		}
+	}
+
+	if hasFetch {
+		t.Error("fetch() inside line comment should NOT produce a call edge")
+	}
+	if hasAnother {
+		t.Error("anotherFunc() inside block comment should NOT produce a call edge")
+	}
+	if !hasRealCall {
+		t.Error("realCall() should produce a call edge")
+	}
+}
+
+func TestParseFile_PHP_CallsInComments_Skipped(t *testing.T) {
+	dir := t.TempDir()
+	const phpCode = `<?php
+
+function doWork($data) {
+    // phantom(123) should not produce edge
+    /* another_phantom($x) also skipped */
+    real_call($data);
+}
+`
+	path := writeFile(t, dir, "commented.php", phpCode)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	phantomID := types.GenerateNodeID("commented.php", "phantom")
+	anotherID := types.GenerateNodeID("commented.php", "another_phantom")
+	realCallID := types.GenerateNodeID("commented.php", "real_call")
+
+	hasPhantom := false
+	hasAnother := false
+	hasRealCall := false
+	for _, e := range result.Edges {
+		if e.EdgeType == types.EdgeTypeCalls {
+			if e.TargetID == phantomID {
+				hasPhantom = true
+			}
+			if e.TargetID == anotherID {
+				hasAnother = true
+			}
+			if e.TargetID == realCallID {
+				hasRealCall = true
+			}
+		}
+	}
+
+	if hasPhantom {
+		t.Error("phantom() inside line comment should NOT produce a call edge")
+	}
+	if hasAnother {
+		t.Error("another_phantom() inside block comment should NOT produce a call edge")
+	}
+	if !hasRealCall {
+		t.Error("real_call() should produce a call edge")
+	}
+}
+
+// ===========================================================================
+// M2: Template string interpolations allow call extraction
+// ===========================================================================
+
+func TestParseFile_JS_TemplateString_InterpolationCalls(t *testing.T) {
+	dir := t.TempDir()
+	// Use backtick template literal with an interpolation containing a function call
+	jsCode := "function render(data) {\n  const msg = `hello ${formatName(data)} world`;\n  return msg;\n}\n"
+	path := writeFile(t, dir, "template.js", jsCode)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	formatID := types.GenerateNodeID("template.js", "formatName")
+	hasFormat := false
+	for _, e := range result.Edges {
+		if e.EdgeType == types.EdgeTypeCalls && e.TargetID == formatID {
+			hasFormat = true
+		}
+	}
+	if !hasFormat {
+		t.Error("formatName() inside template interpolation ${...} should produce a call edge")
+	}
+}
+
+func TestParseFile_JS_TemplateString_NonInterpolation_Skipped(t *testing.T) {
+	dir := t.TempDir()
+	// Plain string part of template literal that looks like a call should be skipped
+	jsCode := "function render(data) {\n  const msg = `call notACall(x) here ${realCall(data)}`;\n  return msg;\n}\n"
+	path := writeFile(t, dir, "template2.js", jsCode)
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	notACallID := types.GenerateNodeID("template2.js", "notACall")
+	realCallID := types.GenerateNodeID("template2.js", "realCall")
+	hasNotACall := false
+	hasRealCall := false
+	for _, e := range result.Edges {
+		if e.EdgeType == types.EdgeTypeCalls {
+			if e.TargetID == notACallID {
+				hasNotACall = true
+			}
+			if e.TargetID == realCallID {
+				hasRealCall = true
+			}
+		}
+	}
+	if hasNotACall {
+		t.Error("notACall() in non-interpolation part of template string should NOT produce a call edge")
+	}
+	if !hasRealCall {
+		t.Error("realCall() inside ${...} interpolation should produce a call edge")
 	}
 }
 

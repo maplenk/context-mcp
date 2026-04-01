@@ -351,49 +351,68 @@ func TestWatcher_FileRenamed(t *testing.T) {
 	}
 }
 
-// M70: .gitignore hot-reload behavior test
+// ---- M17: .gitignore hot-reload behavior test ----
+
 func TestWatcher_GitignoreHotReload(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create initial .gitignore that does NOT exclude "gen/" directory
-	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("build/\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create the gen directory before starting the watcher
-	genDir := filepath.Join(dir, "gen")
-	if err := os.MkdirAll(genDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	w := newTestWatcher(t, dir, 50*time.Millisecond)
 
-	// Create a .go file in gen/ — should produce an event (not ignored)
-	genFile := filepath.Join(genDir, "generated.go")
-	if err := os.WriteFile(genFile, []byte("package gen\n"), 0644); err != nil {
+	// Step 1: Create initial .gitignore that excludes *.log
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte("*.log\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
+	// Step 2: Create a .log file — should be excluded
+	logFile := filepath.Join(dir, "debug.log")
+	if err := os.WriteFile(logFile, []byte("log data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	expectNoEvent(t, w, 500*time.Millisecond)
+
+	// Step 3: Create a .go file — should produce an event (not excluded)
+	goFile := filepath.Join(dir, "app.go")
+	if err := os.WriteFile(goFile, []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	ev := expectEvent(t, w, 3*time.Second)
-	if ev.Path != filepath.Join("gen", "generated.go") {
-		t.Errorf("expected path 'gen/generated.go', got %q", ev.Path)
+	if ev.Path != "app.go" {
+		t.Errorf("expected path 'app.go', got %q", ev.Path)
 	}
 
-	// Now modify .gitignore to exclude gen/
-	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("build/\ngen/\n"), 0644); err != nil {
+	// Step 4: Update .gitignore to also exclude *.tmp
+	if err := os.WriteFile(gitignorePath, []byte("*.log\n*.tmp\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Wait for the watcher to detect and reload the .gitignore
-	// The watcher detects .gitignore modifications and calls reloadGitignore
-	time.Sleep(500 * time.Millisecond)
-
-	// Now modify the file in gen/ — should NOT produce an event (now ignored)
-	if err := os.WriteFile(genFile, []byte("package gen\n\nfunc F() {}\n"), 0644); err != nil {
-		t.Fatal(err)
+	// The .gitignore write itself may or may not produce an event; drain it
+	time.Sleep(300 * time.Millisecond)
+	// Drain any pending events from the .gitignore modification
+drainLoop:
+	for {
+		select {
+		case <-w.Events():
+		default:
+			break drainLoop
+		}
 	}
 
-	expectNoEvent(t, w, 1*time.Second)
+	// Step 5: Create a .tmp file — should now be excluded after hot-reload
+	tmpFile := filepath.Join(dir, "cache.tmp")
+	if err := os.WriteFile(tmpFile, []byte("tmp data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	expectNoEvent(t, w, 500*time.Millisecond)
+
+	// Step 6: Create another .go file to confirm watcher still works
+	goFile2 := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(goFile2, []byte("package main\nfunc main(){}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ev2 := expectEvent(t, w, 3*time.Second)
+	if ev2.Path != "main.go" {
+		t.Errorf("expected path 'main.go', got %q", ev2.Path)
+	}
 }
 
 func TestWatcher_SubdirectoryEvents(t *testing.T) {

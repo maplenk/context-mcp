@@ -53,13 +53,18 @@ type ParseResult struct {
 
 // ParseFile parses a source file and extracts AST nodes and edges
 func (p *Parser) ParseFile(filePath string, repoRoot string) (*ParseResult, error) {
-	// M4: Read file first, then check size to avoid TOCTOU race
+	// Check file size to prevent memory bloat (skip files > 5MB)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat file %s: %w", filePath, err)
+	}
+	if info.Size() > 5*1024*1024 {
+		return nil, fmt.Errorf("file %s too large (%d bytes), skipping", filePath, info.Size())
+	}
+
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("reading file %s: %w", filePath, err)
-	}
-	if len(content) > 5*1024*1024 {
-		return nil, fmt.Errorf("file %s too large (%d bytes), skipping", filePath, len(content))
 	}
 
 	relPath, err := filepath.Rel(repoRoot, filePath)
@@ -279,32 +284,19 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 	return result, nil
 }
 
-// extractReceiverType gets the type name from a method receiver.
-// M2: Handles generic receivers like Stack[T] (IndexExpr) and Map[K,V] (IndexListExpr).
+// extractReceiverType gets the type name from a method receiver
 func extractReceiverType(recv *ast.FieldList) string {
 	if recv == nil || recv.NumFields() == 0 {
 		return ""
 	}
 	field := recv.List[0]
-	return extractBaseTypeName(field.Type)
-}
-
-// extractBaseTypeName recursively unwraps pointer, generic index, and paren expressions
-// to find the base type name identifier.
-func extractBaseTypeName(expr ast.Expr) string {
-	switch t := expr.(type) {
+	switch t := field.Type.(type) {
 	case *ast.Ident:
 		return t.Name
 	case *ast.StarExpr:
-		return extractBaseTypeName(t.X)
-	case *ast.IndexExpr:
-		// Generic receiver: Stack[T]
-		return extractBaseTypeName(t.X)
-	case *ast.IndexListExpr:
-		// Generic receiver with multiple type params: Map[K, V]
-		return extractBaseTypeName(t.X)
-	case *ast.ParenExpr:
-		return extractBaseTypeName(t.X)
+		if ident, ok := t.X.(*ast.Ident); ok {
+			return ident.Name
+		}
 	}
 	return ""
 }
@@ -326,38 +318,13 @@ func extractGoCalls(body *ast.BlockStmt) []string {
 			calls = append(calls, fn.Name)
 		case *ast.SelectorExpr:
 			// Method or package call: obj.Method() or pkg.Func()
-			// M10: Recursively unwrap chained SelectorExpr to find the root identifier
-			rootIdent := unwrapSelectorRoot(fn.X)
-			if rootIdent != "" {
-				calls = append(calls, rootIdent+"."+fn.Sel.Name)
-			} else {
-				// Chained call without identifiable root — just use the final method name
-				calls = append(calls, fn.Sel.Name)
+			if ident, ok := fn.X.(*ast.Ident); ok {
+				calls = append(calls, ident.Name+"."+fn.Sel.Name)
 			}
 		}
 		return true
 	})
 	return calls
-}
-
-// unwrapSelectorRoot recursively walks a SelectorExpr chain to find the root *ast.Ident name.
-// For example: a.b.c.Method() → returns "a" (the leftmost identifier).
-func unwrapSelectorRoot(expr ast.Expr) string {
-	switch x := expr.(type) {
-	case *ast.Ident:
-		return x.Name
-	case *ast.SelectorExpr:
-		return unwrapSelectorRoot(x.X)
-	case *ast.CallExpr:
-		// Chained call: foo().Bar() — try to resolve the function being called
-		switch fn := x.Fun.(type) {
-		case *ast.Ident:
-			return fn.Name
-		case *ast.SelectorExpr:
-			return unwrapSelectorRoot(fn.X)
-		}
-	}
-	return ""
 }
 
 // JavaScript/TypeScript regex patterns (kept for independent helper tests)
@@ -428,8 +395,7 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		return result, nil
 	}
 
-	// M3: Track names already added to avoid duplicates, keyed by name:nodeType
-	// to avoid dropping same-name different-type symbols
+	// Track names already added to avoid duplicates
 	seen := map[string]bool{}
 
 	// Walk the tree to extract declarations
@@ -443,18 +409,14 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		case "function_declaration":
 			// function name(...) { ... }
 			nameNode := n.ChildByFieldName("name")
-			// M9: Handle anonymous default exports — use "default" as synthetic name
-			var name string
 			if nameNode == nil {
-				name = "default"
-			} else {
-				name = nameNode.Content(content)
-			}
-			seenKey := name + ":function"
-			if seen[seenKey] {
 				return true // continue
 			}
-			seen[seenKey] = true
+			name := nameNode.Content(content)
+			if seen[name] {
+				return true // continue
+			}
+			seen[name] = true
 			startByte := int(n.StartByte())
 			endByte := n.EndByte()
 			contentSum := buildContentSum(lines, startByte, name)
@@ -490,17 +452,14 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				if nameNode == nil || valueNode == nil {
 					continue
 				}
-				// M5: Also detect function expressions (const fn = function() {})
-				valType := valueNode.Type()
-				if valType != "arrow_function" && valType != "function" && valType != "function_expression" {
+				if valueNode.Type() != "arrow_function" {
 					continue
 				}
 				name := nameNode.Content(content)
-				seenKey := name + ":function"
-				if seen[seenKey] {
+				if seen[name] {
 					continue
 				}
-				seen[seenKey] = true
+				seen[name] = true
 				startByte := int(n.StartByte())
 				endByte := n.EndByte()
 				contentSum := buildContentSum(lines, startByte, name)
@@ -529,11 +488,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				return true // continue
 			}
 			className := nameNode.Content(content)
-			seenKey := className + ":class"
-			if seen[seenKey] {
+			if seen[className] {
 				return false // skip children
 			}
-			seen[seenKey] = true
+			seen[className] = true
 			startByte := int(n.StartByte())
 			endByte := n.EndByte()
 			contentSum := buildContentSum(lines, startByte, className)
@@ -570,132 +528,48 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 			// Extract methods from class body
 			bodyNode := n.ChildByFieldName("body")
 			if bodyNode != nil {
-				// M8: Collect decorators for the class itself
-				for ci := 0; ci < int(n.ChildCount()); ci++ {
-					deco := n.Child(ci)
-					if deco != nil && deco.Type() == "decorator" {
-						decoText := deco.Content(content)
-						// Prepend decorator to class content summary
-						classNode := findNodeBySymbolInSlice(result.Nodes, className)
-						if classNode != nil {
-							classNode.ContentSum = decoText + " " + classNode.ContentSum
-						}
-					}
-				}
-
 				for i := 0; i < int(bodyNode.ChildCount()); i++ {
-					memberNode := bodyNode.Child(i)
-					if memberNode == nil || !memberNode.IsNamed() {
+					methodNode := bodyNode.Child(i)
+					if methodNode == nil || !methodNode.IsNamed() {
 						continue
 					}
-					memberType := memberNode.Type()
-
-					// M8: Collect decorators for methods/fields
-					var decoratorText string
-					if memberType == "method_definition" || memberType == "field_definition" || memberType == "public_field_definition" {
-						// Check preceding siblings for decorators
-						for di := i - 1; di >= 0; di-- {
-							prev := bodyNode.Child(di)
-							if prev != nil && prev.Type() == "decorator" {
-								if decoratorText == "" {
-									decoratorText = prev.Content(content)
-								} else {
-									decoratorText = prev.Content(content) + " " + decoratorText
-								}
-							} else {
-								break
-							}
-						}
+					if methodNode.Type() != "method_definition" {
+						continue
 					}
-
-					switch memberType {
-					case "method_definition":
-						methNameNode := memberNode.ChildByFieldName("name")
-						if methNameNode == nil {
-							continue
-						}
-						methodName := methNameNode.Content(content)
-						// Skip constructor and keywords
-						if methodName == "constructor" || methodName == "if" || methodName == "for" ||
-							methodName == "while" || methodName == "switch" || methodName == "catch" ||
-							methodName == "function" {
-							continue
-						}
-						qualifiedName := className + "." + methodName
-						methSeenKey := qualifiedName + ":method"
-						if seen[methSeenKey] {
-							continue
-						}
-						seen[methSeenKey] = true
-						mStartByte := int(memberNode.StartByte())
-						mEndByte := memberNode.EndByte()
-						mContentSum := buildContentSum(lines, mStartByte, qualifiedName)
-						if decoratorText != "" {
-							mContentSum = decoratorText + " " + mContentSum
-						}
-						result.Nodes = append(result.Nodes, types.ASTNode{
-							ID:         types.GenerateNodeID(relPath, qualifiedName),
-							FilePath:   relPath,
-							SymbolName: qualifiedName,
-							NodeType:   types.NodeTypeMethod,
-							StartByte:  memberNode.StartByte(),
-							EndByte:    mEndByte,
-							ContentSum: mContentSum,
-						})
-						// DEFINES_METHOD edge: class → method
-						result.Edges = append(result.Edges, types.ASTEdge{
-							SourceID: types.GenerateNodeID(relPath, className),
-							TargetID: types.GenerateNodeID(relPath, qualifiedName),
-							EdgeType: types.EdgeTypeDefinesMethod,
-						})
-
-					case "field_definition", "public_field_definition":
-						// H2: Class property arrow functions (bar = () => {})
-						propNameNode := memberNode.ChildByFieldName("name")
-						if propNameNode == nil {
-							// Try "property" field name as alternative
-							propNameNode = memberNode.ChildByFieldName("property")
-						}
-						if propNameNode == nil {
-							continue
-						}
-						propValueNode := memberNode.ChildByFieldName("value")
-						if propValueNode == nil {
-							continue
-						}
-						valType := propValueNode.Type()
-						if valType != "arrow_function" && valType != "function" && valType != "function_expression" {
-							continue
-						}
-						propName := propNameNode.Content(content)
-						qualifiedName := className + "." + propName
-						propSeenKey := qualifiedName + ":method"
-						if seen[propSeenKey] {
-							continue
-						}
-						seen[propSeenKey] = true
-						pStartByte := int(memberNode.StartByte())
-						pEndByte := memberNode.EndByte()
-						pContentSum := buildContentSum(lines, pStartByte, qualifiedName)
-						if decoratorText != "" {
-							pContentSum = decoratorText + " " + pContentSum
-						}
-						result.Nodes = append(result.Nodes, types.ASTNode{
-							ID:         types.GenerateNodeID(relPath, qualifiedName),
-							FilePath:   relPath,
-							SymbolName: qualifiedName,
-							NodeType:   types.NodeTypeMethod,
-							StartByte:  memberNode.StartByte(),
-							EndByte:    pEndByte,
-							ContentSum: pContentSum,
-						})
-						// DEFINES_METHOD edge: class → arrow function property
-						result.Edges = append(result.Edges, types.ASTEdge{
-							SourceID: types.GenerateNodeID(relPath, className),
-							TargetID: types.GenerateNodeID(relPath, qualifiedName),
-							EdgeType: types.EdgeTypeDefinesMethod,
-						})
+					methNameNode := methodNode.ChildByFieldName("name")
+					if methNameNode == nil {
+						continue
 					}
+					methodName := methNameNode.Content(content)
+					// Skip constructor and keywords
+					if methodName == "constructor" || methodName == "if" || methodName == "for" ||
+						methodName == "while" || methodName == "switch" || methodName == "catch" ||
+						methodName == "function" {
+						continue
+					}
+					qualifiedName := className + "." + methodName
+					if seen[qualifiedName] {
+						continue
+					}
+					seen[qualifiedName] = true
+					mStartByte := int(methodNode.StartByte())
+					mEndByte := methodNode.EndByte()
+					mContentSum := buildContentSum(lines, mStartByte, qualifiedName)
+					result.Nodes = append(result.Nodes, types.ASTNode{
+						ID:         types.GenerateNodeID(relPath, qualifiedName),
+						FilePath:   relPath,
+						SymbolName: qualifiedName,
+						NodeType:   types.NodeTypeMethod,
+						StartByte:  methodNode.StartByte(),
+						EndByte:    mEndByte,
+						ContentSum: mContentSum,
+					})
+					// DEFINES_METHOD edge: class → method
+					result.Edges = append(result.Edges, types.ASTEdge{
+						SourceID: types.GenerateNodeID(relPath, className),
+						TargetID: types.GenerateNodeID(relPath, qualifiedName),
+						EdgeType: types.EdgeTypeDefinesMethod,
+					})
 				}
 			}
 			return false // skip children
@@ -711,11 +585,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				return true // continue
 			}
 			name := nameNode.Content(content)
-			seenKey := name + ":interface"
-			if seen[seenKey] {
+			if seen[name] {
 				return false // skip children
 			}
-			seen[seenKey] = true
+			seen[name] = true
 			startByte := int(n.StartByte())
 			endByte := n.EndByte()
 			contentSum := buildContentSum(lines, startByte, name)
@@ -742,11 +615,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				return true // continue
 			}
 			name := nameNode.Content(content)
-			seenKey := name + ":enum"
-			if seen[seenKey] {
+			if seen[name] {
 				return false // skip children
 			}
-			seen[seenKey] = true
+			seen[name] = true
 			startByte := int(n.StartByte())
 			endByte := n.EndByte()
 			contentSum := buildContentSum(lines, startByte, name)
@@ -773,11 +645,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				return true // continue
 			}
 			name := nameNode.Content(content)
-			seenKey := name + ":type_alias"
-			if seen[seenKey] {
+			if seen[name] {
 				return false // skip children
 			}
-			seen[seenKey] = true
+			seen[name] = true
 			startByte := int(n.StartByte())
 			endByte := n.EndByte()
 			contentSum := buildContentSum(lines, startByte, name)
@@ -802,8 +673,11 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		return true // continue
 	})
 
-	// M12: Collect string literal ranges to filter out false regex matches
-	jsStringRanges := collectStringRanges(root)
+	// M1: Collect comment ranges from tree-sitter AST to filter phantom call edges
+	commentRanges := collectCommentRanges(root)
+	// M2: Collect string ranges (with template interpolation exclusions)
+	stringRanges := collectStringRanges(root)
+	skipRanges := append(commentRanges, stringRanges...)
 
 	// Extract call edges using regex on node bodies (M9: deduplicate)
 	callSeen := map[string]bool{}
@@ -815,18 +689,18 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 			continue
 		}
 		bodyText := string(content[node.StartByte:node.EndByte])
-		for _, matchIndices := range jsCallExprRe.FindAllStringSubmatchIndex(bodyText, -1) {
-			// matchIndices[2] and matchIndices[3] are the start/end of capture group 1
-			if len(matchIndices) < 4 {
+		for _, idxMatch := range jsCallExprRe.FindAllStringSubmatchIndex(bodyText, -1) {
+			// idxMatch[2]:idxMatch[3] is the capture group (function name)
+			if len(idxMatch) < 4 {
 				continue
 			}
-			target := bodyText[matchIndices[2]:matchIndices[3]]
-			// M12: Skip matches inside string literals
-			absOffset := node.StartByte + uint32(matchIndices[2])
-			if isInStringRange(absOffset, jsStringRanges) {
-				continue
-			}
+			target := bodyText[idxMatch[2]:idxMatch[3]]
 			if isJSKeyword(target) || target == node.SymbolName || target == extractBaseName(node.SymbolName) {
+				continue
+			}
+			// M1/M2: Check if the match falls within a comment or string range
+			absPos := node.StartByte + uint32(idxMatch[2])
+			if isInRange(absPos, skipRanges) {
 				continue
 			}
 			targetID := types.GenerateNodeID(relPath, target)
@@ -946,6 +820,14 @@ func extractStringContent(n *sitter.Node, source []byte) string {
 	return text
 }
 
+// skipLeadingNewline advances past a leading newline character at pos
+func skipLeadingNewline(content []byte, pos int) int {
+	if pos < len(content) && content[pos] == '\n' {
+		return pos + 1
+	}
+	return pos
+}
+
 // PHP regex patterns (kept for edge extraction and independent helper tests)
 var (
 	phpClassDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:abstract\s+)?class\s+(\w+)`)
@@ -1015,18 +897,16 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		nodeType := n.Type()
 
 		switch nodeType {
-		case "class_declaration", "trait_declaration":
-			// M1: Handle both class and trait declarations
+		case "class_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
 				return true // continue
 			}
 			className := nameNode.Content(content)
-			seenKey := className + ":class"
-			if seen[seenKey] {
+			if seen[className] {
 				return false // skip children
 			}
-			seen[seenKey] = true
+			seen[className] = true
 			startByte := int(n.StartByte())
 			endByte := n.EndByte()
 			contentSum := buildContentSum(lines, startByte, className)
@@ -1040,7 +920,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				EndByte:    endByte,
 				ContentSum: contentSum,
 			})
-			// DEFINES edge: file → class/trait
+			// DEFINES edge: file → class
 			result.Edges = append(result.Edges, types.ASTEdge{
 				SourceID: fileNode.ID,
 				TargetID: types.GenerateNodeID(relPath, className),
@@ -1111,11 +991,10 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 					}
 					methodName := methNameNode.Content(content)
 					qualifiedName := className + "." + methodName
-					methSeenKey := qualifiedName + ":method"
-					if seen[methSeenKey] {
+					if seen[qualifiedName] {
 						continue
 					}
-					seen[methSeenKey] = true
+					seen[qualifiedName] = true
 					mStartByte := int(methodNode.StartByte())
 					mEndByte := methodNode.EndByte()
 					mContentSum := buildContentSum(lines, mStartByte, qualifiedName)
@@ -1144,11 +1023,10 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				return true // continue
 			}
 			name := nameNode.Content(content)
-			seenKey := name + ":function"
-			if seen[seenKey] {
+			if seen[name] {
 				return false // skip children
 			}
-			seen[seenKey] = true
+			seen[name] = true
 			startByte := int(n.StartByte())
 			endByte := n.EndByte()
 			contentSum := buildContentSum(lines, startByte, name)
@@ -1193,22 +1071,10 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		return true // continue
 	})
 
-	// M12: Collect string literal ranges to filter out false regex matches in PHP
+	// M1: Collect comment ranges from tree-sitter AST to filter phantom call edges in PHP
+	phpCommentRanges := collectCommentRanges(root)
 	phpStringRanges := collectStringRanges(root)
-
-	// H1: Build parent class lookup from INHERITS edges for parent:: resolution
-	parentClassMap := map[string]string{} // childClass -> parentClass
-	for _, e := range result.Edges {
-		if e.EdgeType == types.EdgeTypeInherits && e.TargetSymbol != "" {
-			// Find the child class from its node ID
-			for _, nd := range result.Nodes {
-				if nd.ID == e.SourceID && nd.NodeType == types.NodeTypeClass {
-					parentClassMap[nd.SymbolName] = e.TargetSymbol
-					break
-				}
-			}
-		}
-	}
+	phpSkipRanges := append(phpCommentRanges, phpStringRanges...)
 
 	// Extract instantiation edges and call edges using regex on node bodies
 	// M9: deduplicate call edges
@@ -1223,13 +1089,13 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		bodyText := string(content[node.StartByte:node.EndByte])
 
 		// Instantiation edges: new ClassName()
-		for _, matchIdx := range phpNewExprRe.FindAllStringSubmatchIndex(bodyText, -1) {
-			if len(matchIdx) < 4 {
+		for _, idxMatch := range phpNewExprRe.FindAllStringSubmatchIndex(bodyText, -1) {
+			if len(idxMatch) < 4 {
 				continue
 			}
-			target := bodyText[matchIdx[2]:matchIdx[3]]
-			// M12: Skip matches inside string literals
-			if isInStringRange(node.StartByte+uint32(matchIdx[2]), phpStringRanges) {
+			target := bodyText[idxMatch[2]:idxMatch[3]]
+			absPos := node.StartByte + uint32(idxMatch[2])
+			if isInRange(absPos, phpSkipRanges) {
 				continue
 			}
 			targetID := types.GenerateNodeID(relPath, target)
@@ -1253,34 +1119,23 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				enclosingClass = node.SymbolName[:dotIdx]
 			}
 		}
-		for _, matchIdx := range phpMethodCallRe.FindAllStringSubmatchIndex(bodyText, -1) {
-			if len(matchIdx) < 6 {
+		for _, idxMatch := range phpMethodCallRe.FindAllStringSubmatchIndex(bodyText, -1) {
+			if len(idxMatch) < 6 {
 				continue
 			}
-			caller := bodyText[matchIdx[2]:matchIdx[3]]     // "$this", "$obj", "self", "static", "parent"
-			methodName := bodyText[matchIdx[4]:matchIdx[5]]  // bare method name
-			// M12: Skip matches inside string literals
-			if isInStringRange(node.StartByte+uint32(matchIdx[0]), phpStringRanges) {
-				continue
-			}
+			caller := bodyText[idxMatch[2]:idxMatch[3]]     // "$this", "$obj", "self", "static", "parent"
+			methodName := bodyText[idxMatch[4]:idxMatch[5]]  // bare method name
 			if phpCallKeywords[methodName] {
 				continue
 			}
-			// H1: When caller is "parent", resolve to the parent class name
-			isSelfCall := caller == "$this" || caller == "self" || caller == "static"
-			isParentCall := caller == "parent"
+			absPos := node.StartByte + uint32(idxMatch[4])
+			if isInRange(absPos, phpSkipRanges) {
+				continue
+			}
+			isSelfCall := caller == "$this" || caller == "self" || caller == "static" || caller == "parent"
 			var target string
 			var targetSymbol string
-			if isParentCall && enclosingClass != "" {
-				parentClass := parentClassMap[enclosingClass]
-				if parentClass != "" {
-					target = parentClass + "." + methodName
-				} else {
-					// No parent found in this file — use TargetSymbol for cross-file resolution
-					target = methodName
-					targetSymbol = "parent." + methodName
-				}
-			} else if isSelfCall && enclosingClass != "" {
+			if isSelfCall && enclosingClass != "" {
 				// $this->method() / self::method() — qualify with enclosing class
 				target = enclosingClass + "." + methodName
 			} else {
@@ -1303,14 +1158,14 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		}
 
 		// M5: Static call edges — ClassName::method()
-		for _, matchIdx := range phpStaticCallRe.FindAllStringSubmatchIndex(bodyText, -1) {
-			if len(matchIdx) < 6 {
+		for _, idxMatch := range phpStaticCallRe.FindAllStringSubmatchIndex(bodyText, -1) {
+			if len(idxMatch) < 6 {
 				continue
 			}
-			className := bodyText[matchIdx[2]:matchIdx[3]]
-			methodName := bodyText[matchIdx[4]:matchIdx[5]]
-			// M12: Skip matches inside string literals
-			if isInStringRange(node.StartByte+uint32(matchIdx[0]), phpStringRanges) {
+			className := bodyText[idxMatch[2]:idxMatch[3]]
+			methodName := bodyText[idxMatch[4]:idxMatch[5]]
+			absPos := node.StartByte + uint32(idxMatch[2])
+			if isInRange(absPos, phpSkipRanges) {
 				continue
 			}
 			target := className + "." + methodName
@@ -1329,16 +1184,16 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 
 		// M5: Plain function call edges — functionName()
 		if node.NodeType == types.NodeTypeFunction || node.NodeType == types.NodeTypeMethod {
-			for _, matchIdx := range phpFuncCallRe.FindAllStringSubmatchIndex(bodyText, -1) {
-				if len(matchIdx) < 4 {
+			for _, idxMatch := range phpFuncCallRe.FindAllStringSubmatchIndex(bodyText, -1) {
+				if len(idxMatch) < 4 {
 					continue
 				}
-				target := bodyText[matchIdx[2]:matchIdx[3]]
-				// M12: Skip matches inside string literals
-				if isInStringRange(node.StartByte+uint32(matchIdx[2]), phpStringRanges) {
-					continue
-				}
+				target := bodyText[idxMatch[2]:idxMatch[3]]
 				if phpCallKeywords[target] || target == extractBaseName(node.SymbolName) {
+					continue
+				}
+				absPos := node.StartByte + uint32(idxMatch[2])
+				if isInRange(absPos, phpSkipRanges) {
 					continue
 				}
 				targetID := types.GenerateNodeID(relPath, target)
@@ -1357,50 +1212,6 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	}
 
 	return result, nil
-}
-
-// byteRange represents a start/end byte range for string literal filtering.
-type byteRange struct {
-	start, end uint32
-}
-
-// collectStringRanges walks a tree-sitter AST and collects the byte ranges of all
-// string literal nodes, used for filtering out false regex matches inside strings (M12).
-func collectStringRanges(root *sitter.Node) []byteRange {
-	var ranges []byteRange
-	walkTree(root, func(n *sitter.Node) bool {
-		if !n.IsNamed() {
-			return true
-		}
-		nt := n.Type()
-		if nt == "string" || nt == "string_fragment" || nt == "template_string" ||
-			nt == "encapsed_string" || nt == "string_value" || nt == "heredoc" {
-			ranges = append(ranges, byteRange{n.StartByte(), n.EndByte()})
-			return false // no need to recurse into string children
-		}
-		return true
-	})
-	return ranges
-}
-
-// isInStringRange checks if a byte offset falls within any of the given string ranges.
-func isInStringRange(offset uint32, ranges []byteRange) bool {
-	for _, r := range ranges {
-		if offset >= r.start && offset < r.end {
-			return true
-		}
-	}
-	return false
-}
-
-// findNodeBySymbolInSlice returns a pointer to the first node with the given SymbolName, or nil.
-func findNodeBySymbolInSlice(nodes []types.ASTNode, name string) *types.ASTNode {
-	for i := range nodes {
-		if nodes[i].SymbolName == name {
-			return &nodes[i]
-		}
-	}
-	return nil
 }
 
 // extractBaseName returns the part after the last "." in a qualified name,
@@ -1557,8 +1368,6 @@ func looksLikeRegex(content []byte, i int) bool {
 // doc block (JSDoc /** ... */, PHPDoc, or consecutive // comments).
 func buildContentSum(lines []string, byteOffset int, name string) string {
 	// Find the line number for this byte offset
-	// M11: strings.Split on "\n" preserves \r from \r\n endings in each line element,
-	// so len(line)+1 correctly accounts for both \n and \r\n line endings.
 	currentOffset := 0
 	for i, line := range lines {
 		nextOffset := currentOffset + len(line) + 1 // +1 for newline
@@ -1611,16 +1420,14 @@ func collectDocBlock(lines []string, declLine int) []string {
 		return collected
 	}
 
-	// Check for single-line comment block (// lines only)
-	// M7: Only collect lines that are actual comments, not stray *-prefixed lines
+	// Check for single-line comment block (// or lines starting with *)
 	for j >= 0 {
 		line := strings.TrimSpace(lines[j])
 		if strings.HasPrefix(line, "//") {
 			collected = append([]string{cleanCommentLine(line)}, collected...)
 			j--
-		} else if strings.HasPrefix(line, "* ") || line == "*" || strings.HasPrefix(line, "/**") || strings.HasPrefix(line, "/*") {
-			// Inside a block comment — only match lines that look like doc comment content
-			// " * text" or bare "*" (common in multi-line block comments)
+		} else if strings.HasPrefix(line, "*") || strings.HasPrefix(line, "/**") {
+			// Inside a doc block — keep going up
 			collected = append([]string{cleanCommentLine(line)}, collected...)
 			if strings.HasPrefix(line, "/**") || strings.HasPrefix(line, "/*") {
 				break
@@ -1668,5 +1475,82 @@ var jsKeywords = map[string]bool{
 // isJSKeyword returns true if the name is a common JS keyword/builtin
 func isJSKeyword(name string) bool {
 	return jsKeywords[name]
+}
+
+// byteRange represents a contiguous range of bytes [Start, End).
+type byteRange struct {
+	Start uint32
+	End   uint32
+}
+
+// isInRange returns true if the given byte position falls within any of the ranges.
+func isInRange(pos uint32, ranges []byteRange) bool {
+	for _, r := range ranges {
+		if pos >= r.Start && pos < r.End {
+			return true
+		}
+	}
+	return false
+}
+
+// collectCommentRanges walks the tree-sitter AST and collects byte ranges of
+// all comment nodes (comment, line_comment, block_comment).
+func collectCommentRanges(root *sitter.Node) []byteRange {
+	var ranges []byteRange
+	walkTree(root, func(n *sitter.Node) bool {
+		if !n.IsNamed() {
+			return true
+		}
+		switch n.Type() {
+		case "comment", "line_comment", "block_comment":
+			ranges = append(ranges, byteRange{Start: n.StartByte(), End: n.EndByte()})
+			return false // no children to recurse into
+		}
+		return true
+	})
+	return ranges
+}
+
+// collectStringRanges walks the tree-sitter AST and collects byte ranges of
+// string literal nodes. For template strings (template_string), it excludes
+// interpolation children (template_substitution) so that function calls inside
+// ${...} expressions are not blocked.
+func collectStringRanges(root *sitter.Node) []byteRange {
+	var ranges []byteRange
+	walkTree(root, func(n *sitter.Node) bool {
+		if !n.IsNamed() {
+			return true
+		}
+		switch n.Type() {
+		case "string", "string_fragment", "encapsed_string":
+			ranges = append(ranges, byteRange{Start: n.StartByte(), End: n.EndByte()})
+			return false
+
+		case "template_string":
+			// M2: For template strings, add ranges for the non-interpolation parts only.
+			// Walk children and add gaps between template_substitution nodes.
+			cursor := n.StartByte()
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child == nil {
+					continue
+				}
+				if child.Type() == "template_substitution" {
+					// Add the range before this interpolation
+					if cursor < child.StartByte() {
+						ranges = append(ranges, byteRange{Start: cursor, End: child.StartByte()})
+					}
+					cursor = child.EndByte()
+				}
+			}
+			// Add the remaining range after the last interpolation
+			if cursor < n.EndByte() {
+				ranges = append(ranges, byteRange{Start: cursor, End: n.EndByte()})
+			}
+			return false // we handled children manually
+		}
+		return true
+	})
+	return ranges
 }
 

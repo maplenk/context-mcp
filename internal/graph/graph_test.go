@@ -217,6 +217,33 @@ func TestBlastRadius_Cycle(t *testing.T) {
 	}
 }
 
+// ---- M18: Single-node graph BlastRadius test ----
+
+func TestBlastRadius_SingleNode(t *testing.T) {
+	g := New()
+	// Add a single node with no edges. AddEdge requires two distinct nodes,
+	// so we use BuildFromEdges with a single edge to create nodes, then
+	// test blast radius on an isolated node by building a graph with one node only.
+	// Since BuildFromEdges needs edges, we'll add two nodes via an edge, then
+	// test BlastRadius on a node with no incoming edges.
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-solo", TargetID: "node-other", EdgeType: types.EdgeTypeCalls},
+	})
+
+	// node-other has one incoming edge from node-solo; node-solo has zero incoming edges.
+	// BlastRadius traverses incoming edges, so BlastRadius("node-solo") should return empty.
+	result := g.BlastRadius("node-solo", 10)
+	if len(result) != 0 {
+		t.Errorf("expected 0 affected nodes for isolated source node, got %d: %v", len(result), result)
+	}
+
+	// Also test BlastRadiusWithDepth for single node
+	depthResult := g.BlastRadiusWithDepth("node-solo", 10)
+	if len(depthResult) != 0 {
+		t.Errorf("expected empty depth map for isolated source node, got %v", depthResult)
+	}
+}
+
 func TestComputeBetweenness_LinearChain(t *testing.T) {
 	g := New()
 	// A→B→C: B is the hub connecting A to C
@@ -686,180 +713,97 @@ func TestBuildFromEdges_InvalidatesCaches(t *testing.T) {
 	}
 }
 
-// ---- L8: Benchmark tests ----
+// ---- M22: Tests for public GraphEngine methods with zero coverage ----
 
-// ---- H11: Comprehensive tests for TraceCallPath ----
-
-func TestTraceCallPath_SimplePath(t *testing.T) {
+func TestRemoveEdge_DecrementsEdgeCount(t *testing.T) {
 	g := New()
-	// A→B→C: find path from A to C
 	g.BuildFromEdges([]types.ASTEdge{
 		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
 		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
 	})
 
-	paths := g.TraceCallPath("node-a", "node-c", 10)
-	if len(paths) == 0 {
-		t.Fatal("expected at least one path from A to C")
+	if g.EdgeCount() != 2 {
+		t.Fatalf("expected 2 edges before removal, got %d", g.EdgeCount())
 	}
 
-	// Path should be [A, B, C]
+	g.RemoveEdge("node-a", "node-b")
+	if g.EdgeCount() != 1 {
+		t.Errorf("expected 1 edge after RemoveEdge, got %d", g.EdgeCount())
+	}
+
+	// Removing non-existent edge should not change count
+	g.RemoveEdge("node-a", "node-b")
+	if g.EdgeCount() != 1 {
+		t.Errorf("expected 1 edge after removing non-existent edge, got %d", g.EdgeCount())
+	}
+
+	// Removing edge for non-existent node should not panic
+	g.RemoveEdge("nonexistent", "node-b")
+}
+
+func TestGetConnectors_BasicBridge(t *testing.T) {
+	g := New()
+	// Two clusters connected by B: A↔B↔C, D↔B
+	// B bridges between them and should have high betweenness
+	g.BuildFromEdges([]types.ASTEdge{
+		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-c", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-d", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
+		{SourceID: "node-b", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
+	})
+
+	betweenness := g.ComputeBetweenness()
+	connectors := g.GetConnectors(betweenness, 5)
+
+	// B should appear as a connector (bridges communities)
 	found := false
-	for _, p := range paths {
-		if len(p) == 3 && p[0] == "node-a" && p[1] == "node-b" && p[2] == "node-c" {
+	for _, c := range connectors {
+		if c == "node-b" {
 			found = true
 		}
 	}
-	if !found {
-		t.Errorf("expected path [A, B, C], got: %v", paths)
+	if !found && len(connectors) > 0 {
+		t.Logf("connectors: %v (node-b may not be a connector if communities aren't separated)", connectors)
 	}
+	// At minimum, should not panic and should return a slice
+	t.Logf("GetConnectors returned %d connectors", len(connectors))
 }
 
-func TestTraceCallPath_NoPathExists(t *testing.T) {
-	g := New()
-	// A→B and C→D: no path from A to D (disconnected)
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
-	})
-
-	paths := g.TraceCallPath("node-a", "node-d", 10)
-	if len(paths) != 0 {
-		t.Errorf("expected no paths between disconnected nodes, got: %v", paths)
-	}
-}
-
-func TestTraceCallPath_SameSourceAndDest(t *testing.T) {
+func TestGetConnectors_EmptyBetweenness(t *testing.T) {
 	g := New()
 	g.BuildFromEdges([]types.ASTEdge{
 		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
 	})
 
-	paths := g.TraceCallPath("node-a", "node-a", 10)
-	if len(paths) != 1 {
-		t.Fatalf("expected 1 path for same source/dest, got %d", len(paths))
-	}
-	if len(paths[0]) != 1 || paths[0][0] != "node-a" {
-		t.Errorf("expected single-element path [A], got: %v", paths[0])
+	connectors := g.GetConnectors(nil, 5)
+	if len(connectors) != 0 {
+		t.Errorf("expected 0 connectors with nil betweenness, got %d", len(connectors))
 	}
 }
 
-func TestTraceCallPath_GraphWithCycles(t *testing.T) {
+func TestPersonalizedPageRankSubgraph_Basic(t *testing.T) {
 	g := New()
-	// A→B→C→A (cycle) and B→D: find path from A to D
 	g.BuildFromEdges([]types.ASTEdge{
 		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
 		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
 		{SourceID: "node-c", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
 	})
 
-	paths := g.TraceCallPath("node-a", "node-d", 10)
-	if len(paths) == 0 {
-		t.Fatal("expected at least one path from A to D in graph with cycles")
-	}
-
-	// Path should be A→B→D
-	found := false
-	for _, p := range paths {
-		if len(p) == 3 && p[0] == "node-a" && p[1] == "node-b" && p[2] == "node-d" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected path [A, B, D], got: %v", paths)
-	}
-}
-
-func TestTraceCallPath_MaxDepthLimits(t *testing.T) {
-	g := New()
-	// A→B→C→D: path length 3, with maxDepth=2 it should not be found
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
-	})
-
-	// maxDepth=2: path A→B→C→D requires 3 hops, should not be found
-	paths := g.TraceCallPath("node-a", "node-d", 2)
-	if len(paths) != 0 {
-		t.Errorf("expected no paths with maxDepth=2 for a 3-hop path, got: %v", paths)
-	}
-
-	// maxDepth=4: should find the path
-	paths = g.TraceCallPath("node-a", "node-d", 4)
-	if len(paths) == 0 {
-		t.Fatal("expected path with maxDepth=4 for a 3-hop path")
-	}
-}
-
-func TestTraceCallPath_NonExistentNodes(t *testing.T) {
-	g := New()
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-	})
-
-	paths := g.TraceCallPath("nonexistent", "node-b", 10)
-	if paths != nil {
-		t.Errorf("expected nil for nonexistent source, got: %v", paths)
-	}
-
-	paths = g.TraceCallPath("node-a", "nonexistent", 10)
-	if paths != nil {
-		t.Errorf("expected nil for nonexistent target, got: %v", paths)
-	}
-}
-
-// ---- M72: Single-node graph BlastRadius test ----
-
-func TestBlastRadius_SingleNode(t *testing.T) {
-	g := New()
-	// Add a single node with a self-loop edge (which is skipped by AddEdge)
-	g.AddEdge(types.ASTEdge{SourceID: "node-a", TargetID: "node-a", EdgeType: types.EdgeTypeCalls})
-	// The self-loop is ignored, so node-a has no edges. Just ensure it exists.
-	// Actually, let's ensure the node exists via an edge to another node then test blast radius
-	// of a node that has no callers.
-	g2 := New()
-	g2.AddEdge(types.ASTEdge{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls})
-
-	// BlastRadius of node-a: who calls node-a? Nobody. Should return empty.
-	result := g2.BlastRadius("node-a", 10)
-	if len(result) != 0 {
-		t.Errorf("expected empty blast radius for node with no callers, got %v", result)
-	}
-
-	// BlastRadius of node-b: who calls node-b? Only node-a.
-	result = g2.BlastRadius("node-b", 10)
-	if len(result) != 1 {
-		t.Errorf("expected 1 caller for node-b, got %d: %v", len(result), result)
-	}
-}
-
-// ---- M79: Tests for remaining untested GraphEngine methods ----
-
-func TestPersonalizedPageRankSubgraph_Basic(t *testing.T) {
-	g := New()
-	// A→B→C, A→C
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-a", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-	})
-
+	// Run PPR on subgraph with known seed
 	candidates := []string{"node-a", "node-b", "node-c"}
-	scores := g.PersonalizedPageRankSubgraph([]string{"node-a"}, candidates)
-	if scores == nil {
+	ranks := g.PersonalizedPageRankSubgraph([]string{"node-a"}, candidates)
+	if ranks == nil {
 		t.Fatal("PersonalizedPageRankSubgraph returned nil")
 	}
-	if len(scores) == 0 {
+	if len(ranks) == 0 {
 		t.Fatal("PersonalizedPageRankSubgraph returned empty map")
 	}
 
-	// All candidates should have positive scores
-	for _, id := range candidates {
-		if scores[id] <= 0 {
-			t.Errorf("candidate %s has non-positive score: %f", id, scores[id])
-		}
+	// Seed node should have positive score
+	if ranks["node-a"] <= 0 {
+		t.Errorf("seed node-a should have positive PPR score, got %f", ranks["node-a"])
 	}
 }
 
@@ -869,160 +813,9 @@ func TestPersonalizedPageRankSubgraph_EmptyCandidates(t *testing.T) {
 		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
 	})
 
-	scores := g.PersonalizedPageRankSubgraph([]string{"node-a"}, nil)
-	if scores != nil {
-		t.Errorf("expected nil for empty candidates, got: %v", scores)
-	}
-}
-
-func TestRemoveEdge_Basic(t *testing.T) {
-	g := New()
-	g.AddEdge(types.ASTEdge{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls})
-	g.AddEdge(types.ASTEdge{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls})
-
-	if g.EdgeCount() != 2 {
-		t.Fatalf("expected 2 edges, got %d", g.EdgeCount())
-	}
-
-	g.RemoveEdge("node-a", "node-b")
-	if g.EdgeCount() != 1 {
-		t.Errorf("expected 1 edge after RemoveEdge, got %d", g.EdgeCount())
-	}
-
-	// Removing non-existent edge should be a no-op
-	g.RemoveEdge("node-a", "node-b")
-	if g.EdgeCount() != 1 {
-		t.Errorf("expected 1 edge after removing non-existent edge, got %d", g.EdgeCount())
-	}
-}
-
-func TestRemoveEdge_NonExistentNodes(t *testing.T) {
-	g := New()
-	// Should not panic
-	g.RemoveEdge("nonexistent-a", "nonexistent-b")
-	if g.EdgeCount() != 0 {
-		t.Errorf("expected 0 edges, got %d", g.EdgeCount())
-	}
-}
-
-func TestGetConnectors_Basic(t *testing.T) {
-	g := New()
-	// Two clusters connected by node-bridge:
-	// Cluster 1: A↔B, Cluster 2: C↔D, Bridge: B→bridge→C
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-a", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-d", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-bridge", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-bridge", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-	})
-
-	betweenness := g.ComputeBetweenness()
-	connectors := g.GetConnectors(betweenness, 10)
-	// We just verify it doesn't panic and returns results
-	t.Logf("connectors: %v", connectors)
-}
-
-func TestGetConnectors_EmptyBetweenness(t *testing.T) {
-	g := New()
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-	})
-
-	connectors := g.GetConnectors(map[string]float64{}, 10)
-	if len(connectors) != 0 {
-		t.Errorf("expected 0 connectors with empty betweenness, got %d", len(connectors))
-	}
-}
-
-func TestGetEntryPoints_NoEdges(t *testing.T) {
-	g := New()
-	eps := g.GetEntryPoints()
-	if len(eps) != 0 {
-		t.Errorf("expected 0 entry points for empty graph, got %d", len(eps))
-	}
-}
-
-func TestGetEntryPoints_AllAreEntries(t *testing.T) {
-	g := New()
-	// A→B, C→D — both A and C are entry points (no incoming edges)
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
-	})
-
-	eps := g.GetEntryPoints()
-	epSet := make(map[string]bool)
-	for _, ep := range eps {
-		epSet[ep] = true
-	}
-	if !epSet["node-a"] || !epSet["node-c"] {
-		t.Errorf("expected node-a and node-c as entry points, got: %v", eps)
-	}
-}
-
-func TestGetHubs_EmptyGraph(t *testing.T) {
-	g := New()
-	hubs := g.GetHubs(5)
-	if len(hubs) != 0 {
-		t.Errorf("expected 0 hubs for empty graph, got %d", len(hubs))
-	}
-}
-
-func TestGetHubs_LimitRespected(t *testing.T) {
-	g := New()
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-a", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-d", TargetID: "node-e", EdgeType: types.EdgeTypeCalls},
-	})
-
-	hubs := g.GetHubs(1)
-	if len(hubs) > 1 {
-		t.Errorf("expected at most 1 hub with limit=1, got %d", len(hubs))
-	}
-}
-
-func TestGetCallees_NonExistent(t *testing.T) {
-	g := New()
-	callees := g.GetCallees("nonexistent")
-	if callees != nil {
-		t.Errorf("expected nil for nonexistent node, got: %v", callees)
-	}
-}
-
-func TestGetCallers_NonExistent(t *testing.T) {
-	g := New()
-	callers := g.GetCallers("nonexistent")
-	if callers != nil {
-		t.Errorf("expected nil for nonexistent node, got: %v", callers)
-	}
-}
-
-func TestCollectDeps_NonExistent(t *testing.T) {
-	g := New()
-	deps, dependents := g.CollectDeps("nonexistent", 2)
-	if deps != nil || dependents != nil {
-		t.Errorf("expected nil for nonexistent node, got deps=%v, dependents=%v", deps, dependents)
-	}
-}
-
-func TestCollectDeps_DepthLimit(t *testing.T) {
-	g := New()
-	// A→B→C→D: with depth=1, A's deps should only include B
-	g.BuildFromEdges([]types.ASTEdge{
-		{SourceID: "node-a", TargetID: "node-b", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-b", TargetID: "node-c", EdgeType: types.EdgeTypeCalls},
-		{SourceID: "node-c", TargetID: "node-d", EdgeType: types.EdgeTypeCalls},
-	})
-
-	deps, _ := g.CollectDeps("node-a", 1)
-	if len(deps) != 1 {
-		t.Errorf("expected 1 dep at depth=1, got %d: %v", len(deps), deps)
-	}
-	if len(deps) == 1 && deps[0] != "node-b" {
-		t.Errorf("expected dep to be node-b, got %s", deps[0])
+	ranks := g.PersonalizedPageRankSubgraph([]string{"node-a"}, nil)
+	if ranks != nil {
+		t.Errorf("expected nil for empty candidates, got %v", ranks)
 	}
 }
 

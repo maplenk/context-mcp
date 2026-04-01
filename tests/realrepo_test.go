@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/naman/qb-context/internal/embedding"
@@ -72,47 +71,54 @@ func (e *realRepoEnv) cleanup() {
 	}
 }
 
-// Shared singleton: index the repo once across all test functions.
-var (
-	sharedEnv        *realRepoEnv
-	sharedEnvOnce    sync.Once
-	sharedEnvErr     error
-	sharedCleanOnce  sync.Once
-)
+// sharedEnv holds the per-process test environment, initialized once in TestMain
+// and cleaned up after all tests run. This avoids global sync.Once state that
+// could interfere with parallel test execution (M21 fix).
+var sharedEnv *realRepoEnv
 
-// getSharedEnv returns the shared real-repo environment, indexing the repo
-// on first call. Subsequent calls return the cached result. Uses a temp dir
-// outside t.TempDir() so the DB survives across test functions.
-// Each caller registers a t.Cleanup that will close the store and remove the
-// temp dir (guarded by sync.Once so it only runs once).
+// TestMain initializes the shared real-repo environment once for all tests in
+// this package and cleans it up after they finish. This replaces the previous
+// sync.Once + global atomic pattern (M21) and uses a managed temp dir that is
+// cleaned up deterministically (M24).
+func TestMain(m *testing.M) {
+	// Check if real repo exists before doing heavy work
+	if _, err := os.Stat(realRepoPath); os.IsNotExist(err) {
+		// Run tests anyway — individual tests will skip via getSharedEnv
+		os.Exit(m.Run())
+	}
+
+	env, err := buildRealRepoEnv()
+	if err != nil {
+		// Cannot use t.Fatal in TestMain; print and exit
+		println("failed to build real repo env:", err.Error())
+		os.Exit(1)
+	}
+	sharedEnv = env
+
+	code := m.Run()
+
+	// Deterministic cleanup — no sync.Once needed
+	sharedEnv.cleanup()
+	os.Exit(code)
+}
+
+// getSharedEnv returns the shared real-repo environment initialized by TestMain.
+// Per-test state is not needed — the environment is read-only after init.
 func getSharedEnv(t *testing.T) *realRepoEnv {
 	t.Helper()
 
-	if _, err := os.Stat(realRepoPath); os.IsNotExist(err) {
-		t.Skipf("real repo not found at %s", realRepoPath)
+	if sharedEnv == nil {
+		t.Skipf("real repo not found at %s or env init failed", realRepoPath)
 	}
-
-	sharedEnvOnce.Do(func() {
-		sharedEnv, sharedEnvErr = buildRealRepoEnv()
-	})
-
-	if sharedEnvErr != nil {
-		t.Fatalf("failed to build real repo env: %v", sharedEnvErr)
-	}
-
-	// Register cleanup — sync.Once ensures store.Close + os.RemoveAll run exactly once.
-	t.Cleanup(func() {
-		sharedCleanOnce.Do(func() {
-			sharedEnv.cleanup()
-		})
-	})
 
 	return sharedEnv
 }
 
 // buildRealRepoEnv does the heavy lifting: walk, parse, store, build graph, register tools.
 func buildRealRepoEnv() (*realRepoEnv, error) {
-	// Use a persistent temp dir (not tied to a specific test)
+	// M24: os.MkdirTemp is used here because buildRealRepoEnv is called from
+	// TestMain (not from a *testing.T context), so t.TempDir() is unavailable.
+	// Cleanup is handled deterministically by TestMain via sharedEnv.cleanup().
 	tmpDir, err := os.MkdirTemp("", "qb-realrepo-test-*")
 	if err != nil {
 		return nil, err

@@ -933,6 +933,34 @@ func TestRawQuery_BlocksSemicolons(t *testing.T) {
 	}
 }
 
+// ---- M4: Recursive CTE DoS rejection ----
+
+func TestRawQuery_BlocksWithRecursive(t *testing.T) {
+	s := newTestStore(t)
+
+	cases := []string{
+		"WITH RECURSIVE bomb(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM bomb) SELECT * FROM bomb",
+		"with recursive cte AS (SELECT 1) SELECT * FROM cte",
+		"WITH  RECURSIVE cte AS (SELECT 1) SELECT * FROM cte", // extra whitespace
+	}
+
+	for _, q := range cases {
+		_, err := s.RawQuery(q)
+		if err == nil {
+			t.Errorf("expected WITH RECURSIVE to be blocked: %s", q)
+		}
+		if err != nil && !strings.Contains(err.Error(), "forbidden pattern") {
+			t.Errorf("expected 'forbidden pattern' in error for %q, got: %v", q, err)
+		}
+	}
+
+	// Non-recursive WITH (CTE) should still be allowed
+	_, err := s.RawQuery("WITH cte AS (SELECT 1 AS n) SELECT * FROM cte")
+	if err != nil {
+		t.Errorf("non-recursive WITH CTE should be allowed, got: %v", err)
+	}
+}
+
 // ---- C7+M1: UpsertNode atomicity (verify FTS sync) ----
 
 func TestUpsertNode_FTSSync(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,17 +24,19 @@ const DefaultEmbeddingDim = 384
 // sqliteVecOnce ensures sqlite_vec.Auto() is called exactly once.
 var sqliteVecOnce sync.Once
 
-// dangerousPatternRegexes is compiled once at package level to avoid
-// recompiling on every RawQuery call (M14).
-var dangerousPatternRegexes []*regexp.Regexp
-
-func init() {
-	patterns := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex", "recursive", "sqlite_master", "sqlite_schema"}
-	dangerousPatternRegexes = make([]*regexp.Regexp, len(patterns))
-	for i, p := range patterns {
-		dangerousPatternRegexes[i] = regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(p) + `\b`)
-	}
+// dangerousPatterns is the canonical blocklist of SQL patterns rejected by RawQuery.
+// Each entry is matched with word-boundary regex (case-insensitive) to avoid false
+// positives (e.g., "attachment" won't match "attach").
+// "edit" is intentionally omitted — it appears in normal identifiers; the real
+// protection against edit() is PRAGMA query_only / read-only transactions.
+var dangerousPatterns = []string{
+	"load_extension", "writefile", "readfile", "fts3_tokenizer",
+	"attach", "pragma", "vacuum", "reindex",
 }
+
+// recursiveCTERe matches WITH RECURSIVE (case-insensitive, flexible whitespace)
+// to block recursive CTE DoS vectors (exponential expansion).
+var recursiveCTERe = regexp.MustCompile(`(?i)\bWITH\s+RECURSIVE\b`)
 
 // Store manages all SQLite database operations
 type Store struct {
@@ -182,12 +185,6 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 	}
 	defer stmt.Close()
 
-	ftsDeleteStmt, err := tx.Prepare("DELETE FROM nodes_fts WHERE node_id = ?")
-	if err != nil {
-		return err
-	}
-	defer ftsDeleteStmt.Close()
-
 	ftsStmt, err := tx.Prepare("INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)")
 	if err != nil {
 		return err
@@ -200,7 +197,7 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 		if err != nil {
 			return err
 		}
-		if _, err := ftsDeleteStmt.Exec(node.ID); err != nil {
+		if _, err := tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
 			return fmt.Errorf("FTS delete for %s: %w", node.ID, err)
 		}
 		if _, err := ftsStmt.Exec(node.SymbolName, node.ContentSum, node.ID); err != nil {
@@ -260,13 +257,9 @@ func (s *Store) DeleteByFile(filePath string) error {
 		return err
 	}
 
-	// Delete embeddings (ignore error only if vec0 table doesn't exist)
-	if _, err := tx.Exec(`
-		DELETE FROM node_embeddings WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath); err != nil {
-		if !strings.Contains(err.Error(), "no such table") {
-			return err
-		}
-	}
+	// Delete embeddings (ignore error if vec0 table doesn't exist)
+	_, _ = tx.Exec(`
+		DELETE FROM node_embeddings WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
 
 	// Delete node_scores
 	_, err = tx.Exec(`DELETE FROM node_scores WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath)
@@ -595,15 +588,9 @@ func (s *Store) HasVecTable() bool {
 // SearchSemantic performs KNN semantic search using sqlite-vec.
 // Returns nil, nil (empty results, no error) if sqlite-vec is not available,
 // enabling graceful degradation to lexical-only search.
-// Returns an error if the query embedding dimension does not match the store's
-// configured dimension, preventing garbage KNN results from mismatched vectors.
 func (s *Store) SearchSemantic(queryEmbedding []float32, limit int) ([]types.SearchResult, error) {
 	if !s.hasVecTable {
 		return nil, nil
-	}
-
-	if len(queryEmbedding) != s.embeddingDim {
-		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, want %d", len(queryEmbedding), s.embeddingDim)
 	}
 
 	s.mu.RLock()
@@ -659,23 +646,32 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("multi-statement queries are not allowed (semicolons forbidden)")
 	}
 
+	// Reject recursive CTEs to prevent CPU exhaustion via exponential expansion.
+	if recursiveCTERe.MatchString(query) {
+		return nil, fmt.Errorf("query contains forbidden pattern: WITH RECURSIVE")
+	}
+
 	// Reject queries containing dangerous SQLite functions/patterns.
-	// Uses word-boundary regex (pre-compiled at package level) to avoid false
-	// positives (e.g., "attachment", "credited").
-	// "edit" is intentionally omitted — it appears in normal identifiers and the real
-	// protection against edit() is PRAGMA query_only / read-only transactions.
-	dangerousNames := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex", "recursive", "sqlite_master", "sqlite_schema"}
-	for i, re := range dangerousPatternRegexes {
+	// Uses word-boundary regex to avoid false positives (e.g., "attachment", "credited").
+	// See package-level dangerousPatterns for the canonical blocklist.
+	for _, pattern := range dangerousPatterns {
+		re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(pattern) + `\b`)
 		if re.MatchString(query) {
-			return nil, fmt.Errorf("query contains forbidden pattern: %s", dangerousNames[i])
+			return nil, fmt.Errorf("query contains forbidden pattern: %s", pattern)
 		}
 	}
 
-	// Clamp results to 500 to prevent DoS via unbounded result sets.
-	// Wrap the user query in a subquery with an outer LIMIT 500.
-	// This avoids parsing/replacing LIMIT clauses (which can be bypassed via
-	// subqueries or Atoi overflow) and guarantees at most 500 rows are returned.
-	query = "SELECT * FROM (" + query + ") LIMIT 500"
+	// Clamp LIMIT to 500 to prevent DoS via unbounded result sets.
+	// If user supplies LIMIT > 500, replace it. If no LIMIT, append one.
+	limitRe := regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)\b`)
+	if matches := limitRe.FindStringSubmatch(query); len(matches) > 1 {
+		userLimit, _ := strconv.Atoi(matches[1])
+		if userLimit > 500 {
+			query = limitRe.ReplaceAllString(query, "LIMIT 500")
+		}
+	} else {
+		query = query + " LIMIT 500"
+	}
 
 	// Pin a connection from the pool and enforce read-only at the SQLite level.
 	// mattn/go-sqlite3 ignores TxOptions{ReadOnly: true}, so we must use PRAGMA.
@@ -689,14 +685,8 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only = ON"); err != nil {
 		return nil, fmt.Errorf("enabling query_only: %w", err)
 	}
-	// Always restore the connection to read-write before returning to pool.
-	// If restoration fails, close the connection to prevent returning a
-	// poisoned (stuck read-only) connection to the pool.
-	defer func() {
-		if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only = OFF"); err != nil {
-			conn.Close()
-		}
-	}()
+	// Always restore the connection to read-write before returning to pool
+	defer conn.ExecContext(context.Background(), "PRAGMA query_only = OFF")
 
 	rows, err := conn.QueryContext(context.Background(), query)
 	if err != nil {
@@ -872,20 +862,14 @@ func (s *Store) GetAllFilePaths() ([]string, error) {
 	return paths, rows.Err()
 }
 
-// SearchNodesByName searches for nodes whose symbol_name contains the given pattern (case-insensitive).
-// LIKE wildcards (%, _) in the pattern are escaped using '\' as the ESCAPE character.
-// Results are capped at 100 rows to prevent unbounded result sets for short patterns.
+// SearchNodesByName searches for nodes whose symbol_name contains the given pattern (case-insensitive)
 func (s *Store) SearchNodesByName(pattern string) ([]types.ASTNode, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Escape LIKE wildcards in the user-provided pattern
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(pattern)
-
 	rows, err := s.db.Query(`
 		SELECT id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum
-		FROM nodes WHERE symbol_name LIKE ? ESCAPE '\' COLLATE NOCASE
-		LIMIT 100`, "%"+escaped+"%")
+		FROM nodes WHERE symbol_name LIKE ? COLLATE NOCASE`, "%"+pattern+"%")
 	if err != nil {
 		return nil, err
 	}
@@ -967,29 +951,6 @@ func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`SELECT node_id, pagerank, betweenness FROM node_scores`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var scores []types.NodeScore
-	for rows.Next() {
-		var score types.NodeScore
-		if err := rows.Scan(&score.NodeID, &score.PageRank, &score.Betweenness); err != nil {
-			return nil, err
-		}
-		scores = append(scores, score)
-	}
-	return scores, rows.Err()
-}
-
-// GetTopNodeScoresByPageRank returns the top N node scores ordered by PageRank descending.
-// M43: Avoids loading all scores into memory when only top-N are needed.
-func (s *Store) GetTopNodeScoresByPageRank(limit int) ([]types.NodeScore, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.db.Query(`SELECT node_id, pagerank, betweenness FROM node_scores ORDER BY pagerank DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

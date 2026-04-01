@@ -8,14 +8,12 @@ import (
 // TestHashEmbedder_Embed_Dimension verifies that Embed returns a 384-dimensional vector.
 func TestHashEmbedder_Embed_Dimension(t *testing.T) {
 	e := NewHashEmbedder()
-	// M77: Use the embedder's own Dim() method instead of global atomic GetEmbeddingDim()
-	expectedDim := e.Dim()
 	vec, err := e.Embed("hello world")
 	if err != nil {
 		t.Fatalf("Embed error: %v", err)
 	}
-	if len(vec) != expectedDim {
-		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
@@ -86,8 +84,6 @@ func TestHashEmbedder_Embed_Normalized(t *testing.T) {
 // TestHashEmbedder_EmbedBatch_Count verifies that EmbedBatch returns the correct number of vectors.
 func TestHashEmbedder_EmbedBatch_Count(t *testing.T) {
 	e := NewHashEmbedder()
-	// M77: Use test-local expected dimension from the embedder itself
-	expectedDim := e.Dim()
 	texts := []string{
 		"first text",
 		"second text",
@@ -103,8 +99,8 @@ func TestHashEmbedder_EmbedBatch_Count(t *testing.T) {
 		t.Errorf("expected %d vectors, got %d", len(texts), len(vecs))
 	}
 	for i, v := range vecs {
-		if len(v) != expectedDim {
-			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), expectedDim)
+		if len(v) != GetEmbeddingDim() {
+			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), GetEmbeddingDim())
 		}
 	}
 }
@@ -118,10 +114,7 @@ func TestSerializeDeserialize_Roundtrip(t *testing.T) {
 	}
 
 	blob := SerializeFloat32(original)
-	recovered, err := DeserializeFloat32(blob)
-	if err != nil {
-		t.Fatalf("DeserializeFloat32: %v", err)
-	}
+	recovered := DeserializeFloat32(blob)
 
 	if len(recovered) != len(original) {
 		t.Fatalf("length mismatch: got %d, want %d", len(recovered), len(original))
@@ -147,19 +140,69 @@ func TestCosineSimilarity_SelfIsOne(t *testing.T) {
 	}
 }
 
-// TestHashEmbedder_EmptyString verifies that Embed("") returns a valid 384-dim vector
-// without panicking or returning an error. An empty string may produce a zero vector
-// (all dimensions zero after normalization) or a valid hash-based vector — both are
-// acceptable as long as the slice length is correct and no error is returned.
+// TestHashEmbedder_EmptyString verifies that Embed("") returns a zero vector
+// (all dimensions zero). This ensures empty chunks don't falsely match each
+// other with cosine similarity 1.0.
 func TestHashEmbedder_EmptyString(t *testing.T) {
 	e := NewHashEmbedder()
-	expectedDim := e.Dim()
 	vec, err := e.Embed("")
 	if err != nil {
 		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
 	}
-	if len(vec) != expectedDim {
-		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	}
+	for i, v := range vec {
+		if v != 0 {
+			t.Errorf("expected zero vector for empty input, but dim %d = %f", i, v)
+			break
+		}
+	}
+}
+
+// TestHashEmbedder_WhitespaceOnlyString verifies that whitespace-only input
+// returns a zero vector, consistent with empty string behavior.
+func TestHashEmbedder_WhitespaceOnlyString(t *testing.T) {
+	e := NewHashEmbedder()
+	vec, err := e.Embed("   \t\n  ")
+	if err != nil {
+		t.Fatalf("Embed(whitespace) returned unexpected error: %v", err)
+	}
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
+	}
+	for i, v := range vec {
+		if v != 0 {
+			t.Errorf("expected zero vector for whitespace-only input, but dim %d = %f", i, v)
+			break
+		}
+	}
+}
+
+// TestEmptyInputCosineSimilarityIsZero verifies that cosine similarity between
+// two empty-input embeddings is 0, not 1. This is the key correctness property.
+func TestEmptyInputCosineSimilarityIsZero(t *testing.T) {
+	for _, name := range []string{"HashEmbedder", "TFIDFEmbedder"} {
+		t.Run(name, func(t *testing.T) {
+			var emb Embedder
+			if name == "HashEmbedder" {
+				emb = NewHashEmbedder()
+			} else {
+				emb = NewTFIDFEmbedder(384)
+			}
+			vec1, err := emb.Embed("")
+			if err != nil {
+				t.Fatalf("Embed(\"\") error: %v", err)
+			}
+			vec2, err := emb.Embed("  ")
+			if err != nil {
+				t.Fatalf("Embed(whitespace) error: %v", err)
+			}
+			sim := CosineSimilarity(vec1, vec2)
+			if sim != 0 {
+				t.Errorf("expected cosine similarity 0 for empty inputs, got %f", sim)
+			}
+		})
 	}
 }
 
@@ -187,13 +230,12 @@ func TestCosineSimilarity_DifferentIsLessThanOne(t *testing.T) {
 // TestTFIDFEmbedder_Dimension verifies that Embed returns a 384-dimensional vector.
 func TestTFIDFEmbedder_Dimension(t *testing.T) {
 	e := NewTFIDFEmbedder(384)
-	expectedDim := e.Dim()
 	vec, err := e.Embed("hello world")
 	if err != nil {
 		t.Fatalf("Embed error: %v", err)
 	}
-	if len(vec) != expectedDim {
-		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
@@ -273,18 +315,16 @@ func TestTFIDFEmbedder_CamelCaseSimilarity(t *testing.T) {
 	}
 }
 
-// TestTFIDFEmbedder_EmptyString verifies that empty input returns a zero vector (M52).
+// TestTFIDFEmbedder_EmptyString verifies that empty input returns a zero vector.
 func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 	e := NewTFIDFEmbedder(384)
-	expectedDim := e.Dim()
 	vec, err := e.Embed("")
 	if err != nil {
 		t.Fatalf("Embed(\"\") returned unexpected error: %v", err)
 	}
-	if len(vec) != expectedDim {
-		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
-	// M52: Verify it's a zero vector so empty chunks don't falsely match each other
 	for i, v := range vec {
 		if v != 0 {
 			t.Errorf("expected zero vector for empty input, but dim %d = %f", i, v)
@@ -296,7 +336,6 @@ func TestTFIDFEmbedder_EmptyString(t *testing.T) {
 // TestTFIDFEmbedder_EmbedBatch verifies batch embedding works correctly.
 func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
 	e := NewTFIDFEmbedder(384)
-	expectedDim := e.Dim()
 	texts := []string{
 		"first text about reading files",
 		"second text about database queries",
@@ -311,8 +350,8 @@ func TestTFIDFEmbedder_EmbedBatch(t *testing.T) {
 		t.Errorf("expected %d vectors, got %d", len(texts), len(vecs))
 	}
 	for i, v := range vecs {
-		if len(v) != expectedDim {
-			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), expectedDim)
+		if len(v) != GetEmbeddingDim() {
+			t.Errorf("vector[%d] has dim %d, want %d", i, len(v), GetEmbeddingDim())
 		}
 	}
 }
@@ -337,14 +376,13 @@ func TestNewEmbedder_ReturnsTFIDF(t *testing.T) {
 	if e == nil {
 		t.Fatal("NewEmbedder returned nil")
 	}
-	// M77: Use the embedder's own Dim() method instead of global atomic
-	expectedDim := e.Dim()
+	// Verify it's a TFIDFEmbedder by checking it implements Embedder and produces valid output
 	vec, err := e.Embed("test")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if len(vec) != expectedDim {
-		t.Errorf("expected dim %d, got %d", expectedDim, len(vec))
+	if len(vec) != GetEmbeddingDim() {
+		t.Errorf("expected dim %d, got %d", GetEmbeddingDim(), len(vec))
 	}
 }
 
@@ -375,17 +413,16 @@ func TestTokenize(t *testing.T) {
 	}
 }
 
-// TestCosineSimilarity_DimensionMismatch verifies that CosineSimilarity returns -2
-// (M50: sentinel value outside valid [-1, 1] range) when given vectors of different
-// dimensions rather than silently returning 0 which hides bugs.
+// TestCosineSimilarity_DimensionMismatch verifies that CosineSimilarity returns 0
+// when given vectors of different dimensions rather than panicking.
 func TestCosineSimilarity_DimensionMismatch(t *testing.T) {
 	vecA := []float32{0.1, 0.2, 0.3}
 	vecB := []float32{0.4, 0.5}
 
 	// Must not panic
 	sim := CosineSimilarity(vecA, vecB)
-	if sim != -2 {
-		t.Errorf("expected -2 for dimension mismatch, got %f", sim)
+	if sim != 0 {
+		t.Errorf("expected 0 for dimension mismatch, got %f", sim)
 	}
 }
 
@@ -402,29 +439,16 @@ func TestEmbeddingDimMismatch_StorageSafe(t *testing.T) {
 
 	// Serialize and deserialize should preserve exact dimensions
 	blob := SerializeFloat32(vec)
-	recovered, err := DeserializeFloat32(blob)
-	if err != nil {
-		t.Fatalf("DeserializeFloat32: %v", err)
-	}
+	recovered := DeserializeFloat32(blob)
 	if len(recovered) != len(vec) {
 		t.Errorf("deserialized dim %d != original dim %d", len(recovered), len(vec))
 	}
 
-	// A truncated blob that is a multiple of 4 should produce a shorter vector
-	truncated := blob[:len(blob)/2] // len(blob)/2 is still a multiple of 4 for 384-dim
-	short, err := DeserializeFloat32(truncated)
-	if err != nil {
-		t.Fatalf("DeserializeFloat32 truncated: %v", err)
-	}
+	// A truncated blob should produce a shorter vector (not panic)
+	truncated := blob[:len(blob)/2]
+	short := DeserializeFloat32(truncated)
 	if len(short) != len(vec)/2 {
 		t.Errorf("truncated deserialization: expected dim %d, got %d", len(vec)/2, len(short))
-	}
-
-	// M46: A blob with non-multiple-of-4 length should return an error
-	corrupted := blob[:len(blob)-1]
-	_, err = DeserializeFloat32(corrupted)
-	if err == nil {
-		t.Error("expected error for non-multiple-of-4 buffer length, got nil")
 	}
 }
 

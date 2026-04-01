@@ -192,6 +192,15 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 }
 
 // EmbedBatch generates embeddings for multiple texts.
+// Note: This iterates sequentially rather than using true batch inference.
+// The underlying ONNX session is protected by a mutex (not thread-safe) and
+// currently configured for single-sequence input tensors with shape [1, seqLen].
+// True batching would require padding all inputs to the same length, creating
+// tensors with shape [batchSize, maxSeqLen], and adjusting the attention mask
+// accordingly. The onnxruntime-purego bindings support this in principle, but
+// the model was exported with batch_size=1 and variable-length sequences
+// have different padding requirements. The sequential approach is simpler and
+// avoids wasting compute on padding tokens.
 func (e *ONNXEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	results := make([][]float32, len(texts))
 	for i, text := range texts {

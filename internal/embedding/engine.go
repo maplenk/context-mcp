@@ -3,7 +3,6 @@ package embedding
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
 	"hash/fnv"
 	"math"
 	"strings"
@@ -74,8 +73,9 @@ func (e *TFIDFEmbedder) Embed(text string) ([]float32, error) {
 	text = strings.TrimSpace(text)
 	dim := e.dim
 	if text == "" {
-		// M52: Return a zero vector for empty input so empty chunks don't
-		// falsely match each other with cosine similarity 1.0.
+		// Return zero vector for empty/whitespace-only input. A non-zero
+		// vector would cause all empty chunks to have cosine similarity 1.0
+		// with each other, which is semantically incorrect.
 		return make([]float32, dim), nil
 	}
 
@@ -140,9 +140,13 @@ func (e *TFIDFEmbedder) Embed(text string) ([]float32, error) {
 }
 
 // EmbedBatch generates embeddings for multiple texts.
-// M48/TODO: This is sequential (N forward passes). For ONNX-backed embedders,
-// batching into a single forward pass would significantly improve throughput.
-// For TFIDFEmbedder the overhead is minimal since there's no model inference.
+// Note: This iterates sequentially rather than using true batch inference.
+// TFIDFEmbedder is a pure-Go CPU implementation with no external accelerator
+// or runtime that could benefit from batched execution. Each Embed() call is
+// independent and CPU-bound, so there is no amortizable per-call overhead
+// (no session setup, no GPU kernel launch, etc.). Parallelizing with goroutines
+// was considered but adds complexity without meaningful speedup for the typical
+// batch sizes used in this codebase (chunked documents, ≤100 items).
 func (e *TFIDFEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	results := make([][]float32, len(texts))
 	for i, text := range texts {
@@ -170,10 +174,6 @@ func (e *TFIDFEmbedder) Close() error {
 // Each hash function selects a dimension and adds/subtracts the weight,
 // producing a sparse random projection (similar to random indexing / SimHash).
 func projectToken(vec []float32, token string, weight float32) {
-	// M47: Guard against zero-length vector to prevent divide-by-zero panic.
-	if len(vec) == 0 {
-		return
-	}
 	// Use 4 independent projections per token for good coverage
 	embDim := uint32(len(vec))
 	for seed := uint32(0); seed < 4; seed++ {
@@ -211,19 +211,9 @@ func tokenize(text string) []string {
 		parts := splitCamelCase(word)
 		for _, part := range parts {
 			lower := strings.ToLower(part)
-			if lower == "" {
-				continue
+			if lower != "" && len(lower) >= 2 {
+				tokens = append(tokens, lower)
 			}
-			// M45: Keep single-character alphanumeric tokens (e.g., variable names
-			// like i, j, x, n). Only drop single-character non-alphanumeric tokens.
-			if len(lower) == 1 {
-				r := rune(lower[0])
-				if unicode.IsLetter(r) || unicode.IsDigit(r) {
-					tokens = append(tokens, lower)
-				}
-				continue
-			}
-			tokens = append(tokens, lower)
 		}
 	}
 
@@ -290,6 +280,13 @@ func (e *HashEmbedder) Embed(text string) ([]float32, error) {
 	text = strings.ToLower(strings.TrimSpace(text))
 	dim := GetEmbeddingDim()
 
+	// Return zero vector for empty/whitespace-only input, consistent with
+	// TFIDFEmbedder behavior. A non-zero vector for empty input would cause
+	// all empty chunks to have cosine similarity 1.0 with each other.
+	if text == "" {
+		return make([]float32, dim), nil
+	}
+
 	// Generate multiple hashes from the text and sliding windows
 	vec := make([]float32, dim)
 
@@ -309,11 +306,9 @@ func (e *HashEmbedder) Embed(text string) ([]float32, error) {
 		}
 	}
 
-	// H8: Use rune-based indexing for character n-grams to correctly handle
-	// multi-byte UTF-8 characters (CJK, accented chars, etc.)
-	runes := []rune(text)
-	for i := 0; i <= len(runes)-3 && i < dim; i++ {
-		trigram := string(runes[i : i+3])
+	// Use character n-grams for the rest
+	for i := 0; i < len(text)-2 && i < dim; i++ {
+		trigram := text[i : i+3]
 		h := sha256.Sum256([]byte(trigram))
 		idx := (256 + i) % dim
 		if vec[idx] == 0 {
@@ -328,7 +323,11 @@ func (e *HashEmbedder) Embed(text string) ([]float32, error) {
 }
 
 // EmbedBatch generates embeddings for multiple texts.
-// M48/TODO: Sequential implementation — see TFIDFEmbedder.EmbedBatch comment.
+// Note: This iterates sequentially rather than using true batch inference.
+// HashEmbedder is a pure-Go CPU implementation (SHA-256 hashing) with no
+// external runtime that could benefit from batched execution. Each Embed()
+// call is independent with negligible overhead, so sequential iteration
+// is appropriate.
 func (e *HashEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	results := make([][]float32, len(texts))
 	for i, text := range texts {
@@ -376,25 +375,19 @@ func SerializeFloat32(v []float32) []byte {
 	return buf
 }
 
-// DeserializeFloat32 converts a little-endian byte slice back to float32 slice.
-// M46: Returns an error if the input length is not a multiple of 4 (corrupted data).
-func DeserializeFloat32(buf []byte) ([]float32, error) {
-	if len(buf)%4 != 0 {
-		return nil, fmt.Errorf("DeserializeFloat32: buffer length %d is not a multiple of 4 (corrupted data)", len(buf))
-	}
+// DeserializeFloat32 converts a little-endian byte slice back to float32 slice
+func DeserializeFloat32(buf []byte) []float32 {
 	vec := make([]float32, len(buf)/4)
 	for i := range vec {
 		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[i*4:]))
 	}
-	return vec, nil
+	return vec
 }
 
-// CosineSimilarity computes cosine similarity between two vectors.
-// M50: Returns -2 (outside the valid [-1, 1] range) for mismatched dimensions
-// to make dimension bugs visible rather than silently returning 0.
+// CosineSimilarity computes cosine similarity between two vectors
 func CosineSimilarity(a, b []float32) float64 {
 	if len(a) != len(b) {
-		return -2
+		return 0
 	}
 	var dot, normA, normB float64
 	for i := range a {
