@@ -11,13 +11,49 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	mcp_golang "github.com/metoro-io/mcp-golang"
 
 	"github.com/naman/qb-context/internal/graph"
 	"github.com/naman/qb-context/internal/search"
 	"github.com/naman/qb-context/internal/storage"
+	"github.com/naman/qb-context/internal/types"
 )
+
+// Version is the package-level version string, referenced by both server.go and tools.go (M40).
+const Version = "0.2.0"
+
+// communityCache caches community detection results to avoid recomputation (M38, M44).
+type communityCache struct {
+	mu           sync.Mutex
+	communities  []types.Community
+	modularity   float64
+	changeCount  int // graph changeCount at time of caching
+	valid        bool
+}
+
+// globalCommunityCache is shared between understand, architectureSummary, and graph/stats handlers.
+var globalCommunityCache communityCache
+
+// getCachedCommunities returns cached community detection results if the graph hasn't changed.
+func getCachedCommunities(g *graph.GraphEngine) ([]types.Community, float64) {
+	globalCommunityCache.mu.Lock()
+	defer globalCommunityCache.mu.Unlock()
+
+	currentChangeCount := g.ChangeCount()
+	if globalCommunityCache.valid && globalCommunityCache.changeCount == currentChangeCount {
+		return globalCommunityCache.communities, globalCommunityCache.modularity
+	}
+
+	communities, modularity := g.DetectCommunities()
+	globalCommunityCache.communities = communities
+	globalCommunityCache.modularity = modularity
+	globalCommunityCache.changeCount = currentChangeCount
+	globalCommunityCache.valid = true
+	return communities, modularity
+}
 
 // ToolDeps holds dependencies needed by MCP tools
 type ToolDeps struct {
@@ -135,6 +171,10 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 	if p.Query == "" && p.Mode != "architecture" {
 		return nil, fmt.Errorf("query is required (use mode='architecture' for community detection)")
 	}
+	// M61: Reject negative Limit
+	if p.Limit < 0 {
+		return nil, fmt.Errorf("limit must be non-negative, got %d", p.Limit)
+	}
 	if p.Limit == 0 {
 		p.Limit = 10
 	}
@@ -143,7 +183,7 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		if deps.Graph == nil {
 			return nil, fmt.Errorf("graph engine not initialized")
 		}
-		communities, modularity := deps.Graph.DetectCommunities()
+		communities, modularity := getCachedCommunities(deps.Graph)
 		response := map[string]interface{}{
 			"mode":        "architecture",
 			"communities": communities,
@@ -256,6 +296,10 @@ func registerContextTool(s *Server, deps ToolDeps) {
 // ----- Tool 2: impact -----
 
 func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
+	// M61: Reject negative Depth
+	if p.Depth < 0 {
+		return nil, fmt.Errorf("depth must be non-negative, got %d", p.Depth)
+	}
 	if p.Depth == 0 {
 		p.Depth = 5
 	}
@@ -311,10 +355,10 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 			affectedTests = append(affectedTests, n)
 		}
 
-		// Group by risk level
+		// Group by risk level (H7: skip source node at depth 0 to avoid inflating count)
 		switch depth {
 		case 0:
-			direct = append(direct, n) // Source node itself
+			continue // Source node itself — not a dependent
 		case 1:
 			direct = append(direct, n)
 		case 2:
@@ -584,7 +628,7 @@ func healthHandler(deps ToolDeps) (interface{}, error) {
 		"status":  "healthy",
 		"nodes":   nodeCount,
 		"edges":   edgeCount,
-		"version": "0.2.0",
+		"version": Version,
 	}, nil
 }
 
@@ -688,6 +732,10 @@ func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, er
 	if p.From == "" || p.To == "" {
 		return nil, fmt.Errorf("both 'from' and 'to' are required")
 	}
+	// M61: Reject negative MaxDepth
+	if p.MaxDepth < 0 {
+		return nil, fmt.Errorf("max_depth must be non-negative, got %d", p.MaxDepth)
+	}
 	if p.MaxDepth == 0 {
 		p.MaxDepth = 10
 	}
@@ -707,24 +755,44 @@ func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, er
 
 	paths := deps.Graph.TraceCallPath(fromHash, toHash, p.MaxDepth)
 
-	// Resolve hash IDs to symbol names for readability
+	// M36: Batch node ID lookups — collect all unique node IDs from all paths,
+	// fetch them once, then build the response from the cache.
+	nodeCache := make(map[string]*types.ASTNode)
+	edgeCache := make(map[string][]types.ASTEdge) // source ID -> edges
+	for _, path := range paths {
+		for i, hashID := range path {
+			if _, ok := nodeCache[hashID]; !ok {
+				if node, err := deps.Store.GetNode(hashID); err == nil {
+					nodeCache[hashID] = node
+				}
+			}
+			if i > 0 {
+				srcID := path[i-1]
+				if _, ok := edgeCache[srcID]; !ok {
+					if edgesFrom, err := deps.Store.GetEdgesFrom(srcID); err == nil {
+						edgeCache[srcID] = edgesFrom
+					}
+				}
+			}
+		}
+	}
+
+	// Resolve hash IDs to symbol names using the cache
 	var resolvedPaths [][]string
 	var edgeTypes [][]string
 	for _, path := range paths {
 		var resolved []string
 		var edges []string
 		for i, hashID := range path {
-			if node, err := deps.Store.GetNode(hashID); err == nil {
+			if node, ok := nodeCache[hashID]; ok {
 				resolved = append(resolved, node.SymbolName)
 			} else {
 				resolved = append(resolved, hashID)
 			}
 			if i > 0 {
-				// Try to determine edge type
-				edgesFrom, err := deps.Store.GetEdgesFrom(path[i-1])
 				edgeType := "calls"
-				if err == nil {
-					for _, e := range edgesFrom {
+				if cachedEdges, ok := edgeCache[path[i-1]]; ok {
+					for _, e := range cachedEdges {
 						if e.TargetID == hashID {
 							edgeType = e.EdgeType.String()
 							break
@@ -787,30 +855,15 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 // ----- Tool 7: get_key_symbols -----
 
 func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, error) {
+	// M61: Reject negative Limit
+	if p.Limit < 0 {
+		return nil, fmt.Errorf("limit must be non-negative, got %d", p.Limit)
+	}
 	if p.Limit == 0 {
 		p.Limit = 20
 	}
 	if deps.Graph == nil {
 		return nil, fmt.Errorf("graph engine not initialized")
-	}
-
-	// Use stored PageRank scores instead of recomputing O(V * iterations)
-	pageranks := make(map[string]float64)
-	allScores, err := deps.Store.GetAllNodeScores()
-	if err == nil && len(allScores) > 0 {
-		for _, s := range allScores {
-			pageranks[s.NodeID] = s.PageRank
-		}
-	}
-	// Fallback to computing if no stored scores
-	if len(pageranks) == 0 {
-		pageranks = deps.Graph.PageRank()
-	}
-	if len(pageranks) == 0 {
-		return map[string]interface{}{
-			"symbols": []interface{}{},
-			"count":   0,
-		}, nil
 	}
 
 	type symbolInfo struct {
@@ -823,34 +876,77 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 	}
 
 	var symbols []symbolInfo
-	for hashID, pr := range pageranks {
-		node, err := deps.Store.GetNode(hashID)
-		if err != nil {
-			continue
-		}
 
-		// Apply file filter if specified (prefix match)
-		if p.FileFilter != "" && !strings.HasPrefix(node.FilePath, p.FileFilter) {
-			continue
+	// M43: Use SQL ORDER BY LIMIT when no file filter, to avoid loading all scores
+	if p.FileFilter == "" {
+		topScores, err := deps.Store.GetTopNodeScoresByPageRank(p.Limit)
+		if err == nil && len(topScores) > 0 {
+			for _, s := range topScores {
+				node, err := deps.Store.GetNode(s.NodeID)
+				if err != nil {
+					continue
+				}
+				symbols = append(symbols, symbolInfo{
+					Name:      node.SymbolName,
+					FilePath:  node.FilePath,
+					NodeType:  node.NodeType.String(),
+					PageRank:  s.PageRank,
+					InDegree:  deps.Graph.GetInDegree(s.NodeID),
+					OutDegree: deps.Graph.GetOutDegree(s.NodeID),
+				})
+			}
 		}
-
-		symbols = append(symbols, symbolInfo{
-			Name:      node.SymbolName,
-			FilePath:  node.FilePath,
-			NodeType:  node.NodeType.String(),
-			PageRank:  pr,
-			InDegree:  deps.Graph.GetInDegree(hashID),
-			OutDegree: deps.Graph.GetOutDegree(hashID),
-		})
 	}
 
-	// Sort by PageRank descending
-	sort.Slice(symbols, func(i, j int) bool {
-		return symbols[i].PageRank > symbols[j].PageRank
-	})
+	// Fallback: load all scores if optimized path didn't produce results or file filter is set
+	if len(symbols) == 0 {
+		pageranks := make(map[string]float64)
+		allScores, err := deps.Store.GetAllNodeScores()
+		if err == nil && len(allScores) > 0 {
+			for _, s := range allScores {
+				pageranks[s.NodeID] = s.PageRank
+			}
+		}
+		// Fallback to computing if no stored scores
+		if len(pageranks) == 0 {
+			pageranks = deps.Graph.PageRank()
+		}
+		if len(pageranks) == 0 {
+			return map[string]interface{}{
+				"symbols": []interface{}{},
+				"count":   0,
+			}, nil
+		}
 
-	if len(symbols) > p.Limit {
-		symbols = symbols[:p.Limit]
+		for hashID, pr := range pageranks {
+			node, err := deps.Store.GetNode(hashID)
+			if err != nil {
+				continue
+			}
+
+			// Apply file filter if specified (prefix match)
+			if p.FileFilter != "" && !strings.HasPrefix(node.FilePath, p.FileFilter) {
+				continue
+			}
+
+			symbols = append(symbols, symbolInfo{
+				Name:      node.SymbolName,
+				FilePath:  node.FilePath,
+				NodeType:  node.NodeType.String(),
+				PageRank:  pr,
+				InDegree:  deps.Graph.GetInDegree(hashID),
+				OutDegree: deps.Graph.GetOutDegree(hashID),
+			})
+		}
+
+		// Sort by PageRank descending
+		sort.Slice(symbols, func(i, j int) bool {
+			return symbols[i].PageRank > symbols[j].PageRank
+		})
+
+		if len(symbols) > p.Limit {
+			symbols = symbols[:p.Limit]
+		}
 	}
 
 	return map[string]interface{}{
@@ -897,14 +993,40 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 	if p.Pattern == "" {
 		return nil, fmt.Errorf("'pattern' is required")
 	}
+	// M61: Reject negative Limit
+	if p.Limit < 0 {
+		return nil, fmt.Errorf("limit must be non-negative, got %d", p.Limit)
+	}
 	if p.Limit == 0 {
 		p.Limit = 20
 	}
 
-	// Compile regex
-	re, err := regexp.Compile(p.Pattern)
-	if err != nil {
-		return nil, fmt.Errorf("invalid regex pattern: %w", err)
+	// M37: Limit pattern length to prevent catastrophic regex patterns
+	const maxPatternLength = 1000
+	if len(p.Pattern) > maxPatternLength {
+		return nil, fmt.Errorf("regex pattern too long: %d chars (max %d)", len(p.Pattern), maxPatternLength)
+	}
+
+	// Compile regex with a timeout via goroutine
+	type compileResult struct {
+		re  *regexp.Regexp
+		err error
+	}
+	ch := make(chan compileResult, 1)
+	go func() {
+		re, err := regexp.Compile(p.Pattern)
+		ch <- compileResult{re, err}
+	}()
+
+	var re *regexp.Regexp
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return nil, fmt.Errorf("invalid regex pattern: %w", res.err)
+		}
+		re = res.re
+	case <-time.After(2 * time.Second):
+		return nil, fmt.Errorf("regex pattern compilation timed out (pattern may be too complex)")
 	}
 
 	// Get all unique file paths from the database
@@ -961,6 +1083,8 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 			defer f.Close()
 
 			scanner := bufio.NewScanner(f)
+			// H10: Increase buffer to 1MB to handle minified JS/CSS with long lines
+			scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), 1024*1024)
 			lineNum := 0
 			for scanner.Scan() {
 				lineNum++
@@ -975,6 +1099,10 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 						return true
 					}
 				}
+			}
+			// H10: Check for scanner errors (e.g., token too long)
+			if err := scanner.Err(); err != nil {
+				log.Printf("Warning: scanner error in %s: %v", relPath, err)
 			}
 			return false
 		}()
@@ -1176,12 +1304,16 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 	if deps.Graph == nil {
 		return nil, fmt.Errorf("graph engine not initialized")
 	}
+	// M61: Reject negative Limit
+	if p.Limit < 0 {
+		return nil, fmt.Errorf("limit must be non-negative, got %d", p.Limit)
+	}
 	if p.Limit == 0 {
 		p.Limit = 10
 	}
 
-	// Communities
-	communities, modularity := deps.Graph.DetectCommunities()
+	// Communities (M44: use cached results)
+	communities, modularity := getCachedCommunities(deps.Graph)
 
 	// Resolve community nodes to names
 	type namedCommunity struct {
@@ -1304,6 +1436,10 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 	if p.Symbol == "" {
 		return nil, fmt.Errorf("'symbol' is required")
 	}
+	// M61: Reject negative Depth
+	if p.Depth < 0 {
+		return nil, fmt.Errorf("depth must be non-negative, got %d", p.Depth)
+	}
 	if p.Depth == 0 {
 		p.Depth = 2
 	}
@@ -1410,7 +1546,10 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 			Betweenness float64 `json:"betweenness"`
 		}
 
-		allRelatedIDs := append(depsIDs, dependentIDs...)
+		// M39: Create a copy of the slice before appending to avoid corrupting shared data
+		allRelatedIDs := make([]string, 0, len(depsIDs)+len(dependentIDs)+1)
+		allRelatedIDs = append(allRelatedIDs, depsIDs...)
+		allRelatedIDs = append(allRelatedIDs, dependentIDs...)
 		allRelatedIDs = append(allRelatedIDs, primaryID)
 		var hotspots []hotspot
 		for _, hashID := range allRelatedIDs {
@@ -1590,8 +1729,8 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 			}
 		}
 
-		// Community membership (with early exit)
-		communities, _ := deps.Graph.DetectCommunities()
+		// Community membership (with early exit) (M38: use cached results)
+		communities, _ := getCachedCommunities(deps.Graph)
 		for _, c := range communities {
 			found := false
 			for _, nodeID := range c.NodeIDs {
@@ -1643,8 +1782,8 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 // ----- MCP Resources (M9) -----
 
 func registerResources(s *Server, deps ToolDeps) {
-	// Register codebase graph statistics as a resource
-	_ = s.sdk.RegisterResource(
+	// Register codebase graph statistics as a resource (M21: check and log errors)
+	if err := s.sdk.RegisterResource(
 		"qb://graph/stats",
 		"Graph Statistics",
 		"Current codebase graph statistics including node count, edge count, and community info",
@@ -1660,7 +1799,8 @@ func registerResources(s *Server, deps ToolDeps) {
 				"edges": edgeCount,
 			}
 			if deps.Graph != nil {
-				communities, modularity := deps.Graph.DetectCommunities()
+				// M44: use cached community detection results
+				communities, modularity := getCachedCommunities(deps.Graph)
 				data["communities"] = len(communities)
 				data["modularity"] = modularity
 			}
@@ -1669,7 +1809,9 @@ func registerResources(s *Server, deps ToolDeps) {
 				mcp_golang.NewTextEmbeddedResource("qb://graph/stats", string(jsonBytes), "application/json"),
 			), nil
 		},
-	)
+	); err != nil {
+		log.Printf("Warning: failed to register resource 'qb://graph/stats': %v", err)
+	}
 }
 
 // ----- MCP Prompts (M9) -----
@@ -1679,8 +1821,8 @@ type explainSymbolArgs struct {
 }
 
 func registerPrompts(s *Server, deps ToolDeps) {
-	// Register an "explain symbol" prompt template
-	_ = s.sdk.RegisterPrompt(
+	// Register an "explain symbol" prompt template (M21: check and log errors)
+	if err := s.sdk.RegisterPrompt(
 		"explain_symbol",
 		"Generate a prompt to explain a code symbol in context",
 		func(args explainSymbolArgs) (*mcp_golang.PromptResponse, error) {
@@ -1698,7 +1840,9 @@ func registerPrompts(s *Server, deps ToolDeps) {
 				),
 			), nil
 		},
-	)
+	); err != nil {
+		log.Printf("Warning: failed to register prompt 'explain_symbol': %v", err)
+	}
 }
 
 // toToolResponse converts a generic result (string or anything JSON-serializable)
@@ -1718,8 +1862,11 @@ func toToolResponse(result interface{}) (*mcp_golang.ToolResponse, error) {
 		}
 		text = string(jsonBytes)
 	}
+	// M41: Truncate instead of failing if result exceeds 1MB
 	if len(text) > maxResponseSize {
-		return nil, fmt.Errorf("response too large: %d bytes (max %d)", len(text), maxResponseSize)
+		truncated := text[:maxResponseSize-200]
+		truncated += fmt.Sprintf("\n\n... [TRUNCATED: response was %d bytes, max %d]", len(text), maxResponseSize)
+		text = truncated
 	}
 	return mcp_golang.NewToolResponse(mcp_golang.NewTextContent(text)), nil
 }

@@ -28,7 +28,7 @@ var sqliteVecOnce sync.Once
 var dangerousPatternRegexes []*regexp.Regexp
 
 func init() {
-	patterns := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex", "recursive"}
+	patterns := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex", "recursive", "sqlite_master", "sqlite_schema"}
 	dangerousPatternRegexes = make([]*regexp.Regexp, len(patterns))
 	for i, p := range patterns {
 		dangerousPatternRegexes[i] = regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(p) + `\b`)
@@ -664,7 +664,7 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	// positives (e.g., "attachment", "credited").
 	// "edit" is intentionally omitted — it appears in normal identifiers and the real
 	// protection against edit() is PRAGMA query_only / read-only transactions.
-	dangerousNames := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex", "recursive"}
+	dangerousNames := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex", "recursive", "sqlite_master", "sqlite_schema"}
 	for i, re := range dangerousPatternRegexes {
 		if re.MatchString(query) {
 			return nil, fmt.Errorf("query contains forbidden pattern: %s", dangerousNames[i])
@@ -967,6 +967,29 @@ func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`SELECT node_id, pagerank, betweenness FROM node_scores`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var scores []types.NodeScore
+	for rows.Next() {
+		var score types.NodeScore
+		if err := rows.Scan(&score.NodeID, &score.PageRank, &score.Betweenness); err != nil {
+			return nil, err
+		}
+		scores = append(scores, score)
+	}
+	return scores, rows.Err()
+}
+
+// GetTopNodeScoresByPageRank returns the top N node scores ordered by PageRank descending.
+// M43: Avoids loading all scores into memory when only top-N are needed.
+func (s *Store) GetTopNodeScoresByPageRank(limit int) ([]types.NodeScore, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT node_id, pagerank, betweenness FROM node_scores ORDER BY pagerank DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
