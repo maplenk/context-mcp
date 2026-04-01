@@ -795,8 +795,8 @@ function helperFunc() {
 	for _, e := range result.Edges {
 		if e.EdgeType == types.EdgeTypeCalls {
 			callCount++
-			// Check for $this->validate call
-			validateID := types.GenerateNodeID("order.php", "validate")
+			// Check for $this->validate call (qualified with enclosing class)
+			validateID := types.GenerateNodeID("order.php", "OrderService.validate")
 			loggerInfoID := types.GenerateNodeID("order.php", "Logger.info")
 			strlenID := types.GenerateNodeID("order.php", "strlen")
 			if e.TargetID == validateID {
