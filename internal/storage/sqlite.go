@@ -862,6 +862,13 @@ func (s *Store) GetAllFilePaths() ([]string, error) {
 	return paths, rows.Err()
 }
 
+// escapeLIKE escapes the special LIKE pattern characters %, _, and \ so that
+// they are matched literally when used with ESCAPE '\'.
+func escapeLIKE(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
 // SearchNodesByName searches for nodes whose symbol_name contains the given pattern (case-insensitive)
 func (s *Store) SearchNodesByName(pattern string) ([]types.ASTNode, error) {
 	s.mu.RLock()
@@ -869,7 +876,7 @@ func (s *Store) SearchNodesByName(pattern string) ([]types.ASTNode, error) {
 
 	rows, err := s.db.Query(`
 		SELECT id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum
-		FROM nodes WHERE symbol_name LIKE ? COLLATE NOCASE`, "%"+pattern+"%")
+		FROM nodes WHERE symbol_name LIKE ? ESCAPE '\' COLLATE NOCASE`, "%"+escapeLIKE(pattern)+"%")
 	if err != nil {
 		return nil, err
 	}
