@@ -52,8 +52,7 @@ var stopWords = map[string]bool{
 	"when": true, "where": true, "how": true, "what": true, "which": true,
 	"who": true, "whom": true, "why": true,
 	// Domain stop words: query-structure noise that doesn't help code search
-	"complete": true, "flow": true, "end": true, "logic": true,
-	"entire": true, "full": true, "whole": true,
+	"entire": true, "whole": true,
 }
 
 // stopWordsMu protects concurrent access to the stopWords map.
@@ -234,41 +233,49 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// PPR runs on the candidate subgraph only (not the full graph) for speed.
 	var pprScores map[string]float64
 	var inDegreeScores map[string]float64
-	if h.graph != nil && len(lexicalResults) > 0 {
-		seedCount := 10
-		if seedCount > len(lexicalResults) {
-			seedCount = len(lexicalResults)
-		}
-		// Deduplicate seeds to prevent double-weighting in the PPR teleportation vector
-		seeds := make([]string, 0, seedCount+len(activeFileNodeIDs))
-		seedSet := make(map[string]bool)
-		for i := 0; i < seedCount; i++ {
-			id := lexicalResults[i].Node.ID
-			if !seedSet[id] {
-				seeds = append(seeds, id)
-				seedSet[id] = true
-			}
-		}
-		for _, id := range activeFileNodeIDs {
-			if !seedSet[id] {
-				seeds = append(seeds, id)
-				seedSet[id] = true
-			}
+	if h.graph != nil {
+		// Determine seed source: prefer lexical results, fall back to semantic
+		seedSource := lexicalResults
+		if len(seedSource) == 0 {
+			seedSource = semanticResults
 		}
 
-		// Collect candidate IDs from lexical + semantic results
-		candidateIDs := make([]string, 0, len(candidates))
-		for id := range candidates {
-			candidateIDs = append(candidateIDs, id)
-		}
+		if len(seedSource) > 0 {
+			seedCount := 10
+			if seedCount > len(seedSource) {
+				seedCount = len(seedSource)
+			}
+			// Deduplicate seeds to prevent double-weighting in the PPR teleportation vector
+			seeds := make([]string, 0, seedCount+len(activeFileNodeIDs))
+			seedSet := make(map[string]bool)
+			for i := 0; i < seedCount; i++ {
+				id := seedSource[i].Node.ID
+				if !seedSet[id] {
+					seeds = append(seeds, id)
+					seedSet[id] = true
+				}
+			}
+			for _, id := range activeFileNodeIDs {
+				if !seedSet[id] {
+					seeds = append(seeds, id)
+					seedSet[id] = true
+				}
+			}
 
-		rawPPR, rawInDegree := h.graph.ComputeSearchSignalsSubgraph(seeds, candidateIDs)
-		pprScores = normalizeMap(rawPPR)
-		// Normalize InDegree within the candidate set (same as PPR) so that
-		// scores reflect relevance among candidates, not full-graph popularity.
-		inDegreeScores = normalizeMap(rawInDegree)
-	} else if h.graph != nil {
-		inDegreeScores = normalizeMap(h.graph.ComputeInDegree())
+			// Collect candidate IDs from lexical + semantic results
+			candidateIDs := make([]string, 0, len(candidates))
+			for id := range candidates {
+				candidateIDs = append(candidateIDs, id)
+			}
+
+			rawPPR, rawInDegree := h.graph.ComputeSearchSignalsSubgraph(seeds, candidateIDs)
+			pprScores = normalizeMap(rawPPR)
+			// Normalize InDegree within the candidate set (same as PPR) so that
+			// scores reflect relevance among candidates, not full-graph popularity.
+			inDegreeScores = normalizeMap(rawInDegree)
+		} else {
+			inDegreeScores = normalizeMap(h.graph.ComputeInDegree())
+		}
 	}
 
 	// Load betweenness scores (already [0,1] from index time)
