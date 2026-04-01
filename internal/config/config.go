@@ -2,6 +2,7 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -63,7 +64,7 @@ func DefaultConfig() *Config {
 // Uses a dedicated FlagSet so qb-context can be embedded in programs that also
 // use the global flag package, and returns an error on unknown flags instead of
 // calling os.Exit(2).
-func ParseFlags() *Config {
+func ParseFlags() (*Config, error) {
 	cfg := DefaultConfig()
 
 	fs := flag.NewFlagSet("qb-context", flag.ContinueOnError)
@@ -77,12 +78,23 @@ func ParseFlags() *Config {
 	fs.StringVar(&cfg.ONNXLibPath, "onnx-lib", cfg.ONNXLibPath, "Path to ONNX Runtime shared library")
 	fs.IntVar(&cfg.EmbeddingDim, "embedding-dim", cfg.EmbeddingDim, "Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
-		log.Fatalf("parsing flags: %v", err)
+		return nil, fmt.Errorf("parsing flags: %w", err)
 	}
 
 	// H21: Prevent zero or negative batch-size causing infinite loop
 	if cfg.EmbeddingBatchSize < 1 {
-		cfg.EmbeddingBatchSize = 50
+		cfg.EmbeddingBatchSize = 32
+	}
+
+	// M61: Reject negative values for numeric config fields
+	if cfg.MaxBFSDepth < 0 {
+		cfg.MaxBFSDepth = 0
+	}
+	if cfg.WorkerCount < 1 {
+		cfg.WorkerCount = 1
+	}
+	if cfg.EmbeddingDim < 1 {
+		return nil, fmt.Errorf("embedding-dim must be positive, got %d", cfg.EmbeddingDim)
 	}
 
 	// Resolve absolute paths
@@ -102,5 +114,5 @@ func ParseFlags() *Config {
 		log.Printf("Warning: --onnx-model specified without --onnx-lib; ONNX may fail to initialize")
 	}
 
-	return cfg
+	return cfg, nil
 }

@@ -41,13 +41,19 @@ func main() {
 	// reliance on flag stopping at non-flag arguments.
 	for i, arg := range os.Args[1:] {
 		if arg == "cli" {
-			cfg := config.ParseFlags()
+			cfg, err := config.ParseFlags()
+			if err != nil {
+				log.Fatalf("Failed to parse flags: %v", err)
+			}
 			runCLI(cfg, os.Args[i+2:]) // pass everything after "cli"
 			return
 		}
 	}
 
-	cfg := config.ParseFlags()
+	cfg, err := config.ParseFlags()
+	if err != nil {
+		log.Fatalf("Failed to parse flags: %v", err)
+	}
 
 	log.Printf("qb-context daemon starting — repo: %s", cfg.RepoRoot)
 
