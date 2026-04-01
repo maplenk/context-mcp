@@ -373,3 +373,102 @@ func TestWatcher_SubdirectoryEvents(t *testing.T) {
 		t.Errorf("expected path 'pkg/sub.go', got %q", ev.Path)
 	}
 }
+
+func TestWalkSourceFiles_FollowsSymlinks(t *testing.T) {
+	// Create a "real" directory with a Go file, then symlink it into the repo root
+	realDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realDir, "linked.go"), []byte("package linked"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repoDir := t.TempDir()
+	// Create a symlink: repoDir/ext -> realDir
+	if err := os.Symlink(realDir, filepath.Join(repoDir, "ext")); err != nil {
+		t.Skipf("cannot create symlinks: %v", err)
+	}
+
+	files, err := WalkSourceFiles(repoDir, nil)
+	if err != nil {
+		t.Fatalf("WalkSourceFiles: %v", err)
+	}
+
+	found := false
+	for _, f := range files {
+		if f == filepath.Join("ext", "linked.go") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected ext/linked.go in results, got: %v", files)
+	}
+}
+
+func TestWalkSourceFiles_SymlinkCycleDetection(t *testing.T) {
+	// Create a directory with a symlink cycle: dir/a/loop -> dir/a
+	dir := t.TempDir()
+	aDir := filepath.Join(dir, "a")
+	if err := os.MkdirAll(aDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aDir, "main.go"), []byte("package main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Create cycle: a/loop -> a
+	if err := os.Symlink(aDir, filepath.Join(aDir, "loop")); err != nil {
+		t.Skipf("cannot create symlinks: %v", err)
+	}
+
+	// This should complete without hanging (cycle detection)
+	files, err := WalkSourceFiles(dir, nil)
+	if err != nil {
+		t.Fatalf("WalkSourceFiles: %v", err)
+	}
+
+	// Should find main.go exactly once (not duplicated from the cycle)
+	count := 0
+	for _, f := range files {
+		if filepath.Base(f) == "main.go" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected main.go exactly once, found %d times in: %v", count, files)
+	}
+}
+
+func TestWalkExisting_FollowsSymlinks(t *testing.T) {
+	// Create a "real" directory with a Go file
+	realDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realDir, "sym.go"), []byte("package sym"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repoDir := t.TempDir()
+	// Symlink repoDir/lib -> realDir
+	if err := os.Symlink(realDir, filepath.Join(repoDir, "lib")); err != nil {
+		t.Skipf("cannot create symlinks: %v", err)
+	}
+
+	w, err := New(repoDir, 50*time.Millisecond, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	files, err := w.WalkExisting()
+	if err != nil {
+		t.Fatalf("WalkExisting: %v", err)
+	}
+
+	found := false
+	for _, f := range files {
+		if f == filepath.Join("lib", "sym.go") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected lib/sym.go in results, got: %v", files)
+	}
+}

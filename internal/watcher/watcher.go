@@ -13,6 +13,91 @@ import (
 	"github.com/naman/qb-context/internal/types"
 )
 
+// deviceInode uniquely identifies a file/directory across the filesystem,
+// used for symlink cycle detection.
+type deviceInode struct {
+	dev uint64
+	ino uint64
+}
+
+// symlinkWalk walks a directory tree following symlinks, with cycle detection.
+// The walkFn receives the resolved (real) path and its os.FileInfo.
+// If walkFn returns filepath.SkipDir for a directory, that subtree is skipped.
+func symlinkWalk(root string, walkFn func(path string, info os.FileInfo, err error) error) error {
+	visited := make(map[deviceInode]bool)
+	return symlinkWalkImpl(root, visited, walkFn)
+}
+
+// symlinkWalkImpl is the recursive implementation of symlinkWalk.
+func symlinkWalkImpl(dir string, visited map[deviceInode]bool, walkFn func(path string, info os.FileInfo, err error) error) error {
+	// Resolve the directory itself to handle symlinked roots
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return walkFn(dir, nil, err)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return walkFn(dir, nil, err)
+	}
+
+	// Check for cycle using device+inode
+	di, err := getDeviceInode(info)
+	if err == nil {
+		if visited[di] {
+			return nil // cycle detected, skip
+		}
+		visited[di] = true
+		defer func() { delete(visited, di) }()
+	}
+
+	// Call walkFn for the directory itself
+	err = walkFn(dir, info, nil)
+	if err == filepath.SkipDir {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(resolved)
+	if err != nil {
+		// Report the error but continue walking
+		return walkFn(dir, info, err)
+	}
+
+	for _, entry := range entries {
+		childPath := filepath.Join(dir, entry.Name())
+
+		// Always use os.Stat (not Lstat) to follow symlinks
+		childInfo, err := os.Stat(childPath)
+		if err != nil {
+			// Report error via walkFn and continue
+			if walkErr := walkFn(childPath, nil, err); walkErr != nil && walkErr != filepath.SkipDir {
+				return walkErr
+			}
+			continue
+		}
+
+		if childInfo.IsDir() {
+			if err := symlinkWalkImpl(childPath, visited, walkFn); err != nil {
+				return err
+			}
+		} else {
+			if err := walkFn(childPath, childInfo, nil); err != nil && err != filepath.SkipDir {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// getDeviceInode extracts device and inode numbers from a FileInfo.
+// This is platform-specific; see symlink_unix.go / symlink_windows.go.
+func getDeviceInode(info os.FileInfo) (deviceInode, error) {
+	return platformDeviceInode(info)
+}
+
 // gitignoreEntry pairs a compiled gitignore matcher with the directory it was found in.
 type gitignoreEntry struct {
 	matcher *ignore.GitIgnore
@@ -89,9 +174,10 @@ func (w *Watcher) Events() <-chan types.FileEvent {
 
 // Start begins watching the repository for changes
 func (w *Watcher) Start() error {
-	// Walk directory tree and add watches, respecting exclusions
+	// Walk directory tree and add watches, respecting exclusions.
+	// M15: Use symlinkWalk to follow symlinks with cycle detection.
 	// M3: discover nested .gitignore files during the walk
-	err := filepath.Walk(w.repoRoot, func(path string, info os.FileInfo, err error) error {
+	err := symlinkWalk(w.repoRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip inaccessible paths
 		}
@@ -248,11 +334,23 @@ func (w *Watcher) handleRawEvent(event fsnotify.Event) {
 		return
 	}
 
-	// If a new directory is created, start watching it (recursive watch)
+	// If a new directory is created (or a symlink to a directory), start watching
+	// it and all its subdirectories recursively. M15: use symlinkWalk for symlink support.
 	if event.Has(fsnotify.Create) {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			if !w.isExcluded(path) {
-				_ = w.fsWatcher.Add(path)
+				_ = symlinkWalk(path, func(p string, fi os.FileInfo, walkErr error) error {
+					if walkErr != nil {
+						return nil
+					}
+					if fi.IsDir() {
+						if w.isExcluded(p) {
+							return filepath.SkipDir
+						}
+						_ = w.fsWatcher.Add(p)
+					}
+					return nil
+				})
 			}
 			return
 		}
@@ -401,10 +499,11 @@ func (w *Watcher) flushEventIfCurrent(path string, gen uint64) {
 
 // WalkExisting walks the repo and returns all existing watchable file paths.
 // This is useful for initial indexing.
+// M15: follows symlinks with cycle detection for consistent symlink handling.
 func (w *Watcher) WalkExisting() ([]string, error) {
 	var files []string
 
-	err := filepath.Walk(w.repoRoot, func(path string, info os.FileInfo, err error) error {
+	err := symlinkWalk(w.repoRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -485,8 +584,9 @@ func WalkSourceFiles(repoRoot string, excludedDirs []string) ([]string, error) {
 		return false
 	}
 
+	// M15: Use symlinkWalk to follow symlinks with cycle detection.
 	var files []string
-	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
+	err := symlinkWalk(repoRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
