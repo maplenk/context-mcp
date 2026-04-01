@@ -1,6 +1,7 @@
 package search
 
 import (
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,6 +35,13 @@ const (
 
 	defaultMaxPerFile = 3 // default max results per unique file_path
 )
+
+func init() {
+	sum := weightPPR + weightBM25 + weightBetweenness + weightInDegree + weightSemantic
+	if math.Abs(sum-1.0) > 1e-9 {
+		panic("composite scoring weights do not sum to 1.0")
+	}
+}
 
 // stopWords are common English words filtered from search queries.
 // Override via SetStopWords() to customize for other languages or domains.
@@ -111,18 +119,27 @@ func splitCamelCase(s string) []string {
 				run += parts[j]
 				j++
 			}
-			// If the next token starts with lowercase, the last uppercase letter
-			// belongs to that token (e.g., "HTTP" + "Client" from "H","T","T","P","Client")
+			// If the next token starts with an uppercase letter followed by lowercase
+			// (e.g., "Client" after "H","T","T","P"), the last uppercase letter of
+			// the run belongs to that token: "HTTP" → "HTTP" stays, "Client" stays.
+			// But the regex already split "Client" with uppercase start, so peel is
+			// only needed when the next token starts with lowercase AND the run is
+			// exactly 1 char (a single uppercase letter starting a CamelCase word).
+			//
+			// When the next token starts with lowercase (e.g., "element" after
+			// "H","T","M","L"), the entire uppercase run is an acronym and the
+			// lowercase token is a separate word: "HTML" + "element".
 			if j < len(parts) && len(parts[j]) > 0 && parts[j][0] >= 'a' && parts[j][0] <= 'z' {
-				// Only peel off the last letter if the run has more than 1 char
-				if len(run) > 1 {
-					merged = append(merged, run[:len(run)-1])
-					// Prepend the last uppercase letter to the next token
-					parts[j] = string(run[len(run)-1]) + parts[j]
-				} else {
-					// Single letter followed by lowercase token — let regex result stand
+				if len(run) == 1 {
+					// Single uppercase letter followed by lowercase token — combine them
+					// (e.g., the "B" + "ar" from a split like "FooBar" edge case)
 					merged = append(merged, run+parts[j])
 					j++
+				} else {
+					// Multi-char uppercase run followed by lowercase token — keep
+					// the acronym intact and treat the lowercase token separately
+					// (e.g., "HTML" + "element" from "HTMLelement")
+					merged = append(merged, run)
 				}
 			} else {
 				merged = append(merged, run)
@@ -232,18 +249,31 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 
 	// Compute graph-derived signals (PPR + InDegree).
 	// PPR runs on the candidate subgraph only (not the full graph) for speed.
+	// Use the union of lexical AND semantic results as candidates so that
+	// graph signals are computed even when only one search path has results.
 	var pprScores map[string]float64
 	var inDegreeScores map[string]float64
-	if h.graph != nil && len(lexicalResults) > 0 {
+	if h.graph != nil && len(candidates) > 0 {
+		// Build seed list from top lexical and semantic results
 		seedCount := 10
-		if seedCount > len(lexicalResults) {
-			seedCount = len(lexicalResults)
-		}
 		// Deduplicate seeds to prevent double-weighting in the PPR teleportation vector
 		seeds := make([]string, 0, seedCount+len(activeFileNodeIDs))
 		seedSet := make(map[string]bool)
-		for i := 0; i < seedCount; i++ {
+		// Add top lexical results as seeds
+		lexSeedCount := seedCount
+		if lexSeedCount > len(lexicalResults) {
+			lexSeedCount = len(lexicalResults)
+		}
+		for i := 0; i < lexSeedCount; i++ {
 			id := lexicalResults[i].Node.ID
+			if !seedSet[id] {
+				seeds = append(seeds, id)
+				seedSet[id] = true
+			}
+		}
+		// Add top semantic results as seeds (fill remaining slots)
+		for i := 0; i < len(semanticResults) && len(seeds) < seedCount; i++ {
+			id := semanticResults[i].Node.ID
 			if !seedSet[id] {
 				seeds = append(seeds, id)
 				seedSet[id] = true
@@ -264,8 +294,10 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 
 		rawPPR, rawInDegree := h.graph.ComputeSearchSignalsSubgraph(seeds, candidateIDs)
 		pprScores = normalizeMap(rawPPR)
-		// Normalize InDegree within the candidate set (same as PPR) so that
-		// scores reflect relevance among candidates, not full-graph popularity.
+		// Note: rawInDegree comes from ComputeSearchSignalsSubgraph which returns
+		// full-graph InDegree values (cached), not candidate-scoped counts.
+		// normalizeMap rescales these to [0,1] relative to the candidate set's
+		// min/max, which partially mitigates full-graph score compression.
 		inDegreeScores = normalizeMap(rawInDegree)
 	} else if h.graph != nil {
 		inDegreeScores = normalizeMap(h.graph.ComputeInDegree())
@@ -355,7 +387,21 @@ func buildFTSQuery(query string) string {
 	}
 
 	if len(expanded) == 0 {
-		return query // fallback to original if everything was filtered
+		// All terms were stop words — fall back to original terms with same
+		// prefix matching logic applied so the fallback query is consistent.
+		fallbackWords := strings.Fields(query)
+		var fallbackTerms []string
+		for _, term := range fallbackWords {
+			if len(term) >= 3 {
+				fallbackTerms = append(fallbackTerms, term+"*")
+			} else {
+				fallbackTerms = append(fallbackTerms, term)
+			}
+		}
+		if len(fallbackTerms) == 0 {
+			return query
+		}
+		return strings.Join(fallbackTerms, " OR ")
 	}
 
 	// Add prefix matching with *
@@ -412,7 +458,15 @@ func normalizeScores(results []types.SearchResult) map[string]float64 {
 	var minScore, maxScore float64
 	first := true
 	for _, r := range results {
-		scores[r.Node.ID] = r.Score
+		// When duplicate IDs exist, keep the maximum score rather than
+		// last-write-wins to avoid silently discarding better matches.
+		if existing, ok := scores[r.Node.ID]; ok {
+			if r.Score > existing {
+				scores[r.Node.ID] = r.Score
+			}
+		} else {
+			scores[r.Node.ID] = r.Score
+		}
 		if first {
 			minScore = r.Score
 			maxScore = r.Score
@@ -429,10 +483,11 @@ func normalizeScores(results []types.SearchResult) map[string]float64 {
 
 	scoreRange := maxScore - minScore
 	if scoreRange <= 0 {
-		// All scores identical — assign uniform 0.5
+		// All scores identical — assign 1.0 so single-element or uniform
+		// results are not undervalued in composite scoring.
 		normalized := make(map[string]float64)
 		for id := range scores {
-			normalized[id] = 0.5
+			normalized[id] = 1.0
 		}
 		return normalized
 	}
@@ -471,10 +526,10 @@ func normalizeMap(m map[string]float64) map[string]float64 {
 
 	valRange := maxVal - minVal
 	if valRange <= 0 {
-		// All values identical — assign 0.5
+		// All values identical — assign 1.0 to avoid undervaluing uniform results
 		result := make(map[string]float64)
 		for k := range m {
-			result[k] = 0.5
+			result[k] = 1.0
 		}
 		return result
 	}
@@ -495,19 +550,15 @@ func safeGet(m map[string]float64, key string) float64 {
 }
 
 // applyPerFileCap limits results to maxPerFile entries per unique file_path.
-// Helper files (_ide_helper, generated, .d.ts) are capped at 1 to prevent
-// large auto-generated files from dominating results.
+// Helper files are already penalized via the 0.3× score multiplier in Search(),
+// so they use the same per-file cap as regular files to avoid double-penalizing.
 func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
 	fileCounts := make(map[string]int)
 	var capped []types.SearchResult
 
 	for _, r := range results {
-		cap := maxPerFile
-		if isHelperFile(r.Node.FilePath) {
-			cap = 1
-		}
 		count := fileCounts[r.Node.FilePath]
-		if count < cap {
+		if count < maxPerFile {
 			capped = append(capped, r)
 			fileCounts[r.Node.FilePath] = count + 1
 		}
