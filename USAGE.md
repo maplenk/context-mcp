@@ -16,6 +16,14 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
   - [read_symbol](#read_symbol--read-source-code)
   - [query](#query--raw-sql)
   - [index](#index--re-index-repository)
+  - [health](#health--system-health-status)
+  - [trace_call_path](#trace_call_path--trace-call-paths)
+  - [get_key_symbols](#get_key_symbols--top-symbols-by-centrality)
+  - [search_code](#search_code--regex-source-search)
+  - [detect_changes](#detect_changes--changed-symbol-detection)
+  - [get_architecture_summary](#get_architecture_summary--architecture-overview)
+  - [explore](#explore--explore-codebase)
+  - [understand](#understand--deep-symbol-understanding)
 - [Connecting to Claude Desktop](#connecting-to-claude-desktop)
 - [Configuration](#configuration)
 - [How Indexing Works](#how-indexing-works)
@@ -64,13 +72,21 @@ The `-tags "fts5"` flag is **required** — it enables SQLite full-text search.
 Expected output:
 
 ```
-TOOL            DESCRIPTION
-----            -----------
-context         Discovers relevant code symbols using hybrid lexical + semantic search...
-impact          Analyzes the blast radius of a code symbol...
-read_symbol     Retrieves the exact source code of a symbol...
-query           Executes a read-only SQL query against the structural database.
-index           Triggers a full re-index of the repository.
+TOOL                       DESCRIPTION
+----                       -----------
+context                    Discovers relevant code symbols using hybrid lexical + semantic search...
+impact                     Analyzes the blast radius of a code symbol...
+read_symbol                Retrieves the exact source code of a symbol...
+query                      Executes a read-only SQL query against the structural database.
+index                      Triggers a full re-index of the repository.
+health                     Returns system health status.
+trace_call_path            Traces call paths between two symbols.
+get_key_symbols            Returns the most important symbols by centrality.
+search_code                Regex search across indexed source files.
+detect_changes             Detects changed symbols since a git ref.
+get_architecture_summary   Comprehensive architecture overview with communities and hubs.
+explore                    Explores codebase by searching for a symbol with optional deps.
+understand                 Deep symbol understanding with callers, callees, and PageRank.
 ```
 
 ---
@@ -171,6 +187,8 @@ Discovers relevant code symbols using multi-signal ranked search. Combines lexic
 | `query` | string | yes | — | Natural language or keyword query |
 | `limit` | integer | no | 10 | Max results to return |
 | `mode` | string | no | `"search"` | `"search"` for hybrid search, `"architecture"` for community detection |
+| `max_per_file` | integer | no | 3 | Maximum results per unique file path |
+| `active_files` | string[] | no | — | File paths the developer is currently editing for PPR personalization |
 
 **Search mode example:**
 
@@ -200,8 +218,8 @@ Returns Louvain community clusters — groups of tightly coupled code symbols �
 {
   "mode": "architecture",
   "communities": [
-    ["nodeId1", "nodeId2", "nodeId3"],
-    ["nodeId4", "nodeId5"]
+    {"id": 0, "node_ids": ["nodeId1", "nodeId2", "nodeId3"]},
+    {"id": 1, "node_ids": ["nodeId4", "nodeId5"]}
   ],
   "modularity": 0.42,
   "count": 2
@@ -354,12 +372,195 @@ Triggers a full re-index of the repository. The daemon also indexes automaticall
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `path` | string | no | — | Not currently used; reserved for future path-scoped re-indexing |
+| `path` | string | no | — | Optional: specific path to re-index (file or directory) |
 
 **Example:**
 
 ```json
 {}
+```
+
+---
+
+### `health` — System Health Status
+
+Returns system health status including uptime, indexed file count, node/edge counts, and database size. Takes no parameters.
+
+**Parameters:** None
+
+**Example:**
+
+```json
+{}
+```
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "uptime": "2h15m",
+  "indexed_files": 142,
+  "nodes": 1834,
+  "edges": 4521,
+  "db_size_bytes": 8392704
+}
+```
+
+---
+
+### `trace_call_path` — Trace Call Paths
+
+Traces call paths between two symbols. Useful for understanding how control flows from one function to another through the dependency graph.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `from` | string | yes | — | Source symbol name or ID |
+| `to` | string | yes | — | Target symbol name or ID |
+| `max_depth` | integer | no | 10 | Maximum traversal depth |
+
+**Example:**
+
+```json
+{
+  "from": "HandleRequest",
+  "to": "SaveToDatabase",
+  "max_depth": 8
+}
+```
+
+---
+
+### `get_key_symbols` — Top Symbols by Centrality
+
+Returns the most important symbols in the codebase ranked by centrality metrics. Useful for identifying core abstractions and architectural hotspots.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `limit` | integer | no | 20 | Maximum number of symbols to return |
+| `file_filter` | string | no | — | Optional file path prefix to filter results |
+
+**Example:**
+
+```json
+{
+  "limit": 10,
+  "file_filter": "internal/graph/"
+}
+```
+
+---
+
+### `search_code` — Regex Source Search
+
+Performs regex search across indexed source files. Returns matching lines with file paths and line numbers.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pattern` | string | yes | — | Regex pattern to search for |
+| `file_filter` | string | no | — | Optional glob pattern to filter files (e.g. `"*.go"`) |
+| `limit` | integer | no | 20 | Maximum number of results |
+
+**Example:**
+
+```json
+{
+  "pattern": "func.*Parse",
+  "file_filter": "*.go",
+  "limit": 10
+}
+```
+
+---
+
+### `detect_changes` — Changed Symbol Detection
+
+Detects symbols that have changed since a given git ref. Useful for understanding what functions/classes were modified in recent commits or compared to a branch.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `since` | string | yes | — | Git ref to compare against (e.g. `"HEAD~5"`, `"main"`, a commit SHA) |
+| `path` | string | no | — | Optional path filter to restrict detection scope |
+
+**Example:**
+
+```json
+{
+  "since": "HEAD~5",
+  "path": "internal/"
+}
+```
+
+---
+
+### `get_architecture_summary` — Architecture Overview
+
+Returns a comprehensive architecture overview including community clusters, entry points, hub nodes, and connector symbols. Provides a high-level map of the codebase structure.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `limit` | integer | no | 10 | Maximum number of items per category |
+
+**Example:**
+
+```json
+{
+  "limit": 15
+}
+```
+
+---
+
+### `explore` — Explore Codebase
+
+Explores the codebase by searching for a symbol with optional dependency analysis. A good starting point when you want to find a symbol and optionally see what it depends on.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `symbol` | string | yes | — | Symbol name to search for |
+| `include_deps` | boolean | no | false | Whether to include dependency analysis |
+| `depth` | integer | no | 2 | Dependency traversal depth (when `include_deps` is true) |
+
+**Example:**
+
+```json
+{
+  "symbol": "IndexRepository",
+  "include_deps": true,
+  "depth": 3
+}
+```
+
+---
+
+### `understand` — Deep Symbol Understanding
+
+Provides deep understanding of a symbol using 3-tier resolution (exact match, fuzzy match, search fallback) plus callers, callees, PageRank score, and community membership. The most comprehensive single-symbol analysis tool.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `symbol` | string | yes | — | Symbol name to analyze |
+
+**Example:**
+
+```json
+{
+  "symbol": "ComputePageRank"
+}
 ```
 
 ---
@@ -381,7 +582,7 @@ Add qb-context to your Claude Desktop MCP configuration:
 }
 ```
 
-Restart Claude Desktop after editing the config. The `context`, `impact`, `read_symbol`, `query`, and `index` tools will appear in Claude's tool list.
+Restart Claude Desktop after editing the config. All 13 tools will appear in Claude's tool list.
 
 ### Connecting to Claude Code
 
@@ -412,6 +613,9 @@ All options are set via CLI flags:
 | `-max-depth` | `5` | Default max BFS depth for impact analysis |
 | `-batch-size` | `32` | Embedding batch size |
 | `-workers` | `4` | Number of parallel file-parsing workers |
+| `-onnx-model` | (empty) | Path to ONNX model directory (enables neural embeddings) |
+| `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
+| `-embedding-dim` | `384` | Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896) |
 
 **Example with custom settings:**
 
@@ -453,11 +657,9 @@ All signals are normalized to [0, 1] before weighting. FTS5 queries are enhanced
 | Language | Parser | Accuracy |
 |----------|--------|----------|
 | Go | Native `go/ast` | High — full AST walk |
-| JavaScript | Regex-based | Moderate — functions, arrow functions, classes, calls |
-| TypeScript | Regex-based | Moderate — same as JS |
-| PHP | Regex-based | Moderate — classes, methods, instantiation edges |
-
-Tree-sitter integration is planned for improved JS/TS/PHP accuracy.
+| JavaScript | Tree-sitter + regex | High — tree-sitter for declarations, regex for call extraction |
+| TypeScript | Tree-sitter + regex | High — tree-sitter for declarations, regex for call extraction |
+| PHP | Tree-sitter + regex | High — tree-sitter for declarations, regex for call extraction |
 
 ---
 
