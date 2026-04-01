@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -199,17 +200,26 @@ func main() {
 	log.Printf("MCP server ready on stdio")
 
 	// 10. Handle graceful shutdown
+	// M59: Use context cancellation so the signal handler goroutine doesn't leak on normal exit.
 	// C7: Use a done channel instead of os.Exit(0) so deferred cleanup runs naturally.
+	ctx, cancelSignal := context.WithCancel(context.Background())
+	defer cancelSignal()
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	done := make(chan struct{})
 	go func() {
-		sig := <-sigCh
-		log.Printf("Received signal %v, shutting down...", sig)
-		w.Stop()                // closes Events channel, causing handleFileEvents to return
-		fileEventsWg.Wait()     // H35: wait for handleFileEvents to finish before cleanup
-		asyncScoreWg.Wait()     // H42: wait for in-flight async score goroutines before closing store
-		close(done)
+		select {
+		case sig := <-sigCh:
+			log.Printf("Received signal %v, shutting down...", sig)
+			w.Stop()            // closes Events channel, causing handleFileEvents to return
+			fileEventsWg.Wait() // H35: wait for handleFileEvents to finish before cleanup
+			asyncScoreWg.Wait() // H42: wait for in-flight async score goroutines before closing store
+			close(done)
+		case <-ctx.Done():
+			// M59: Normal exit path — context cancelled, goroutine exits cleanly
+			return
+		}
 	}()
 
 	// 11. Start serving MCP requests (blocks until stdin closes or signal received)
@@ -227,7 +237,10 @@ func main() {
 		log.Printf("Shutdown complete")
 	}
 
-	// Normal exit: stop watcher and wait for handleFileEvents before deferred cleanup runs
+	// Normal exit: cancel context to clean up signal goroutine, stop watcher
+	// and wait for handleFileEvents before deferred cleanup runs
+	cancelSignal()
+	signal.Stop(sigCh)
 	w.Stop()
 	fileEventsWg.Wait()
 }
@@ -337,7 +350,32 @@ func runCLI(cfg *config.Config, args []string) {
 	mcp.RegisterTools(server, mcp.ToolDeps{
 		Store: store, Graph: graphEngine, Search: hybridSearch, RepoRoot: cfg.RepoRoot,
 	}, func(path string) error {
-		return indexRepo(cfg, store, p, embedder, graphEngine)
+		// H9: Mirror daemon-mode logic — check path for targeted vs full re-index
+		indexMu.Lock()
+		defer indexMu.Unlock()
+		if path == "" {
+			log.Printf("CLI: Full re-index triggered")
+			return indexRepo(cfg, store, p, embedder, graphEngine)
+		}
+		// C9: Validate path is within repo root (prevent path traversal)
+		absPath := path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(cfg.RepoRoot, absPath)
+		}
+		absPath, err := filepath.Abs(absPath)
+		if err != nil {
+			return fmt.Errorf("invalid path: %w", err)
+		}
+		absRoot, absRootErr := filepath.Abs(cfg.RepoRoot)
+		if absRootErr != nil {
+			return fmt.Errorf("resolving repo root: %w", absRootErr)
+		}
+		if !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) && absPath != absRoot {
+			return fmt.Errorf("path traversal detected: %s is outside repo root", path)
+		}
+		log.Printf("CLI: Targeted re-index triggered for: %s", path)
+		indexPath(cfg, store, p, embedder, graphEngine, path)
+		return nil
 	})
 
 	handler, ok := server.GetHandler(toolName)
@@ -357,13 +395,14 @@ func runCLI(cfg *config.Config, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to marshal result: %v\n", err)
 		os.Exit(1)
 	}
-	// M42: Truncate unbounded CLI responses at 1MB
-	const maxCLIResponseSize = 1024 * 1024
-	outStr := string(out)
-	if len(outStr) > maxCLIResponseSize {
-		outStr = outStr[:maxCLIResponseSize-200] + fmt.Sprintf("\n\n... [TRUNCATED: response was %d bytes, max %d]", len(outStr), maxCLIResponseSize)
+
+	// M42: Limit CLI response size to 5MB to prevent unbounded output
+	const maxCLIResponseBytes = 5 * 1024 * 1024
+	if len(out) > maxCLIResponseBytes {
+		fmt.Fprintf(os.Stderr, "WARNING: Response truncated from %d to %d bytes\n", len(out), maxCLIResponseBytes)
+		out = out[:maxCLIResponseBytes]
 	}
-	fmt.Println(outStr)
+	fmt.Println(string(out))
 }
 
 // indexRepo performs a full index of the repository.
@@ -606,7 +645,8 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 	var files []string
 	if info.IsDir() {
 		// H20: Walk the directory respecting excluded dirs and gitignore
-		filepath.Walk(absTarget, func(path string, fi os.FileInfo, err error) error {
+		// M57: Check and log the error from filepath.Walk instead of discarding it
+		if walkErr := filepath.Walk(absTarget, func(path string, fi os.FileInfo, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -629,7 +669,9 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			}
 			files = append(files, relPath)
 			return nil
-		})
+		}); walkErr != nil {
+			log.Printf("Walk error for %s: %v", absTarget, walkErr)
+		}
 	} else {
 		relPath, err := filepath.Rel(cfg.RepoRoot, absTarget)
 		if err != nil {
@@ -677,7 +719,10 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 				log.Printf("Embedding error for %s: %v", node.SymbolName, err)
 				continue
 			}
-			store.UpsertEmbedding(node.ID, vec)
+			// M56: Log UpsertEmbedding errors instead of swallowing them
+			if err := store.UpsertEmbedding(node.ID, vec); err != nil {
+				log.Printf("Failed to store embedding for %s in indexPath: %v", node.SymbolName, err)
+			}
 		}
 	}
 
@@ -906,7 +951,10 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 				log.Printf("Embedding error for %s: %v", node.SymbolName, err)
 				continue
 			}
-			store.UpsertEmbedding(node.ID, vec)
+			// M56: Log UpsertEmbedding errors instead of swallowing them
+			if err := store.UpsertEmbedding(node.ID, vec); err != nil {
+				log.Printf("Failed to store embedding for %s in processFileEvent: %v", node.SymbolName, err)
+			}
 		}
 
 		// Add new edges to graph incrementally (nodes are created automatically

@@ -119,7 +119,11 @@ func (w *Watcher) Start() error {
 			}
 		}
 
-		return w.fsWatcher.Add(path)
+		// M58: Log fsWatcher.Add failures and continue instead of aborting the entire walk
+		if addErr := w.fsWatcher.Add(path); addErr != nil {
+			log.Printf("Warning: failed to watch directory %s: %v", path, addErr)
+		}
+		return nil
 	})
 	if err != nil {
 		return err
@@ -154,51 +158,16 @@ func (w *Watcher) Stop() error {
 	return err
 }
 
-// isExcluded checks if a path should be excluded from watching
+// isExcluded checks if a path should be excluded from watching.
+// M78: Delegates to shared checkExcluded function to avoid duplication with WalkSourceFiles.
 func (w *Watcher) isExcluded(path string) bool {
-	// Get the base name and relative path
-	base := filepath.Base(path)
-
-	// Check hardcoded exclusions (excludedDirs is immutable after construction)
-	if w.excludedDirs[base] {
-		return true
-	}
-
-	// M3: Check all gitignore entries (root + nested)
-	rel, err := filepath.Rel(w.repoRoot, path)
-	if err != nil {
-		return false
-	}
-
 	// H10: Take a snapshot of gitignores under lock to avoid races
 	w.mu.Lock()
 	gis := make([]gitignoreEntry, len(w.gitignores))
 	copy(gis, w.gitignores)
 	w.mu.Unlock()
 
-	for _, gi := range gis {
-		if gi.matcher == nil {
-			continue
-		}
-		var checkPath string
-		if gi.baseDir == "." || gi.baseDir == "" {
-			checkPath = rel
-		} else {
-			prefix := gi.baseDir + string(filepath.Separator)
-			if strings.HasPrefix(rel, prefix) {
-				checkPath, _ = filepath.Rel(gi.baseDir, rel)
-			} else if rel == gi.baseDir {
-				continue // the directory itself, not something inside it
-			} else {
-				continue // this gitignore doesn't apply
-			}
-		}
-		if gi.matcher.MatchesPath(checkPath) {
-			return true
-		}
-	}
-
-	return false
+	return checkExcluded(path, w.repoRoot, w.excludedDirs, gis)
 }
 
 // isWatchableFile returns true if the file extension is one we should parse.
@@ -243,16 +212,38 @@ func (w *Watcher) handleRawEvent(event fsnotify.Event) {
 	path := event.Name
 
 	// M10: Detect .gitignore modifications and reload
-	if filepath.Base(path) == ".gitignore" && (event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
-		w.reloadGitignore(path)
-		return
+	if filepath.Base(path) == ".gitignore" {
+		if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+			w.reloadGitignore(path)
+			return
+		}
+		// M62: Handle .gitignore deletion — clear cached rules for that directory
+		if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+			w.clearGitignore(path)
+			return
+		}
 	}
 
-	// If a new directory is created, start watching it (recursive watch)
+	// If a new directory is created, start watching it and all subdirectories (M60: recursive watch)
 	if event.Has(fsnotify.Create) {
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
+		if info, err := os.Lstat(path); err == nil && info.IsDir() {
 			if !w.isExcluded(path) {
-				_ = w.fsWatcher.Add(path)
+				// M60: Recursively add watches for the new directory and all subdirectories
+				filepath.Walk(path, func(subPath string, subInfo os.FileInfo, walkErr error) error {
+					if walkErr != nil {
+						return nil
+					}
+					if !subInfo.IsDir() {
+						return nil
+					}
+					if w.isExcluded(subPath) {
+						return filepath.SkipDir
+					}
+					if addErr := w.fsWatcher.Add(subPath); addErr != nil {
+						log.Printf("Warning: failed to watch new directory %s: %v", subPath, addErr)
+					}
+					return nil
+				})
 			}
 			return
 		}
@@ -321,6 +312,33 @@ func (w *Watcher) reloadGitignore(path string) {
 	}
 	w.gitignores = append(w.gitignores, gitignoreEntry{matcher: gi, baseDir: rel})
 	log.Printf("Loaded new .gitignore: %s", path)
+}
+
+// clearGitignore removes cached gitignore rules for a deleted .gitignore file (M62)
+func (w *Watcher) clearGitignore(path string) {
+	rel, err := filepath.Rel(w.repoRoot, filepath.Dir(path))
+	if err != nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for i, entry := range w.gitignores {
+		baseDir := entry.baseDir
+		if baseDir == "." {
+			baseDir = ""
+		}
+		relDir := rel
+		if relDir == "." {
+			relDir = ""
+		}
+		if baseDir == relDir {
+			// Remove this entry by swapping with the last element
+			w.gitignores[i] = w.gitignores[len(w.gitignores)-1]
+			w.gitignores = w.gitignores[:len(w.gitignores)-1]
+			log.Printf("Cleared .gitignore rules for deleted: %s", path)
+			return
+		}
+	}
 }
 
 // debounce coalesces rapid events for the same file into a single event
@@ -435,6 +453,41 @@ func (w *Watcher) WalkExisting() ([]string, error) {
 	return files, err
 }
 
+// checkExcluded is the shared exclusion logic used by both Watcher.isExcluded
+// and WalkSourceFiles (M78: extracted to avoid duplication).
+func checkExcluded(path string, repoRoot string, excludedDirs map[string]bool, gitignores []gitignoreEntry) bool {
+	base := filepath.Base(path)
+	if excludedDirs[base] {
+		return true
+	}
+	rel, err := filepath.Rel(repoRoot, path)
+	if err != nil {
+		return false
+	}
+	for _, gi := range gitignores {
+		if gi.matcher == nil {
+			continue
+		}
+		var checkPath string
+		if gi.baseDir == "." || gi.baseDir == "" {
+			checkPath = rel
+		} else {
+			prefix := gi.baseDir + string(filepath.Separator)
+			if strings.HasPrefix(rel, prefix) {
+				checkPath, _ = filepath.Rel(gi.baseDir, rel)
+			} else if rel == gi.baseDir {
+				continue // the directory itself, not something inside it
+			} else {
+				continue // this gitignore doesn't apply
+			}
+		}
+		if gi.matcher.MatchesPath(checkPath) {
+			return true
+		}
+	}
+	return false
+}
+
 // WalkSourceFiles walks the repo root and returns relative paths of all
 // watchable source files, respecting excluded dirs and .gitignore rules.
 // Unlike WalkExisting(), this does NOT require an fsnotify watcher allocation. (L4)
@@ -454,35 +507,9 @@ func WalkSourceFiles(repoRoot string, excludedDirs []string) ([]string, error) {
 		}
 	}
 
+	// M78: Use shared exclusion logic
 	isExcluded := func(path string) bool {
-		base := filepath.Base(path)
-		if excluded[base] {
-			return true
-		}
-		rel, err := filepath.Rel(repoRoot, path)
-		if err != nil {
-			return false
-		}
-		for _, gi := range gitignores {
-			if gi.matcher == nil {
-				continue
-			}
-			var checkPath string
-			if gi.baseDir == "." || gi.baseDir == "" {
-				checkPath = rel
-			} else {
-				prefix := gi.baseDir + string(filepath.Separator)
-				if strings.HasPrefix(rel, prefix) {
-					checkPath, _ = filepath.Rel(gi.baseDir, rel)
-				} else {
-					continue
-				}
-			}
-			if gi.matcher.MatchesPath(checkPath) {
-				return true
-			}
-		}
-		return false
+		return checkExcluded(path, repoRoot, excluded, gitignores)
 	}
 
 	var files []string
@@ -491,7 +518,12 @@ func WalkSourceFiles(repoRoot string, excludedDirs []string) ([]string, error) {
 			return nil
 		}
 		if info.IsDir() {
-			// Discover nested .gitignore files
+			// M64: Check exclusion BEFORE loading .gitignore to avoid processing
+			// nested .gitignore files inside already-excluded directories
+			if isExcluded(path) {
+				return filepath.SkipDir
+			}
+			// Discover nested .gitignore files (only in non-excluded dirs)
 			nestedGI := filepath.Join(path, ".gitignore")
 			if _, statErr := os.Stat(nestedGI); statErr == nil {
 				rel, relErr := filepath.Rel(repoRoot, path)
@@ -501,9 +533,6 @@ func WalkSourceFiles(repoRoot string, excludedDirs []string) ([]string, error) {
 						gitignores = append(gitignores, gitignoreEntry{matcher: gi, baseDir: rel})
 					}
 				}
-			}
-			if isExcluded(path) {
-				return filepath.SkipDir
 			}
 			return nil
 		}

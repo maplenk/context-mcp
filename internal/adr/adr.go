@@ -154,7 +154,9 @@ func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
 		}
 	}
 
-	hash := sha256.Sum256(data)
+	// M65: Hash only the truncated content (what we actually store), so that
+	// changes beyond maxContentBytes don't trigger unnecessary re-processing.
+	hash := sha256.Sum256([]byte(content))
 	relPath, err := filepath.Rel(d.repoRoot, path)
 	if err != nil {
 		relPath = path
