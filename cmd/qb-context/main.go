@@ -402,6 +402,30 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 	}
 	log.Printf("Found %d source files to index", len(files))
 
+	// H2: Reconcile database against filesystem — purge data for deleted files
+	knownFiles, err := store.GetAllFilePaths()
+	if err != nil {
+		log.Printf("Warning: failed to get known files for reconciliation: %v", err)
+	} else {
+		currentFiles := make(map[string]bool, len(files))
+		for _, f := range files {
+			currentFiles[f] = true
+		}
+		var purged int
+		for _, known := range knownFiles {
+			if !currentFiles[known] {
+				if err := store.DeleteByFile(known); err != nil {
+					log.Printf("Warning: failed to purge stale file %s: %v", known, err)
+				} else {
+					purged++
+				}
+			}
+		}
+		if purged > 0 {
+			log.Printf("Purged %d stale files from index", purged)
+		}
+	}
+
 	// Parse files using a worker pool
 	type parseJob struct {
 		relPath string
