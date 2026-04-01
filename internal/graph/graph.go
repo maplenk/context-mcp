@@ -69,6 +69,12 @@ func (g *GraphEngine) BuildFromEdges(edges []types.ASTEdge) {
 	for _, edge := range edges {
 		srcID := g.ensureNode(edge.SourceID)
 		tgtID := g.ensureNode(edge.TargetID)
+		// Skip self-loops: gonum's simple.DirectedGraph panics on self-edges.
+		// Recursive functions still get a node in the graph; they just lack
+		// the self-edge (which doesn't affect BFS/PageRank semantics).
+		if srcID == tgtID {
+			continue
+		}
 		if !g.dg.HasEdgeFromTo(srcID, tgtID) {
 			g.dg.SetEdge(g.dg.NewEdge(g.dg.Node(srcID), g.dg.Node(tgtID)))
 		}
@@ -87,6 +93,10 @@ func (g *GraphEngine) AddEdge(edge types.ASTEdge) {
 
 	srcID := g.ensureNode(edge.SourceID)
 	tgtID := g.ensureNode(edge.TargetID)
+	// Skip self-loops: gonum's simple.DirectedGraph panics on self-edges.
+	if srcID == tgtID {
+		return
+	}
 	if !g.dg.HasEdgeFromTo(srcID, tgtID) {
 		g.dg.SetEdge(g.dg.NewEdge(g.dg.Node(srcID), g.dg.Node(tgtID)))
 		g.communityValid = false
