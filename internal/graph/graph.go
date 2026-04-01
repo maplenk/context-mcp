@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
@@ -10,6 +11,11 @@ import (
 	"gonum.org/v1/gonum/graph/network"
 	"gonum.org/v1/gonum/graph/simple"
 )
+
+// noParent is a sentinel value for the BFS parent map indicating a node has
+// no parent (i.e., it is the BFS root). Using math.MinInt64 avoids any
+// possible collision with valid gonum node IDs, which are non-negative.
+const noParent = math.MinInt64
 
 // GraphEngine maintains an in-memory directed graph of code relationships
 type GraphEngine struct {
@@ -63,10 +69,15 @@ func (g *GraphEngine) BuildFromEdges(edges []types.ASTEdge) {
 	for _, edge := range edges {
 		srcID := g.ensureNode(edge.SourceID)
 		tgtID := g.ensureNode(edge.TargetID)
-		if srcID != tgtID && !g.dg.HasEdgeFromTo(srcID, tgtID) {
+		if !g.dg.HasEdgeFromTo(srcID, tgtID) {
 			g.dg.SetEdge(g.dg.NewEdge(g.dg.Node(srcID), g.dg.Node(tgtID)))
 		}
 	}
+
+	// Reset changeCount after a full rebuild so that incremental mutation
+	// tracking starts fresh. Without this, the counter retains its old
+	// value and could trigger a spurious betweenness recomputation.
+	g.changeCount = 0
 }
 
 // AddEdge adds a single edge to the graph
@@ -76,7 +87,7 @@ func (g *GraphEngine) AddEdge(edge types.ASTEdge) {
 
 	srcID := g.ensureNode(edge.SourceID)
 	tgtID := g.ensureNode(edge.TargetID)
-	if srcID != tgtID && !g.dg.HasEdgeFromTo(srcID, tgtID) {
+	if !g.dg.HasEdgeFromTo(srcID, tgtID) {
 		g.dg.SetEdge(g.dg.NewEdge(g.dg.Node(srcID), g.dg.Node(tgtID)))
 		g.communityValid = false
 		g.inDegreeValid = false
@@ -84,7 +95,10 @@ func (g *GraphEngine) AddEdge(edge types.ASTEdge) {
 	}
 }
 
-// RemoveEdge removes a single edge from the graph
+// RemoveEdge removes a single edge from the graph. If removing the edge leaves
+// either the source or target node with zero remaining edges (both in-degree
+// and out-degree are zero), the orphaned node is also removed from the graph
+// and the ID maps to prevent unbounded memory growth in long-running sessions.
 func (g *GraphEngine) RemoveEdge(sourceHash, targetHash string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -96,6 +110,23 @@ func (g *GraphEngine) RemoveEdge(sourceHash, targetHash string) {
 		g.communityValid = false
 		g.inDegreeValid = false
 		g.changeCount++
+
+		// Clean up orphaned nodes (zero in-degree AND zero out-degree)
+		g.removeIfOrphaned(srcID, sourceHash)
+		if srcID != tgtID {
+			g.removeIfOrphaned(tgtID, targetHash)
+		}
+	}
+}
+
+// removeIfOrphaned removes a node from the graph and ID maps if it has no
+// remaining edges (both in-degree and out-degree are zero).
+// Must be called with the write lock held.
+func (g *GraphEngine) removeIfOrphaned(id int64, hashID string) {
+	if g.dg.From(id).Len() == 0 && g.dg.To(id).Len() == 0 {
+		g.dg.RemoveNode(id)
+		delete(g.idMap, hashID)
+		delete(g.reverseMap, id)
 	}
 }
 
@@ -305,6 +336,11 @@ func (g *GraphEngine) personalizedPageRankSubgraphLocked(seedIDs, candidateIDs [
 		return nil
 	}
 
+	// Intentionally relaxed parameters compared to full-graph PPR (epsilon=1e-6,
+	// maxIter=100). The subgraph typically contains ~100 candidate nodes vs 12K+
+	// in the full graph, so convergence is much faster. Looser epsilon (1e-4) and
+	// fewer iterations (15) deliver comparable ranking quality on small subgraphs
+	// while keeping latency low for interactive search queries.
 	const (
 		alpha   = 0.85
 		epsilon = 1e-4
@@ -480,12 +516,26 @@ func (g *GraphEngine) ComputeBetweenness() map[string]float64 {
 // ComputeInDegree computes the in-degree authority for all nodes, normalized to [0,1].
 // In-degree counts how many other nodes have edges pointing TO each node.
 // Results are cached and invalidated on graph mutations.
+// Uses double-checked locking: first checks cache under a read lock to avoid
+// blocking other readers, then acquires a write lock only on cache miss.
 func (g *GraphEngine) ComputeInDegree() map[string]float64 {
+	// Fast path: check cache with read lock (does not block other readers)
+	g.mu.RLock()
+	if g.inDegreeValid && g.inDegreeCache != nil {
+		result := make(map[string]float64, len(g.inDegreeCache))
+		for k, v := range g.inDegreeCache {
+			result[k] = v
+		}
+		g.mu.RUnlock()
+		return result
+	}
+	g.mu.RUnlock()
+
+	// Slow path: acquire write lock and recheck (double-checked locking)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	if g.inDegreeValid && g.inDegreeCache != nil {
-		// Return a copy of the cache to avoid races
 		result := make(map[string]float64, len(g.inDegreeCache))
 		for k, v := range g.inDegreeCache {
 			result[k] = v
@@ -874,7 +924,7 @@ func (g *GraphEngine) TraceCallPath(fromHash, toHash string, maxDepth int) [][]s
 
 // traceForwardBFS performs a simple forward BFS to find a path from source to target.
 func (g *GraphEngine) traceForwardBFS(fromID, toID int64, maxDepth int) [][]string {
-	parent := map[int64]int64{fromID: -1}
+	parent := map[int64]int64{fromID: noParent}
 	frontier := []int64{fromID}
 
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
@@ -890,7 +940,7 @@ func (g *GraphEngine) traceForwardBFS(fromID, toID int64, maxDepth int) [][]stri
 						// Reconstruct path
 						var path []string
 						cur := toID
-						for cur != -1 {
+						for cur != noParent {
 							if h, ok := g.reverseMap[cur]; ok {
 								path = append(path, h)
 							}
