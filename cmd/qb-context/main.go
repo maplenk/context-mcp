@@ -358,16 +358,34 @@ func runCLI(cfg *config.Config, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to marshal result: %v\n", err)
 		os.Exit(1)
 	}
-	// M12: Truncate at valid UTF-8 boundary to avoid splitting multi-byte
-	// characters when output exceeds 5MB.
+	// M3/M12: Truncate oversized output while preserving valid JSON.
+	// The output from json.MarshalIndent is always JSON, so we wrap truncated
+	// content in a valid JSON envelope.
 	const maxCLIOutput = 5 * 1024 * 1024
 	outStr := string(out)
 	if len(outStr) > maxCLIOutput {
-		truncated := outStr[:maxCLIOutput]
-		for !utf8.ValidString(truncated) && len(truncated) > 0 {
-			truncated = truncated[:len(truncated)-1]
+		trimmed := strings.TrimSpace(outStr)
+		isJSON := len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
+		if isJSON {
+			const envelope = `{"truncated":true,"message":"Output exceeded 5MB size limit","partial_data":""}`
+			budget := maxCLIOutput - len(envelope)
+			if budget < 0 {
+				budget = 0
+			}
+			partial := outStr[:budget]
+			for !utf8.ValidString(partial) && len(partial) > 0 {
+				partial = partial[:len(partial)-1]
+			}
+			escapedBytes, _ := json.Marshal(partial)
+			escaped := string(escapedBytes[1 : len(escapedBytes)-1])
+			outStr = `{"truncated":true,"message":"Output exceeded 5MB size limit","partial_data":"` + escaped + `"}`
+		} else {
+			truncated := outStr[:maxCLIOutput]
+			for !utf8.ValidString(truncated) && len(truncated) > 0 {
+				truncated = truncated[:len(truncated)-1]
+			}
+			outStr = truncated + "\n... [truncated, output exceeded 5MB]"
 		}
-		outStr = truncated + "\n... [truncated, output exceeded 5MB]"
 	}
 	fmt.Println(outStr)
 }

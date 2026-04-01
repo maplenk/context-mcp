@@ -1751,14 +1751,36 @@ func toToolResponse(result interface{}) (*mcp_golang.ToolResponse, error) {
 		text = string(jsonBytes)
 	}
 	if len(text) > maxResponseSize {
-		// M11: Truncate at a valid UTF-8 boundary to avoid splitting
-		// multi-byte characters. Walk backwards from the cut point to
-		// find the last complete rune.
-		truncated := text[:maxResponseSize]
-		for !utf8.ValidString(truncated) && len(truncated) > 0 {
-			truncated = truncated[:len(truncated)-1]
+		// M2/M11: Produce valid JSON when truncating JSON payloads.
+		// Detect JSON by checking the first non-whitespace byte.
+		trimmed := strings.TrimSpace(text)
+		isJSON := len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
+		if isJSON {
+			// Build a wrapper that keeps the output valid JSON.
+			// Reserve space for the envelope so the total stays within the limit.
+			const envelope = `{"truncated":true,"message":"Response exceeded 1MB size limit","partial_data":""}`
+			budget := maxResponseSize - len(envelope)
+			if budget < 0 {
+				budget = 0
+			}
+			partial := text[:budget]
+			// Walk back to a valid UTF-8 boundary.
+			for !utf8.ValidString(partial) && len(partial) > 0 {
+				partial = partial[:len(partial)-1]
+			}
+			// Escape the partial data so it is a valid JSON string value.
+			escapedBytes, _ := json.Marshal(partial)
+			// json.Marshal wraps in quotes; strip them for embedding.
+			escaped := string(escapedBytes[1 : len(escapedBytes)-1])
+			text = `{"truncated":true,"message":"Response exceeded 1MB size limit","partial_data":"` + escaped + `"}`
+		} else {
+			// Plain text: truncate at a valid UTF-8 boundary.
+			truncated := text[:maxResponseSize]
+			for !utf8.ValidString(truncated) && len(truncated) > 0 {
+				truncated = truncated[:len(truncated)-1]
+			}
+			text = truncated + "\n... [truncated, response exceeded 1MB]"
 		}
-		text = truncated + "\n... [truncated, response exceeded 1MB]"
 	}
 	return mcp_golang.NewToolResponse(mcp_golang.NewTextContent(text)), nil
 }
