@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -686,7 +687,12 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("enabling query_only: %w", err)
 	}
 	// Always restore the connection to read-write before returning to pool
-	defer conn.ExecContext(context.Background(), "PRAGMA query_only = OFF")
+	defer func() {
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only = OFF"); err != nil {
+			log.Printf("Warning: failed to reset query_only on connection: %v", err)
+			conn.Close() // prevent returning a read-only connection to the pool
+		}
+	}()
 
 	rows, err := conn.QueryContext(context.Background(), query)
 	if err != nil {

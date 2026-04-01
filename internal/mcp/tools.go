@@ -1022,6 +1022,10 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 					}
 				}
 			}
+			// Check for scanner errors (oversized tokens, I/O failures)
+			if err := scanner.Err(); err != nil {
+				log.Printf("search_code: scanner error on %s: %v", relPath, err)
+			}
 			return false
 		}()
 		if limitReached {
@@ -1092,14 +1096,21 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 	}
 
 	// Validate the git ref to prevent command injection
-	// M25: Only allow alphanumeric, ~, ^, ., - (no slashes — prevents path traversal in ref names)
-	// Explicitly exclude @{} to prevent triggering git network access (e.g., @{upstream})
-	validRef := regexp.MustCompile(`^[a-zA-Z0-9~^.\-]+$`)
+	// M25: Allow alphanumeric, ~, ^, ., -, / for branch names (e.g. feature/my-branch, origin/main)
+	// Path traversal (..) and reflog syntax (@{}) are rejected separately below
+	validRef := regexp.MustCompile(`^[a-zA-Z0-9~^.\-/]+$`)
 	if !validRef.MatchString(p.Since) {
 		return nil, fmt.Errorf("invalid git ref: %s", p.Since)
 	}
 	if strings.HasPrefix(p.Since, "-") {
 		return nil, fmt.Errorf("invalid git ref (must not start with dash): %s", p.Since)
+	}
+	// Prevent path traversal and git network access triggers
+	if strings.Contains(p.Since, "..") {
+		return nil, fmt.Errorf("invalid git ref (path traversal detected): %s", p.Since)
+	}
+	if strings.Contains(p.Since, "@{") {
+		return nil, fmt.Errorf("invalid git ref (reflog syntax not allowed): %s", p.Since)
 	}
 
 	// Run git diff to get changed files
