@@ -38,7 +38,7 @@ func NewServer() *Server {
 		sdk: mcp_golang.NewServer(
 			stdio.NewStdioServerTransport(),
 			mcp_golang.WithName("qb-context"),
-			mcp_golang.WithVersion("0.1.0"),
+			mcp_golang.WithVersion(Version),
 		),
 		handlers: make(map[string]ToolHandler),
 	}
@@ -51,7 +51,7 @@ func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 		sdk: mcp_golang.NewServer(
 			stdio.NewStdioServerTransportWithIO(input, output),
 			mcp_golang.WithName("qb-context"),
-			mcp_golang.WithVersion("0.1.0"),
+			mcp_golang.WithVersion(Version),
 		),
 		handlers: make(map[string]ToolHandler),
 	}

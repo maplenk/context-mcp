@@ -636,7 +636,7 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	// Uses word-boundary regex to avoid false positives (e.g., "attachment", "credited").
 	// "edit" is intentionally omitted — it appears in normal identifiers and the real
 	// protection against edit() is PRAGMA query_only / read-only transactions.
-	dangerousPatterns := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex"}
+	dangerousPatterns := []string{"load_extension", "writefile", "readfile", "fts3_tokenizer", "attach", "pragma", "vacuum", "reindex", "sqlite_master", "sqlite_schema"}
 	for _, pattern := range dangerousPatterns {
 		re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(pattern) + `\b`)
 		if re.MatchString(query) {
@@ -934,6 +934,29 @@ func (s *Store) GetAllNodeScores() ([]types.NodeScore, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`SELECT node_id, pagerank, betweenness FROM node_scores`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var scores []types.NodeScore
+	for rows.Next() {
+		var score types.NodeScore
+		if err := rows.Scan(&score.NodeID, &score.PageRank, &score.Betweenness); err != nil {
+			return nil, err
+		}
+		scores = append(scores, score)
+	}
+	return scores, rows.Err()
+}
+
+// GetTopNodeScoresByPageRank returns the top N node scores ordered by PageRank descending.
+// M43: Avoids loading all scores into memory when only top-N are needed.
+func (s *Store) GetTopNodeScoresByPageRank(limit int) ([]types.NodeScore, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT node_id, pagerank, betweenness FROM node_scores ORDER BY pagerank DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

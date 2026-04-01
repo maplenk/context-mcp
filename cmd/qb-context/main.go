@@ -351,7 +351,13 @@ func runCLI(cfg *config.Config, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to marshal result: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println(string(out))
+	// M42: Truncate unbounded CLI responses at 1MB
+	const maxCLIResponseSize = 1024 * 1024
+	outStr := string(out)
+	if len(outStr) > maxCLIResponseSize {
+		outStr = outStr[:maxCLIResponseSize-200] + fmt.Sprintf("\n\n... [TRUNCATED: response was %d bytes, max %d]", len(outStr), maxCLIResponseSize)
+	}
+	fmt.Println(outStr)
 }
 
 // indexRepo performs a full index of the repository.
