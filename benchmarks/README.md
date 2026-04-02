@@ -35,6 +35,37 @@ algorithm performance.
 
 ---
 
+## Pre-Push Hook
+
+A git pre-push hook automatically detects version changes and prompts you to run benchmarks before pushing.
+
+### Install
+```bash
+./.githooks/install.sh
+```
+
+### Triggers
+The hook activates when pushed commits modify:
+- `internal/mcp/tools.go` — application version constant
+- `internal/storage/migrations.go` — database schema version
+- `knowledge.md` — release documentation
+- New git tags
+
+### Options
+| Input | Action |
+|-------|--------|
+| `y` | Run benchmarks, push only if they pass |
+| `s` | Run benchmarks in background, push immediately |
+| `N` (default) | Skip benchmarks, push immediately |
+
+### Skip
+```bash
+QB_SKIP_BENCH=1 git push          # skip for one push
+git push --no-verify               # skip all hooks
+```
+
+---
+
 ## Overview
 
 The benchmark suite measures three dimensions of qb-context quality:

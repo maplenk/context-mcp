@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+#
+# Pre-push hook for qb-context
+# Detects version/schema changes in pushed commits and prompts for benchmarks.
+#
+# Skip: QB_SKIP_BENCH=1 git push   or   git push --no-verify
+
+set -euo pipefail
+
+# ── Skip gate ────────────────────────────────────────────────────────────────
+if [[ "${QB_SKIP_BENCH:-0}" == "1" ]]; then
+    exit 0
+fi
+
+# ── ANSI colours ─────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    BOLD='\033[1m'
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    CYAN='\033[0;36m'
+    RESET='\033[0m'
+else
+    BOLD='' RED='' GREEN='' YELLOW='' CYAN='' RESET=''
+fi
+
+# ── Repo root & paths ───────────────────────────────────────────────────────
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+BENCH_SCRIPT="${REPO_ROOT}/benchmarks/run.sh"
+BENCH_LOG="${REPO_ROOT}/.githooks/benchmark-$(date +%Y%m%d-%H%M%S).log"
+
+WATCHED_FILES=(
+    "internal/mcp/tools.go"
+    "internal/storage/migrations.go"
+    "knowledge.md"
+)
+
+ZERO="0000000000000000000000000000000000000000"
+
+# ── Collect changed files and tag refs across all refs being pushed ───────────
+changed_files=""
+pushing_tag=false
+pushed_tags=""
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Skip delete pushes
+    if [[ "$local_sha" == "$ZERO" ]]; then
+        continue
+    fi
+
+    # Detect tag pushes
+    if [[ "$local_ref" == refs/tags/* ]]; then
+        pushing_tag=true
+        tag_name="${local_ref#refs/tags/}"
+        pushed_tags="${pushed_tags}${tag_name}, "
+    fi
+
+    if [[ "$remote_sha" == "$ZERO" ]]; then
+        # New branch — compare against all remote branches
+        new_files=$(git log --name-only --format="" "$local_sha" --not --remotes 2>/dev/null || true)
+    else
+        new_files=$(git diff --name-only "$remote_sha".."$local_sha" 2>/dev/null || true)
+    fi
+
+    changed_files="${changed_files}${new_files}"$'\n'
+done
+
+# ── Determine what changed ──────────────────────────────────────────────────
+declare -a alerts=()
+
+for watched in "${WATCHED_FILES[@]}"; do
+    if echo "$changed_files" | grep -qF "$watched"; then
+        case "$watched" in
+            internal/mcp/tools.go)
+                # Try to extract old→new version
+                old_ver=$(git show HEAD~1:"$watched" 2>/dev/null | sed -n 's/.*const Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' || echo "?")
+                new_ver=$(git show HEAD:"$watched" 2>/dev/null | sed -n 's/.*const Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' || echo "?")
+                if [[ "$old_ver" != "$new_ver" ]]; then
+                    alerts+=("Version: ${old_ver} → ${new_ver}  (internal/mcp/tools.go)")
+                else
+                    alerts+=("Modified: internal/mcp/tools.go")
+                fi
+                ;;
+            internal/storage/migrations.go)
+                old_schema=$(git show HEAD~1:"$watched" 2>/dev/null | sed -n 's/.*const currentSchemaVersion[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' || echo "?")
+                new_schema=$(git show HEAD:"$watched" 2>/dev/null | sed -n 's/.*const currentSchemaVersion[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' || echo "?")
+                if [[ "$old_schema" != "$new_schema" ]]; then
+                    alerts+=("Schema: ${old_schema} → ${new_schema}  (internal/storage/migrations.go)")
+                else
+                    alerts+=("Modified: internal/storage/migrations.go")
+                fi
+                ;;
+            knowledge.md)
+                alerts+=("Modified: knowledge.md  (release documentation)")
+                ;;
+        esac
+    fi
+done
+
+if [[ "$pushing_tag" == true ]]; then
+    tag_list="${pushed_tags%, }"
+    alerts+=("New tag: ${tag_list}")
+fi
+
+# ── Nothing detected → exit silently ────────────────────────────────────────
+if [[ ${#alerts[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+# ── Build the banner ────────────────────────────────────────────────────────
+BOX_W=60
+
+print_line() {
+    local content="$1"
+    local pad=$((BOX_W - 2 - ${#content}))
+    if (( pad < 0 )); then pad=0; fi
+    printf "${CYAN}║${RESET}  %s%*s${CYAN}║${RESET}\n" "$content" "$pad" ""
+}
+
+echo ""
+printf "${CYAN}╔"; printf '═%.0s' $(seq 1 $BOX_W); printf "╗${RESET}\n"
+print_line "🔔 Version change detected in commits being pushed"
+printf "${CYAN}╠"; printf '═%.0s' $(seq 1 $BOX_W); printf "╣${RESET}\n"
+for alert in "${alerts[@]}"; do
+    print_line "• ${alert}"
+done
+printf "${CYAN}╚"; printf '═%.0s' $(seq 1 $BOX_W); printf "╝${RESET}\n"
+echo ""
+
+# ── Non-interactive mode → warn only ────────────────────────────────────────
+if ! [ -t 0 ] && ! [ -t 1 ]; then
+    echo -e "${YELLOW}⚠  Non-interactive terminal — skipping benchmark prompt${RESET}"
+    echo -e "${YELLOW}   Consider running: ${BENCH_SCRIPT}${RESET}"
+    exit 0
+fi
+
+# ── Check benchmark script exists ───────────────────────────────────────────
+if [[ ! -x "$BENCH_SCRIPT" ]]; then
+    echo -e "${YELLOW}⚠  Benchmark script not found or not executable: ${BENCH_SCRIPT}${RESET}"
+    echo -e "${YELLOW}   Skipping benchmark prompt.${RESET}"
+    exit 0
+fi
+
+# ── Interactive prompt ──────────────────────────────────────────────────────
+# Reopen stdin from terminal (git uses stdin for ref data)
+exec < /dev/tty
+
+echo -e "${BOLD}Run benchmarks before pushing? (~2 min)${RESET}"
+echo -e "  ${GREEN}[y]${RESET} Run and wait  ${CYAN}[s]${RESET} Run in background  ${YELLOW}[N]${RESET} Skip"
+printf "> "
+read -r answer
+
+case "${answer}" in
+    y|Y)
+        echo ""
+        echo -e "${CYAN}Running benchmarks…${RESET}"
+        bench_exit=0
+        "${BENCH_SCRIPT}" || bench_exit=$?
+        if [[ "$bench_exit" -eq 0 ]]; then
+            echo -e "${GREEN}✓ Benchmarks passed${RESET}"
+            exit 0
+        else
+            echo ""
+            echo -e "${RED}✗ Benchmarks failed (exit code ${bench_exit})${RESET}"
+            echo -e "${BOLD}Push anyway? [y/N]${RESET}"
+            printf "> "
+            read -r force_answer
+            case "${force_answer}" in
+                y|Y)
+                    echo -e "${YELLOW}⚠  Pushing despite benchmark failure${RESET}"
+                    exit 0
+                    ;;
+                *)
+                    echo -e "${RED}Push aborted.${RESET}"
+                    exit 1
+                    ;;
+            esac
+        fi
+        ;;
+    s|S)
+        echo ""
+        echo -e "${CYAN}Running benchmarks in background → ${BENCH_LOG}${RESET}"
+        nohup "${BENCH_SCRIPT}" > "${BENCH_LOG}" 2>&1 &
+        bg_pid=$!
+        echo -e "${CYAN}  PID: ${bg_pid}${RESET}"
+        echo -e "${CYAN}  Log: ${BENCH_LOG}${RESET}"
+        echo -e "${GREEN}Continuing push…${RESET}"
+        exit 0
+        ;;
+    *)
+        echo -e "${YELLOW}Skipping benchmarks.${RESET}"
+        exit 0
+        ;;
+esac

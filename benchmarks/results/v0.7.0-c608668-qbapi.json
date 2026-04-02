@@ -1,0 +1,35 @@
+{
+  "commit": "c608668",
+  "label": "v0.7.0",
+  "timestamp": "20260402T141527",
+  "target_repo": "/Users/naman/Documents/QBApps/qbapi",
+  "index_stats": {
+    "total_nodes": 33607,
+    "total_edges": 5635,
+    "graph_nodes": 4082,
+    "graph_edges": 5460
+  },
+  "graph_benchmarks": {
+    "pagerank_ns": 55155,
+    "blast_radius_ns": 3074,
+    "betweenness_ns": 4660472
+  },
+  "query_latencies": {
+    "A1": "503.084µs",
+    "A3": "71.397459ms",
+    "B1": "2.926292ms",
+    "B6": "746.292µs",
+    "C1": "2.581125ms",
+    "C5": "3.239291ms"
+  },
+  "query_results": {
+    "passed": 6,
+    "failed": 0,
+    "total_time_seconds": 77.16
+  },
+  "quality_results": {
+    "passed": 7,
+    "failed": 0,
+    "total_time_seconds": 76.14
+  }
+}
