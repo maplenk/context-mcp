@@ -869,17 +869,27 @@ func (g *GraphEngine) ComputeSearchSignalsSubgraph(seedIDs, candidateIDs []strin
 	// (computeInDegreeLocked mutates the cache). This is rare — only on first call
 	// after a graph rebuild.
 	if needInDegree {
+		var fullInDeg map[string]float64
 		g.mu.Lock()
 		if g.inDegreeValid && g.inDegreeCache != nil {
 			// Another goroutine populated it while we waited
-			inDeg = make(map[string]float64, len(g.inDegreeCache))
-			for k, v := range g.inDegreeCache {
-				inDeg[k] = v
-			}
+			fullInDeg = g.inDegreeCache
 		} else {
-			inDeg = g.computeInDegreeLocked()
+			fullInDeg = g.computeInDegreeLocked()
 		}
 		g.mu.Unlock()
+
+		// Filter to candidates only (matching snapshotSubgraphData behavior)
+		candidateHashSet := make(map[string]bool, len(candidateIDs))
+		for _, hashID := range candidateIDs {
+			candidateHashSet[hashID] = true
+		}
+		inDeg = make(map[string]float64, len(candidateIDs))
+		for k, v := range fullInDeg {
+			if candidateHashSet[k] {
+				inDeg[k] = v
+			}
+		}
 	}
 	inDegree = inDeg
 
@@ -975,13 +985,21 @@ func (g *GraphEngine) snapshotSubgraphData(seedIDs, candidateIDs []string) (subg
 		}
 	}
 
-	// Copy in-degree cache if valid
+	// Copy in-degree cache filtered to candidates only, so that downstream
+	// normalizeMap uses the candidate-local max rather than the full-graph max.
+	candidateHashSet := make(map[string]bool, len(candidateIDs))
+	for _, hashID := range candidateIDs {
+		candidateHashSet[hashID] = true
+	}
+
 	var inDegree map[string]float64
 	needInDegree := false
 	if g.inDegreeValid && g.inDegreeCache != nil {
-		inDegree = make(map[string]float64, len(g.inDegreeCache))
+		inDegree = make(map[string]float64, len(candidateIDs))
 		for k, v := range g.inDegreeCache {
-			inDegree[k] = v
+			if candidateHashSet[k] {
+				inDegree[k] = v
+			}
 		}
 	} else {
 		needInDegree = true
