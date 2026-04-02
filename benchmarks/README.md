@@ -91,8 +91,10 @@ benchmarks/
 ├── compare.sh             Benchmark any git ref; compare two commits side-by-side
 ├── dashboard.py           Terminal + HTML comparison dashboard
 └── results/
-    ├── baseline-v0.8.0-qbapi.json          Current baseline (with Cold Start)
-    └── pre-cold-start-fab5104-qbapi.json   Pre-Cold-Start baseline
+    ├── baseline-v0.6.0-qbapi.json          Baseline (earliest benchmarked release)
+    ├── v0.7.0-c608668-qbapi.json           Search quality release
+    ├── v0.8.0-fab5104-qbapi.json           Cross-file + DA hardening
+    └── v0.9.0-e1a93bc-qbapi.json           Cold Start release (current)
 ```
 
 ---
@@ -218,7 +220,7 @@ python3 benchmarks/dashboard.py [files...] [options]
 python3 benchmarks/dashboard.py
 
 # Compare two specific files
-python3 benchmarks/dashboard.py results/baseline-v0.8.0-qbapi.json results/pre-cold-start-fab5104-qbapi.json
+python3 benchmarks/dashboard.py results/baseline-v0.6.0-qbapi.json results/v0.9.0-e1a93bc-qbapi.json
 
 # Last 3 results only
 python3 benchmarks/dashboard.py --latest 3
@@ -372,9 +374,24 @@ go test -tags "fts5" -bench=. -benchmem -run='^$' ./internal/graph/ -count=3
 
 ## Baselines
 
-### v0.8.0 (with Cold Start)
+### v0.6.0 — Baseline (earliest benchmarked release)
 
-Commit: `3be18d3` · Result file: `results/baseline-v0.8.0-qbapi.json`
+Commit: `3805b52` · Result file: `results/baseline-v0.6.0-qbapi.json`
+
+| Query | Category   | Latency  | Results    | Top Score |
+|-------|------------|----------|------------|-----------|
+| A1    | Exact      | 576µs    | 1 class    | —         |
+| A3    | Exact      | 71.6ms   | 10 matches | —         |
+| B1    | Concept    | 34.8ms   | 10 results | —         |
+| B6    | Concept    | 33.1ms   | 10 results | —         |
+| C1    | Cross-file | 4.99s    | 15 results | —         |
+| C5    | Cross-file | 33.9ms   | 15 results | —         |
+
+Index: 29,101 nodes · 3,380 edges · Search quality: 8/8 passed
+
+### v0.9.0 — Current (Cold Start)
+
+Commit: `e1a93bc` · Result file: `results/v0.9.0-e1a93bc-qbapi.json`
 
 | Query | Category   | Latency | Results    | Top Score |
 |-------|------------|---------|------------|-----------|
@@ -385,38 +402,18 @@ Commit: `3be18d3` · Result file: `results/baseline-v0.8.0-qbapi.json`
 | C1    | Cross-file | 3.0ms   | 15 results | 0.6167    |
 | C5    | Cross-file | 2.2ms   | 15 results | 0.4559    |
 
-Search quality: 17/17 passed · Tool tests: 9/9 passed
+Index: 12,653 nodes · 16,294 edges · Search quality: 17/17 passed · Tool tests: 9/9 passed
 
-### Pre-Cold-Start (fab5104)
+### Comparison: Baseline vs Current
 
-Commit: `fab5104` · Result file: `results/pre-cold-start-fab5104-qbapi.json`
-
-| Query | Category   | Latency | Results    | Top Score |
-|-------|------------|---------|------------|-----------|
-| A1    | Exact      | 568µs   | 1 class    | —         |
-| A3    | Exact      | 89ms    | 10 matches | —         |
-| B1    | Concept    | 4.7ms   | 10 results | 0.6167    |
-| B6    | Concept    | 1.6ms   | 10 results | 0.5309    |
-| C1    | Cross-file | 3.2ms   | 15 results | 0.6167    |
-| C5    | Cross-file | 2.3ms   | 15 results | 0.4559    |
-
-Search quality: 7/7 passed
-
-### Comparison: Cold Start Impact
-
-| Metric          | Pre-CS (fab5104) | v0.8.0 | Delta   | Notes                          |
-|-----------------|-----------------|--------|---------|--------------------------------|
-| A1 latency      | 568µs           | 279µs  | -51%    | Faster (run-to-run variance)   |
-| A3 latency      | 89ms            | 77ms   | -13%    | Faster                         |
-| B1 latency      | 4.7ms           | 5.7ms  | +21%    | Within noise margin            |
-| B1 top score    | 0.6167          | 0.6167 | 0%      | Identical ranking              |
-| B6 top score    | 0.5309          | 0.5309 | 0%      | Identical ranking              |
-| PageRank        | 57.1µs          | 54.8µs | -4%     | Within noise                   |
-| Betweenness     | 4.6ms           | 4.5ms  | -3%     | Within noise                   |
-
-**Verdict:** Cold Start introduces zero performance regression. Search quality scores
-are identical (expected — TFIDF embeddings are not affected by `[git-intent]` enrichment;
-benefit will appear with neural embeddings).
+| Metric          | v0.6.0 (baseline) | v0.9.0 (current) | Delta      | Notes                          |
+|-----------------|-------------------|------------------|------------|--------------------------------|
+| A1 latency      | 576µs             | 279µs            | **−52%**   | Faster                         |
+| B1 latency      | 34.8ms            | 5.7ms            | **−84%**   | 6× faster                     |
+| C1 latency      | 4.99s             | 3.0ms            | **−99.9%** | 1,920× faster                 |
+| Nodes           | 29,101            | 12,653           | −57%       | Fewer, higher-quality nodes    |
+| Edges           | 3,380             | 16,294           | +382%      | Much richer graph connectivity |
+| Quality tests   | 8/8               | 17/17            | +9 tests   | Growing coverage               |
 
 ### Release Performance Progression
 
@@ -430,8 +427,8 @@ qbapi Laravel codebase (~780 PHP files, staging branch).
 | v0.8.0  | `fab5104` | Cross-file + DA hardening| 12,653 | 16,294 | 568µs      | 4.7ms        | **3.2ms**        | 6/6 ✅  | 7/7 ✅  |
 | v0.9.0  | `e1a93bc` | Cold Start               | 12,653 | 16,294 | 279µs      | 5.7ms        | **3.0ms**        | 6/6 ✅  | 17/17 ✅|
 
-Result files: `results/v0.6.0-3805b52-qbapi.json`, `results/v0.7.0-c608668-qbapi.json`,
-`results/pre-cold-start-fab5104-qbapi.json`, `results/baseline-v0.8.0-qbapi.json`
+Result files: `results/baseline-v0.6.0-qbapi.json`, `results/v0.7.0-c608668-qbapi.json`,
+`results/v0.8.0-fab5104-qbapi.json`, `results/v0.9.0-e1a93bc-qbapi.json`
 
 #### Key Findings
 
