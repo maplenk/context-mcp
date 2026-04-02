@@ -1,0 +1,309 @@
+{
+  "version": "1.0.0",
+  "description": "qb-context release benchmark query suite",
+  "target_repo": "qbapi (Laravel multi-tenant retail/POS backend, ~12.6K nodes, ~16.3K edges)",
+  "categories": {
+    "A": {
+      "name": "Exact Match",
+      "description": "Direct symbol lookup and pattern search — tests index lookup speed"
+    },
+    "B": {
+      "name": "Concept Search",
+      "description": "Semantic / hybrid search for domain concepts — tests embedding + ranking quality"
+    },
+    "C": {
+      "name": "Cross-file Flow",
+      "description": "End-to-end flow tracing across multiple files — tests graph + search integration"
+    },
+    "D": {
+      "name": "Architecture & Graph",
+      "description": "Structural queries leveraging PageRank, communities, and blast radius"
+    },
+    "E": {
+      "name": "Domain-Specific",
+      "description": "Domain keyword searches — tests recall for business-logic queries"
+    }
+  },
+  "queries": [
+    {
+      "id": "A1",
+      "category": "A",
+      "tool": "read_symbol",
+      "params": {"symbol_id": "FiscalYearController"},
+      "description": "Exact class lookup by name",
+      "expected": {
+        "symbol_name": "FiscalYearController",
+        "node_type": "class",
+        "file_contains": "FiscalYearController.php"
+      }
+    },
+    {
+      "id": "A2",
+      "category": "A",
+      "tool": "read_symbol",
+      "params": {"symbol_id": "OrderController"},
+      "description": "Exact lookup of a core controller",
+      "expected": {
+        "symbol_name": "OrderController",
+        "node_type": "class",
+        "file_contains": "OrderController.php"
+      }
+    },
+    {
+      "id": "A3",
+      "category": "A",
+      "tool": "search_code",
+      "params": {"pattern": "POST.*order", "limit": 10},
+      "description": "Regex pattern search across codebase",
+      "expected": {
+        "min_matches": 5,
+        "files_should_include": ["OrderController.php"]
+      }
+    },
+    {
+      "id": "A4",
+      "category": "A",
+      "tool": "search_code",
+      "params": {"pattern": "function\\s+payment", "limit": 10},
+      "description": "Regex search for payment functions",
+      "expected": {
+        "min_matches": 3
+      }
+    },
+    {
+      "id": "B1",
+      "category": "B",
+      "tool": "context",
+      "params": {"query": "payment processing and billing logic", "limit": 10},
+      "description": "Semantic search for payment domain",
+      "expected": {
+        "min_results": 5,
+        "top_results_should_contain": ["payment", "billing", "Billing"]
+      }
+    },
+    {
+      "id": "B2",
+      "category": "B",
+      "tool": "context",
+      "params": {"query": "user authentication and authorization middleware", "limit": 10},
+      "description": "Semantic search for auth layer",
+      "expected": {
+        "min_results": 3,
+        "top_results_should_contain": ["auth", "middleware", "Auth"]
+      }
+    },
+    {
+      "id": "B3",
+      "category": "B",
+      "tool": "context",
+      "params": {"query": "customer loyalty points and rewards program", "limit": 10},
+      "description": "Semantic search for loyalty domain",
+      "expected": {
+        "min_results": 3,
+        "top_results_should_contain": ["loyal", "reward", "points"]
+      }
+    },
+    {
+      "id": "B4",
+      "category": "B",
+      "tool": "context",
+      "params": {"query": "database migration schema changes", "limit": 10},
+      "description": "Semantic search for DB migrations",
+      "expected": {
+        "min_results": 3,
+        "top_results_should_contain": ["migration"]
+      }
+    },
+    {
+      "id": "B5",
+      "category": "B",
+      "tool": "context",
+      "params": {"query": "error handling and exception management", "limit": 10},
+      "description": "Semantic search for error handling patterns",
+      "expected": {
+        "min_results": 3
+      }
+    },
+    {
+      "id": "B6",
+      "category": "B",
+      "tool": "context",
+      "params": {"query": "omnichannel integration sync logic", "limit": 10},
+      "description": "Semantic search for integration/sync domain",
+      "expected": {
+        "min_results": 5,
+        "top_results_should_contain": ["integration", "sync", "Sync"]
+      }
+    },
+    {
+      "id": "C1",
+      "category": "C",
+      "tool": "context",
+      "params": {"query": "complete flow of creating a new order end to end", "limit": 15},
+      "description": "Cross-file order creation flow",
+      "expected": {
+        "min_results": 5,
+        "files_should_span": 3
+      }
+    },
+    {
+      "id": "C2",
+      "category": "C",
+      "tool": "context",
+      "params": {"query": "inventory stock update from warehouse to store shelf", "limit": 15},
+      "description": "Cross-file inventory flow",
+      "expected": {
+        "min_results": 5
+      }
+    },
+    {
+      "id": "C3",
+      "category": "C",
+      "tool": "context",
+      "params": {"query": "webhook callback processing from third party to database", "limit": 15},
+      "description": "Cross-file webhook processing flow",
+      "expected": {
+        "min_results": 5
+      }
+    },
+    {
+      "id": "C4",
+      "category": "C",
+      "tool": "context",
+      "params": {"query": "OpenTelemetry tracing span lifecycle from request to export", "limit": 15},
+      "description": "Cross-file observability flow",
+      "expected": {
+        "min_results": 3,
+        "top_results_should_contain": ["OpenTelemetry", "span", "Span"]
+      }
+    },
+    {
+      "id": "C5",
+      "category": "C",
+      "tool": "context",
+      "params": {"query": "complete API request to database write flow for inventory", "limit": 15},
+      "description": "Cross-file API-to-DB flow",
+      "expected": {
+        "min_results": 5
+      }
+    },
+    {
+      "id": "D1",
+      "category": "D",
+      "tool": "get_key_symbols",
+      "params": {"limit": 20},
+      "description": "Top 20 symbols by PageRank",
+      "expected": {
+        "min_results": 15
+      }
+    },
+    {
+      "id": "D2",
+      "category": "D",
+      "tool": "get_architecture_summary",
+      "params": {"limit": 10},
+      "description": "Community detection / architecture overview",
+      "expected": {
+        "has_communities": true
+      }
+    },
+    {
+      "id": "D3",
+      "category": "D",
+      "tool": "impact",
+      "params": {"symbol_id": "OrderController", "depth": 3},
+      "description": "Blast radius from OrderController",
+      "expected": {
+        "min_affected": 3
+      }
+    },
+    {
+      "id": "D4",
+      "category": "D",
+      "tool": "explore",
+      "params": {"symbol": "PaymentMappingService", "include_deps": true, "depth": 2},
+      "description": "Symbol exploration with dependencies",
+      "expected": {
+        "has_symbol_info": true
+      }
+    },
+    {
+      "id": "E1",
+      "category": "E",
+      "tool": "context",
+      "params": {"query": "authentication", "limit": 10},
+      "description": "Single-word domain: authentication",
+      "expected": {
+        "min_results": 3
+      }
+    },
+    {
+      "id": "E2",
+      "category": "E",
+      "tool": "context",
+      "params": {"query": "database", "limit": 10},
+      "description": "Single-word domain: database",
+      "expected": {
+        "min_results": 3
+      }
+    },
+    {
+      "id": "E3",
+      "category": "E",
+      "tool": "context",
+      "params": {"query": "controller", "limit": 10},
+      "description": "Single-word domain: controller",
+      "expected": {
+        "min_results": 5
+      }
+    },
+    {
+      "id": "E4",
+      "category": "E",
+      "tool": "context",
+      "params": {"query": "middleware", "limit": 10},
+      "description": "Single-word domain: middleware",
+      "expected": {
+        "min_results": 3
+      }
+    },
+    {
+      "id": "E5",
+      "category": "E",
+      "tool": "context",
+      "params": {"query": "request validation", "limit": 10},
+      "description": "Two-word domain: request validation",
+      "expected": {
+        "min_results": 3
+      }
+    },
+    {
+      "id": "E6",
+      "category": "E",
+      "tool": "context",
+      "params": {"query": "route", "limit": 10},
+      "description": "Single-word domain: route",
+      "expected": {
+        "min_results": 3
+      }
+    },
+    {
+      "id": "E7",
+      "category": "E",
+      "tool": "context",
+      "params": {"query": "Shopify ecommerce integration", "limit": 10},
+      "description": "Third-party integration domain",
+      "expected": {
+        "min_results": 3,
+        "top_results_should_contain": ["Shopify", "shopify"]
+      }
+    }
+  ],
+  "performance_thresholds": {
+    "exact_match_p99_ms": 500,
+    "concept_search_p99_ms": 100,
+    "cross_file_p99_ms": 200,
+    "graph_operations_p99_ms": 1000,
+    "catastrophic_threshold_ms": 30000
+  }
+}

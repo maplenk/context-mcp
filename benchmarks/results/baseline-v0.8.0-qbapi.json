@@ -1,0 +1,198 @@
+{
+  "benchmark_version": "1.0.0",
+  "qb_context_version": "v0.8.0",
+  "run_date": "2026-04-02T13:34:00Z",
+  "environment": {
+    "os": "darwin/arm64",
+    "go_version": "1.25",
+    "target_repo": "QBApps/qbapi",
+    "target_repo_branch": "staging",
+    "target_repo_description": "Laravel multi-tenant retail/POS backend",
+    "index_stats": {
+      "total_nodes": 12653,
+      "total_edges": 16294,
+      "graph_nodes": 12544,
+      "graph_edges": 16013
+    },
+    "indexing_time_seconds": 19.2
+  },
+  "results": [
+    {
+      "id": "A1",
+      "category": "Exact Match",
+      "tool": "read_symbol",
+      "query": "FiscalYearController",
+      "elapsed_us": 279,
+      "elapsed_human": "279µs",
+      "status": "PASS",
+      "result_summary": {
+        "symbol_name": "FiscalYearController",
+        "node_type": "class",
+        "file_path": "app/Http/Controllers/FiscalYearController.php",
+        "source_length_chars": 14373,
+        "fields_returned": 6
+      }
+    },
+    {
+      "id": "A3",
+      "category": "Exact Match",
+      "tool": "search_code",
+      "query": "POST.*order",
+      "elapsed_us": 77446,
+      "elapsed_human": "77ms",
+      "status": "PASS",
+      "result_summary": {
+        "match_count": 10,
+        "files_matched": [
+          "app/Agriculture.php",
+          "app/Http/Controllers/OrderController.php",
+          "app/Http/Controllers/OrderDeletionController.php",
+          "app/Http/Controllers/v2/OrderController.php",
+          "app/JSONSchema.php"
+        ]
+      }
+    },
+    {
+      "id": "B1",
+      "category": "Concept Search",
+      "tool": "context",
+      "query": "payment processing and billing logic",
+      "elapsed_us": 5712,
+      "elapsed_human": "5.7ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 10,
+        "top_5_symbols": [
+          "BillingWeb.generateUTAPToken",
+          "partner.payment",
+          "partnerController.payment",
+          "partnerController.payment (v2)",
+          "partnerApp.payment"
+        ],
+        "top_score": 0.6167,
+        "min_score": 0.4159,
+        "files_spanned": 8
+      }
+    },
+    {
+      "id": "B6",
+      "category": "Concept Search",
+      "tool": "context",
+      "query": "omnichannel integration sync logic",
+      "elapsed_us": 1209,
+      "elapsed_human": "1.2ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 10,
+        "top_5_symbols": [
+          "integrationBilling.handle",
+          "SyncInventoryJob",
+          "Admin.syncBrevoWebsiteContact",
+          "integrationBilling",
+          "IntegrationStats"
+        ],
+        "top_score": 0.5309,
+        "min_score": 0.4252,
+        "files_spanned": 8
+      }
+    },
+    {
+      "id": "C1",
+      "category": "Cross-file Flow",
+      "tool": "context",
+      "query": "complete flow of creating a new order end to end",
+      "elapsed_us": 3047,
+      "elapsed_human": "3ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 15,
+        "top_5_symbols": [
+          "Flight.endLeg",
+          "appController.endSession",
+          "FlightApp.endLeg",
+          "FlightWeb.endTrip",
+          "users.endSession"
+        ],
+        "top_score": 0.6167,
+        "min_score": 0.1284,
+        "files_spanned": 11,
+        "order_related_symbols": [
+          "Order2.createGlobalOrderPayments",
+          "Order2.createGlobalOrder"
+        ]
+      }
+    },
+    {
+      "id": "C5",
+      "category": "Cross-file Flow",
+      "tool": "context",
+      "query": "complete API request to database write flow for inventory",
+      "elapsed_us": 2166,
+      "elapsed_human": "2.2ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 15,
+        "top_5_symbols": [
+          "create_global_nector_api_usage_tracker_table (migration)",
+          "create_global_nector_api_call_logs_table (migration)",
+          "Unicommerce.APIRequestTracker",
+          "writeComboCsv",
+          "writeStderr"
+        ],
+        "top_score": 0.4559,
+        "min_score": 0.0838,
+        "files_spanned": 11
+      }
+    }
+  ],
+  "go_benchmarks": {
+    "graph_100_nodes": {
+      "PageRank": {
+        "iterations": 21543,
+        "ns_per_op": 54799,
+        "bytes_per_op": 61608,
+        "allocs_per_op": 829
+      },
+      "BlastRadius": {
+        "iterations": 404039,
+        "ns_per_op": 2977,
+        "bytes_per_op": 5192,
+        "allocs_per_op": 74
+      },
+      "ComputeBetweenness": {
+        "iterations": 269,
+        "ns_per_op": 4455879,
+        "bytes_per_op": 2761841,
+        "allocs_per_op": 40357
+      }
+    }
+  },
+  "search_quality_tests": {
+    "total_subtests": 17,
+    "passed": 17,
+    "failed": 0,
+    "domains_tested": [
+      "authentication",
+      "database",
+      "controller",
+      "model",
+      "middleware",
+      "request_validation",
+      "route"
+    ]
+  },
+  "comprehensive_tool_tests": {
+    "tools_tested": [
+      "read_symbol",
+      "search_code",
+      "get_key_symbols",
+      "get_architecture_summary",
+      "explore",
+      "context",
+      "trace_call_path",
+      "understand",
+      "query"
+    ],
+    "all_passed": true
+  }
+}
