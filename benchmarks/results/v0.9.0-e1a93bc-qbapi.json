@@ -1,6 +1,6 @@
 {
   "benchmark_version": "1.0.0",
-  "qb_context_version": "v0.8.0",
+  "qb_context_version": "v0.9.0",
   "run_date": "2026-04-02T13:34:00Z",
   "environment": {
     "os": "darwin/arm64",
@@ -23,7 +23,7 @@
       "tool": "read_symbol",
       "query": "FiscalYearController",
       "elapsed_us": 279,
-      "elapsed_human": "279µs",
+      "elapsed_human": "279\u00b5s",
       "status": "PASS",
       "result_summary": {
         "symbol_name": "FiscalYearController",
@@ -194,5 +194,6 @@
       "query"
     ],
     "all_passed": true
-  }
+  },
+  "qb_context_commit": "e1a93bc"
 }

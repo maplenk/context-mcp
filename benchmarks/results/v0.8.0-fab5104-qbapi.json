@@ -1,6 +1,6 @@
 {
   "benchmark_version": "1.0.0",
-  "qb_context_version": "pre-cold-start",
+  "qb_context_version": "v0.8.0",
   "qb_context_commit": "fab5104",
   "qb_context_commit_message": "Merge branch 'worktree-agent-a0422449' (last commit before Cold Start Phase 9)",
   "run_date": "2026-04-02T13:57:00Z",
@@ -10,8 +10,11 @@
     "target_repo": "QBApps/qbapi",
     "target_repo_branch": "staging",
     "target_repo_description": "Laravel multi-tenant retail/POS backend",
-    "schema_migrations_applied": [1, 2],
-    "note": "No schema v3 (git metadata tables) — cold start not yet implemented",
+    "schema_migrations_applied": [
+      1,
+      2
+    ],
+    "note": "No schema v3 (git metadata tables) \u2014 cold start not yet implemented",
     "index_stats": {
       "total_nodes": 12653,
       "total_edges": 16294,
@@ -27,7 +30,7 @@
       "tool": "read_symbol",
       "query": "FiscalYearController",
       "elapsed_us": 568,
-      "elapsed_human": "568µs",
+      "elapsed_human": "568\u00b5s",
       "status": "PASS",
       "result_summary": {
         "symbol_name": "FiscalYearController",
@@ -68,7 +71,18 @@
         "result_count": 10,
         "top_score": 0.6167,
         "min_score": 0.4159,
-        "score_distribution": [0.6167, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4159]
+        "score_distribution": [
+          0.6167,
+          0.4512,
+          0.4512,
+          0.4512,
+          0.4512,
+          0.4512,
+          0.4512,
+          0.4512,
+          0.4512,
+          0.4159
+        ]
       }
     },
     {
@@ -83,7 +97,18 @@
         "result_count": 10,
         "top_score": 0.5309,
         "min_score": 0.4251,
-        "score_distribution": [0.5309, 0.5206, 0.5001, 0.4309, 0.4309, 0.4266, 0.4266, 0.4266, 0.4251, 0.4251]
+        "score_distribution": [
+          0.5309,
+          0.5206,
+          0.5001,
+          0.4309,
+          0.4309,
+          0.4266,
+          0.4266,
+          0.4266,
+          0.4251,
+          0.4251
+        ]
       }
     },
     {
@@ -98,7 +123,23 @@
         "result_count": 15,
         "top_score": 0.6167,
         "min_score": 0.1284,
-        "score_distribution": [0.6167, 0.6167, 0.6167, 0.6167, 0.6167, 0.6167, 0.6164, 0.5942, 0.5815, 0.5393, 0.1678, 0.1344, 0.1299, 0.1284, 0.1284]
+        "score_distribution": [
+          0.6167,
+          0.6167,
+          0.6167,
+          0.6167,
+          0.6167,
+          0.6167,
+          0.6164,
+          0.5942,
+          0.5815,
+          0.5393,
+          0.1678,
+          0.1344,
+          0.1299,
+          0.1284,
+          0.1284
+        ]
       }
     },
     {
@@ -113,7 +154,23 @@
         "result_count": 15,
         "top_score": 0.4559,
         "min_score": 0.0838,
-        "score_distribution": [0.4559, 0.4559, 0.4500, 0.4340, 0.4340, 0.4313, 0.4243, 0.4189, 0.4152, 0.4070, 0.3843, 0.1208, 0.1208, 0.0995, 0.0838]
+        "score_distribution": [
+          0.4559,
+          0.4559,
+          0.45,
+          0.434,
+          0.434,
+          0.4313,
+          0.4243,
+          0.4189,
+          0.4152,
+          0.407,
+          0.3843,
+          0.1208,
+          0.1208,
+          0.0995,
+          0.0838
+        ]
       }
     }
   ],

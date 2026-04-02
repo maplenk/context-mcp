@@ -84,7 +84,7 @@ def load_result(path: str) -> dict:
             if score_dist:
                 result["scores"][qid] = score_dist
 
-    # Query latencies — new format (compare.sh output)
+    # Query latencies — new format (compare.sh or agent output)
     if "query_latencies" in data:
         label_map = {
             "A1_read_symbol": "A1",
@@ -94,8 +94,16 @@ def load_result(path: str) -> dict:
             "C1_order_flow": "C1",
             "C5_api_db_flow": "C5",
         }
+        ql = data["query_latencies"]
+        # Try compound keys first, then fall back to simple keys (A1, B1, etc.)
+        resolved = {}
         for key, qid in label_map.items():
-            raw = data["query_latencies"].get(key, "")
+            if key in ql:
+                resolved[qid] = ql[key]
+        for qid in ("A1", "A3", "B1", "B6", "C1", "C5"):
+            if qid not in resolved and qid in ql:
+                resolved[qid] = ql[qid]
+        for qid, raw in resolved.items():
             result["queries"][qid] = {
                 "us": parse_latency_us(raw),
                 "human": raw,
@@ -117,22 +125,24 @@ def load_result(path: str) -> dict:
             "blast_ns": gb.get("BlastRadius", {}).get("ns_per_op", 0),
             "between_ns": gb.get("ComputeBetweenness", {}).get("ns_per_op", 0),
         }
-    # Graph benchmarks — new format
-    gn = data.get("graph_benchmarks_ns", {})
-    if gn:
+    # Graph benchmarks — new format (compare.sh or agent)
+    gn = data.get("graph_benchmarks_ns", data.get("graph_benchmarks", {}))
+    if gn and not result["graph"]:
         result["graph"] = {
-            "pagerank_ns": gn.get("pagerank", 0),
-            "blast_ns": gn.get("blast_radius", 0),
-            "between_ns": gn.get("betweenness", 0),
+            "pagerank_ns": gn.get("pagerank", gn.get("pagerank_ns", 0)),
+            "blast_ns": gn.get("blast_radius", gn.get("blast_radius_ns", 0)),
+            "between_ns": gn.get("betweenness", gn.get("betweenness_ns", 0)),
         }
 
     # Test results
     sq = data.get("search_quality_tests", data.get("test_results", {}))
+    qr = data.get("query_results", {})
+    qlr = data.get("quality_results", {})
     result["tests"] = {
-        "quality_passed": sq.get("passed", sq.get("search_quality_passed", 0)),
-        "quality_failed": sq.get("failed", sq.get("search_quality_failed", 0)),
-        "queries_passed": data.get("test_results", {}).get("benchmark_queries_passed", 0),
-        "queries_failed": data.get("test_results", {}).get("benchmark_queries_failed", 0),
+        "quality_passed": sq.get("passed", qlr.get("passed", sq.get("search_quality_passed", 0))),
+        "quality_failed": sq.get("failed", qlr.get("failed", sq.get("search_quality_failed", 0))),
+        "queries_passed": qr.get("passed", data.get("test_results", {}).get("benchmark_queries_passed", 0)),
+        "queries_failed": qr.get("failed", data.get("test_results", {}).get("benchmark_queries_failed", 0)),
     }
     # old format
     ct = data.get("comprehensive_tool_tests", {})
