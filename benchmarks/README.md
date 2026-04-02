@@ -8,16 +8,31 @@ Release-level benchmarks for validating search quality, query performance, and g
 benchmarks/
 ├── README.md                              # This file
 ├── queries.json                           # Canonical query definitions (26 queries, 5 categories)
-├── run.sh                                 # One-command benchmark runner
+├── run.sh                                 # Run benchmarks for current HEAD
+├── compare.sh                             # Run benchmarks for any commit (with optional diff)
+├── dashboard.py                           # Side-by-side comparison view (terminal + HTML)
 └── results/
-    └── baseline-v0.8.0-qbapi.json         # Baseline results (April 2026)
+    ├── baseline-v0.8.0-qbapi.json         # Current baseline (with cold start)
+    └── pre-cold-start-fab5104-qbapi.json   # Pre-cold-start baseline
 ```
 
 ## Quick Start
 
 ```bash
-chmod +x benchmarks/run.sh
+# Run benchmarks for current HEAD
 ./benchmarks/run.sh /path/to/target/repo
+
+# Benchmark any commit
+./benchmarks/compare.sh <commit>
+
+# Compare two commits side-by-side
+./benchmarks/compare.sh HEAD --baseline fab5104
+
+# View comparison dashboard for all saved results
+python3 benchmarks/dashboard.py
+
+# Export HTML report
+python3 benchmarks/dashboard.py --html > report.html
 ```
 
 Default target: `/Users/naman/Documents/QBApps/qbapi` (Laravel, ~12.6K nodes)
@@ -75,6 +90,48 @@ go test -tags "fts5" -bench=. -benchmem -run='^$' ./internal/graph/ -count=3
 # All realrepo tests
 go test -tags "fts5,realrepo" -v ./tests/ -count=1 -timeout 600s
 ```
+
+## compare.sh Reference
+
+```bash
+./benchmarks/compare.sh <commit> [options]
+
+Options:
+  --baseline <ref>     Compare against this commit (runs both, prints diff table)
+  --repo <path>        Target repo to index (default: qbapi)
+  --skip-graph         Skip Go graph micro-benchmarks
+  --skip-quality       Skip search quality tests
+  --json               Output machine-readable JSON summary
+  --keep-worktrees     Don't clean up worktrees after run
+```
+
+## dashboard.py Reference
+
+```bash
+python3 benchmarks/dashboard.py [files...] [options]
+
+# Compare all results in results/
+python3 benchmarks/dashboard.py
+
+# Compare specific files
+python3 benchmarks/dashboard.py results/a.json results/b.json
+
+# Show only 3 most recent
+python3 benchmarks/dashboard.py --latest 3
+
+# HTML export
+python3 benchmarks/dashboard.py --html > report.html
+
+# No ANSI colors (for piping)
+python3 benchmarks/dashboard.py --no-color
+```
+
+Features:
+- Side-by-side latency, score, and graph benchmark comparison
+- Delta percentages with color-coded regression/improvement indicators
+- Score distribution sparkline bars
+- HTML export for sharing reports
+- Automatic detection of old and new result JSON formats
 
 ## Adding New Benchmark Queries
 
