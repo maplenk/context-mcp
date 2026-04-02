@@ -419,9 +419,9 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving symlinks in path: %w", err)
 	}
-	resolvedRoot, _ := filepath.EvalSymlinks(deps.RepoRoot)
-	if resolvedRoot == "" {
-		resolvedRoot = deps.RepoRoot
+	resolvedRoot, err := filepath.EvalSymlinks(deps.RepoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving repo root symlinks: %w", err)
 	}
 	absPath = filepath.Clean(absPath)
 	if absPath != resolvedRoot && !strings.HasPrefix(absPath, resolvedRoot+string(filepath.Separator)) {
@@ -634,9 +634,9 @@ func indexHandler(indexFn IndexFunc, p IndexParams, repoRoot string) (interface{
 		if err != nil {
 			return nil, fmt.Errorf("invalid path: %w", err)
 		}
-		resolvedRoot, _ := filepath.EvalSymlinks(repoRoot)
-		if resolvedRoot == "" {
-			resolvedRoot = repoRoot
+		resolvedRoot, err := filepath.EvalSymlinks(repoRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolving repo root symlinks: %w", err)
 		}
 		// Resolve symlinks on the path if it exists; otherwise use Abs path
 		resolvedPath, err := filepath.EvalSymlinks(absPath)
@@ -952,9 +952,9 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 	}
 
 	// Resolve repo root for path traversal protection
-	resolvedRoot, _ := filepath.EvalSymlinks(deps.RepoRoot)
-	if resolvedRoot == "" {
-		resolvedRoot = deps.RepoRoot
+	resolvedRoot, err := filepath.EvalSymlinks(deps.RepoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving repo root symlinks: %w", err)
 	}
 
 	type codeMatch struct {
@@ -964,6 +964,7 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 	}
 
 	var matches []codeMatch
+	var scanWarnings []string
 	for _, relPath := range filePaths {
 		// Apply file filter if specified (try full path first, fallback to basename)
 		if p.FileFilter != "" {
@@ -1003,6 +1004,7 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 
 			deadline := time.Now().Add(5 * time.Second)
 			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer for long lines
 			lineNum := 0
 			for scanner.Scan() {
 				lineNum++
@@ -1024,7 +1026,9 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 			}
 			// Check for scanner errors (oversized tokens, I/O failures)
 			if err := scanner.Err(); err != nil {
-				log.Printf("search_code: scanner error on %s: %v", relPath, err)
+				warning := fmt.Sprintf("scanner error on %s: %v (results may be incomplete)", relPath, err)
+				log.Printf("search_code: %s", warning)
+				scanWarnings = append(scanWarnings, warning)
 			}
 			return false
 		}()
@@ -1033,11 +1037,16 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 		}
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"matches": matches,
 		"count":   len(matches),
 		"pattern": p.Pattern,
-	}, nil
+	}
+	if len(scanWarnings) > 0 {
+		result["warnings"] = scanWarnings
+		result["truncated"] = true
+	}
+	return result, nil
 }
 
 func registerSearchCodeTool(s *Server, deps ToolDeps) {
@@ -1775,7 +1784,7 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 
 func registerResources(s *Server, deps ToolDeps) {
 	// Register codebase graph statistics as a resource
-	_ = s.sdk.RegisterResource(
+	if err := s.sdk.RegisterResource(
 		"qb://graph/stats",
 		"Graph Statistics",
 		"Current codebase graph statistics including node count, edge count, and community info",
@@ -1800,7 +1809,9 @@ func registerResources(s *Server, deps ToolDeps) {
 				mcp_golang.NewTextEmbeddedResource("qb://graph/stats", string(jsonBytes), "application/json"),
 			), nil
 		},
-	)
+	); err != nil {
+		log.Printf("Warning: failed to register resource 'qb://graph/stats': %v", err)
+	}
 }
 
 // ----- MCP Prompts (M9) -----
@@ -1811,7 +1822,7 @@ type explainSymbolArgs struct {
 
 func registerPrompts(s *Server, deps ToolDeps) {
 	// Register an "explain symbol" prompt template
-	_ = s.sdk.RegisterPrompt(
+	if err := s.sdk.RegisterPrompt(
 		"explain_symbol",
 		"Generate a prompt to explain a code symbol in context",
 		func(args explainSymbolArgs) (*mcp_golang.PromptResponse, error) {
@@ -1829,7 +1840,9 @@ func registerPrompts(s *Server, deps ToolDeps) {
 				),
 			), nil
 		},
-	)
+	); err != nil {
+		log.Printf("Warning: failed to register prompt 'explain_symbol': %v", err)
+	}
 }
 
 // toToolResponse converts a generic result (string or anything JSON-serializable)
