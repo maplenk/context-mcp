@@ -288,6 +288,36 @@ func (s *Store) DeleteByFile(filePath string) error {
 	return tx.Commit()
 }
 
+// GetIncomingCrossFileEdges returns edges where the target node belongs to filePath
+// but the source node does NOT belong to filePath (cross-file incoming references).
+func (s *Store) GetIncomingCrossFileEdges(filePath string) ([]types.ASTEdge, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT e.source_id, e.target_id, e.edge_type
+		FROM edges e
+		JOIN nodes tn ON e.target_id = tn.id
+		WHERE tn.file_path = ?
+		AND e.source_id NOT IN (SELECT id FROM nodes WHERE file_path = ?)`, filePath, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var edges []types.ASTEdge
+	for rows.Next() {
+		var edge types.ASTEdge
+		var et uint8
+		if err := rows.Scan(&edge.SourceID, &edge.TargetID, &et); err != nil {
+			return nil, err
+		}
+		edge.EdgeType = types.EdgeType(et)
+		edges = append(edges, edge)
+	}
+	return edges, rows.Err()
+}
+
 // UpsertEmbedding stores a vector embedding for a node.
 // The embedding dimension must match the configured store dimension.
 // Returns nil (no-op) if sqlite-vec is not available, enabling graceful degradation.

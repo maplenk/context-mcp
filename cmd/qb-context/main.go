@@ -902,6 +902,12 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 	case types.FileEventCreated, types.FileEventModified:
 		log.Printf("File changed: %s", event.Path)
 
+		// Save incoming cross-file edges before deletion (H1 fix)
+		incomingEdges, icErr := store.GetIncomingCrossFileEdges(event.Path)
+		if icErr != nil {
+			log.Printf("Failed to get incoming cross-file edges for %s: %v", event.Path, icErr)
+		}
+
 		// Get old node IDs for this file BEFORE deleting from storage
 		oldNodeIDs, err := store.GetNodeIDsByFile(event.Path)
 		if err != nil {
@@ -973,6 +979,32 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 		// graph signals like PPR/betweenness/in-degree)
 		for _, edge := range result.Edges {
 			graphEngine.AddEdge(edge)
+		}
+
+		// Restore incoming cross-file edges whose target nodes still exist (H1 fix)
+		if len(incomingEdges) > 0 {
+			newNodeIDs, niErr := store.GetNodeIDsByFile(event.Path)
+			if niErr == nil {
+				newNodeSet := make(map[string]bool, len(newNodeIDs))
+				for _, id := range newNodeIDs {
+					newNodeSet[id] = true
+				}
+				var validIncoming []types.ASTEdge
+				for _, e := range incomingEdges {
+					if newNodeSet[e.TargetID] {
+						validIncoming = append(validIncoming, e)
+					}
+				}
+				if len(validIncoming) > 0 {
+					if err := store.UpsertEdges(validIncoming); err != nil {
+						log.Printf("Failed to restore incoming cross-file edges: %v", err)
+					}
+					// Add restored edges to graph
+					for _, edge := range validIncoming {
+						graphEngine.AddEdge(edge)
+					}
+				}
+			}
 		}
 	}
 }

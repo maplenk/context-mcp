@@ -530,3 +530,194 @@ func Shutdown() {}
 		t.Errorf("expected 0 graph nodes after file deletion, got %d", tp.graphEngine.NodeCount())
 	}
 }
+
+// updateFile simulates processFileEvent for a modified file:
+// saves incoming cross-file edges, deletes old data, re-indexes, restores valid incoming edges.
+func (tp *testPipeline) updateFile(t *testing.T, relPath string) {
+	t.Helper()
+
+	// Save incoming cross-file edges before deletion (mirrors H1 fix in processFileEvent)
+	incomingEdges, err := tp.store.GetIncomingCrossFileEdges(relPath)
+	if err != nil {
+		t.Fatalf("GetIncomingCrossFileEdges(%s): %v", relPath, err)
+	}
+
+	// Delete old data
+	tp.deleteFile(t, relPath)
+
+	// Re-index
+	tp.indexFile(t, relPath)
+
+	// Restore valid incoming cross-file edges
+	if len(incomingEdges) > 0 {
+		newNodeIDs, niErr := tp.store.GetNodeIDsByFile(relPath)
+		if niErr != nil {
+			t.Fatalf("GetNodeIDsByFile(%s): %v", relPath, niErr)
+		}
+		newNodeSet := make(map[string]bool, len(newNodeIDs))
+		for _, id := range newNodeIDs {
+			newNodeSet[id] = true
+		}
+		var validIncoming []types.ASTEdge
+		for _, e := range incomingEdges {
+			if newNodeSet[e.TargetID] {
+				validIncoming = append(validIncoming, e)
+			}
+		}
+		if len(validIncoming) > 0 {
+			if err := tp.store.UpsertEdges(validIncoming); err != nil {
+				t.Fatalf("UpsertEdges (restore incoming): %v", err)
+			}
+			// Rebuild graph to include restored edges
+			tp.rebuildGraph(t)
+		}
+	}
+}
+
+func TestIncremental_CrossFileIncomingEdgesPreserved(t *testing.T) {
+	tp := newTestPipeline(t)
+
+	// File A: caller.go — defines a function that calls into target.go
+	writeGoFile(t, tp.repoRoot, "caller.go", `package main
+
+// Caller invokes Target
+type Caller struct{}
+
+// Run calls DoWork from target
+func (c *Caller) Run() {
+	t := Target{}
+	t.DoWork()
+}
+`)
+	// File B: target.go — defines a function that is called by caller.go
+	writeGoFile(t, tp.repoRoot, "target.go", `package main
+
+// Target does work
+type Target struct{}
+
+// DoWork does the actual work
+func (t *Target) DoWork() {}
+`)
+
+	tp.indexFile(t, "caller.go")
+	tp.indexFile(t, "target.go")
+
+	// Manually create a cross-file edge: Caller.Run -> Target.DoWork
+	callerRunID := types.GenerateNodeID("caller.go", "Caller.Run")
+	targetDoWorkID := types.GenerateNodeID("target.go", "Target.DoWork")
+
+	crossEdge := types.ASTEdge{
+		SourceID:   callerRunID,
+		TargetID:   targetDoWorkID,
+		EdgeType:   types.EdgeTypeCalls,
+	}
+	if err := tp.store.UpsertEdges([]types.ASTEdge{crossEdge}); err != nil {
+		t.Fatalf("UpsertEdges (cross-file): %v", err)
+	}
+	tp.rebuildGraph(t)
+
+	// Verify the cross-file edge exists
+	edgesBefore, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatalf("GetAllEdges: %v", err)
+	}
+	foundCrossEdge := false
+	for _, e := range edgesBefore {
+		if e.SourceID == callerRunID && e.TargetID == targetDoWorkID {
+			foundCrossEdge = true
+			break
+		}
+	}
+	if !foundCrossEdge {
+		t.Fatal("cross-file edge Caller.Run -> Target.DoWork not found before update")
+	}
+	t.Logf("Before update: %d edges (cross-file edge present)", len(edgesBefore))
+
+	// Now modify target.go (change DoWork's implementation but keep the symbol name)
+	writeGoFile(t, tp.repoRoot, "target.go", `package main
+
+// Target does work
+type Target struct{}
+
+// DoWork does the actual work with improvements
+func (t *Target) DoWork() {
+	// improved implementation
+}
+`)
+
+	// Use updateFile which preserves incoming cross-file edges (H1 fix)
+	tp.updateFile(t, "target.go")
+
+	// Verify the cross-file edge survived the update
+	edgesAfter, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatalf("GetAllEdges after update: %v", err)
+	}
+	foundCrossEdgeAfter := false
+	for _, e := range edgesAfter {
+		if e.SourceID == callerRunID && e.TargetID == targetDoWorkID {
+			foundCrossEdgeAfter = true
+			break
+		}
+	}
+	if !foundCrossEdgeAfter {
+		t.Error("H1 REGRESSION: cross-file edge Caller.Run -> Target.DoWork was lost after modifying target.go")
+		t.Logf("After update: %d edges remain", len(edgesAfter))
+		for _, e := range edgesAfter {
+			t.Logf("  edge: %s -> %s (type %d)", e.SourceID[:16], e.TargetID[:16], e.EdgeType)
+		}
+	} else {
+		t.Log("H1 fix verified: cross-file incoming edge preserved after file modification")
+	}
+}
+
+func TestIncremental_CrossFileEdgesDroppedWhenSymbolRemoved(t *testing.T) {
+	tp := newTestPipeline(t)
+
+	// File A calls into file B
+	writeGoFile(t, tp.repoRoot, "caller.go", `package main
+
+func CallFoo() {
+	Foo()
+}
+`)
+	writeGoFile(t, tp.repoRoot, "target.go", `package main
+
+func Foo() {}
+`)
+
+	tp.indexFile(t, "caller.go")
+	tp.indexFile(t, "target.go")
+
+	callerID := types.GenerateNodeID("caller.go", "CallFoo")
+	fooID := types.GenerateNodeID("target.go", "Foo")
+
+	crossEdge := types.ASTEdge{
+		SourceID: callerID,
+		TargetID: fooID,
+		EdgeType: types.EdgeTypeCalls,
+	}
+	if err := tp.store.UpsertEdges([]types.ASTEdge{crossEdge}); err != nil {
+		t.Fatalf("UpsertEdges: %v", err)
+	}
+	tp.rebuildGraph(t)
+
+	// Rename Foo to Bar — the old target node ID no longer exists
+	writeGoFile(t, tp.repoRoot, "target.go", `package main
+
+func Bar() {}
+`)
+	tp.updateFile(t, "target.go")
+
+	// The cross-file edge should NOT be restored because Foo no longer exists
+	edgesAfter, err := tp.store.GetAllEdges()
+	if err != nil {
+		t.Fatalf("GetAllEdges: %v", err)
+	}
+	for _, e := range edgesAfter {
+		if e.SourceID == callerID && e.TargetID == fooID {
+			t.Error("cross-file edge to renamed symbol should have been dropped, but was restored")
+		}
+	}
+	t.Logf("After rename: %d edges (old cross-file edge correctly dropped)", len(edgesAfter))
+}
