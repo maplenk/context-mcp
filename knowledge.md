@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-03-31 (post-Phase 8 — TargetSymbol cross-file edge resolution, structural edge emission, helper file penalty, nested shouldSkip, DA review #10).
+> Living document for team reference. Last updated: 2026-04-02 (post-Phase 9 — Cold Start Enhancement: Git-derived intent metadata via go-git, schema migration v3, embedding enrichment, MCP tool git_context, DA review #11).
 
 ---
 
@@ -25,16 +25,19 @@
 ### Project Structure
 ```
 qb-context/
-├── cmd/qb-context/main.go         — CLI entry + MCP daemon + CLI tool subcommand + indexPath + ONNX init
+├── cmd/qb-context/main.go         — CLI entry + MCP daemon + CLI tool subcommand + indexPath + ONNX init + Cold Start
 ├── internal/
-│   ├── config/config.go            — Config with CLI flags (incl. --onnx-model, --onnx-lib, --embedding-dim)
+│   ├── config/config.go            — Config with CLI flags (incl. --onnx-model, --onnx-lib, --embedding-dim, --cold-start, --git-*)
 │   ├── types/types.go              — ASTNode, ASTEdge, enums, RiskLevel, NodeScore, Community, ProjectSummary
 │   ├── watcher/watcher.go          — Filesystem watcher (fsnotify + debounce + nested gitignore + hot-reload)
 │   ├── watcher/watcher_test.go     — 11 watcher tests (create/modify/delete, debounce, gitignore)
 │   ├── parser/parser.go            — Multi-language parser (Go native AST, tree-sitter for JS/TS/PHP via go-tree-sitter)
 │   ├── parser/queries/*.scm        — Tree-sitter S-expression query files (reference)
 │   ├── storage/sqlite.go           — SQLite storage (WAL, FTS5, sqlite-vec statically linked, configurable embedding dim)
-│   ├── storage/migrations.go       — Versioned schema migrations (v2: FK removal from edges)
+│   ├── gitmeta/gitmeta.go          — Git metadata extraction via go-git (snapshot, commits, file history, intent compaction)
+│   ├── gitmeta/helpers.go          — Git helpers (diffTrees, truncateBytes, isLowSignalCommit, extractTrailersJSON)
+│   ├── gitmeta/gitmeta_test.go     — 21 gitmeta tests
+│   ├── storage/migrations.go       — Versioned schema migrations (v3: git metadata tables)
 │   ├── embedding/engine.go         — Embedding interface (Dim() method), TFIDFEmbedder default, variable EmbeddingDim
 │   ├── embedding/tokenizer.go      — Pure Go BPE tokenizer (HuggingFace tokenizer.json, 151K vocab, byte-level)
 │   ├── embedding/onnx.go           — ONNXEmbedder (build tag: onnx) — purego ONNX Runtime (no CGO), Qwen2 model, last-token pooling, Matryoshka
@@ -71,8 +74,10 @@ qb-context/
 
 ### Storage (`internal/storage`)
 - SQLite with WAL mode, foreign keys, busy timeout, trusted_schema OFF
-- Tables: `nodes`, `edges` (**FK removed in migration v2** — INSERT OR IGNORE was silently dropping cross-file edges), `nodes_fts` (FTS5 with porter tokenizer), `node_embeddings` (vec0, cosine, configurable dim), `node_scores` (betweenness/pagerank with CASCADE), `project_summaries` (ADR documents), `schema_version`
-- Versioned migrations: `schema_version` table tracks current version, currently at **v2**
+- Tables: `nodes`, `edges` (**FK removed in migration v2**), `nodes_fts` (FTS5), `node_embeddings` (vec0), `node_scores`, `project_summaries`, `repo_git_snapshot`, `git_commits`, `git_file_history`, `git_file_intent`, `schema_version`
+- Versioned migrations: `schema_version` table tracks current version, currently at **v3**
+- **Migration v3** (Cold Start): 4 new Git metadata tables — `repo_git_snapshot` (one-row repo state), `git_commits` (bounded commit history), `git_file_history` (file-commit associations), `git_file_intent` (compacted intent summaries)
+- Git storage methods: `UpsertRepoSnapshot`, `GetRepoSnapshot`, `UpsertGitCommits`, `UpsertFileHistory`, `UpsertFileIntents`, `GetFileIntent`, `GetFileIntentsByPaths`, `GetLatestStoredCommitHash`
 - `NewStore()` accepts optional `embeddingDim` parameter (default 384, ONNX models use e.g. 256)
 - **sqlite-vec statically linked** via `asg017/sqlite-vec-go-bindings/cgo` (Blueprint Alignment)
   - `sqlite_vec.Auto()` called once via `sync.Once` before DB open
@@ -203,7 +208,7 @@ qb-context/
 - Supports: initialize, tools/list, tools/call, resources/list, resources/read, prompts/list, prompts/get, ping, notifications
 
 ### MCP Tools (`internal/mcp/tools.go`) — 13 tools
-- `context` → HybridSearch.Search (query + limit + max_per_file + active files), supports `mode: "architecture"`, includes `architecture_context` from ADR documents
+- `context` → HybridSearch.Search (query + limit + max_per_file + active files), supports `mode: "architecture"`, includes `architecture_context` from ADR documents, **`git_context`** (repo snapshot + file intents for result files)
 - `impact` → BlastRadiusWithDepth + risk levels (hop 1=CRITICAL, 2=HIGH, 3=MEDIUM, 4+=LOW), betweenness risk_score, affected_tests, structured summary
 - `read_symbol` → Store.GetNode + byte-range file read (path traversal + symlink protected via EvalSymlinks)
 - `query` → Store.RawQuery (SELECT-only, read-only transaction with BeginTx)
@@ -211,10 +216,10 @@ qb-context/
 - `trace_call_path` → bidirectional BFS path finding between two symbols
 - `get_key_symbols` → top-K symbols by PageRank with in/out degree stats, optional file filter
 - `search_code` → regex-based code search across indexed files with path traversal protection
-- `detect_changes` → git-based file/symbol change detection with git ref validation
+- `detect_changes` → git-based file/symbol change detection with git ref validation, **`file_intents`** for changed files
 - `get_architecture_summary` → enhanced Louvain + entry points + hubs + connectors
 - `explore` → multi-search with dependency/dependent/hotspot analysis
-- `understand` → 3-tier symbol resolution (exact → fuzzy → FTS) with callers/callees/PageRank/community
+- `understand` → 3-tier symbol resolution (exact → fuzzy → FTS) with callers/callees/PageRank/community, **`file_intent`** for symbol's file
 - `health` → daemon status (node count, edge count, version)
 - **Tool registration**: errors logged (not silently discarded), duplicate names prevented
 - **Response size cap**: 1MB limit on `toToolResponse` marshaled output
@@ -228,7 +233,7 @@ qb-context/
 - Modeled after C project's `cli` subcommand
 
 ### Main Orchestrator (`cmd/qb-context/main.go`)
-- Boot: config → **embedder (ONNX if configured, else TFIDF)** → storage (with embedding dim) → parser → graph → initial index (+ cross-file resolution + betweenness + ADR) → watcher → MCP server
+- Boot: config → **embedder (ONNX if configured, else TFIDF)** → storage (with embedding dim) → parser → graph → initial index (+ cross-file resolution + betweenness + ADR + **Cold Start**) → watcher → MCP server
 - Worker pool for parallel file parsing during initial index
 - **Cross-file edge resolution** in `indexRepo()`: builds symbol→nodeID index from class/struct/interface nodes, resolves dangling INHERITS/IMPLEMENTS edges using `TargetSymbol` field before storing
 - Betweenness centrality computed and stored in `node_scores` at index time
@@ -241,6 +246,14 @@ qb-context/
 - **Memory monitor** goroutine uses `memDone` channel for clean shutdown (no goroutine leak)
 - Graceful shutdown on SIGINT/SIGTERM with sync.Once cleanup
 - ONNX config validation: warns on invalid settings at startup
+- **Cold Start** (Phase 9): Git metadata ingestion via `go-git` in `indexRepo()`, `indexPath()`, and `processFileEvent()`:
+  - Repo snapshot: branch/HEAD, dirty status, staged/modified/untracked counts
+  - Commit history: bounded walk (default 500 commits), subject/body/trailers
+  - File history: file-commit associations with per-file cap (default 20)
+  - Intent compaction: dedup, low-signal filtering, bounded text generation
+  - Embedding enrichment: `[git-intent]` text appended to `ContentSum` for semantic retrieval
+  - Context-aware with timeouts (60s for indexRepo, 30s for indexPath)
+  - Graceful degradation: disabled silently for non-git directories, logs errors without blocking
 
 ---
 
@@ -250,6 +263,7 @@ qb-context/
 |---------|---------|
 | github.com/mattn/go-sqlite3 | SQLite driver (CGO) |
 | github.com/fsnotify/fsnotify | Filesystem events |
+| github.com/go-git/go-git/v5 v5.17.2 | Pure Go Git implementation (repo open, log, diff, status, worktree) |
 | github.com/crackcomm/go-gitignore | .gitignore matching |
 | gonum.org/v1/gonum v0.17.0 | Graph engine, PageRank, Betweenness, Louvain community detection, InDegree |
 | github.com/metoro-io/mcp-golang v0.16.1 | MCP SDK (stdio transport, tool/resource/prompt support) |
@@ -348,9 +362,32 @@ qb-context/
 - `shouldSkip` rewritten to match path components (catches nested `node_modules/`)
 - Helper file score penalty: `composite *= 0.3` for `_ide_helper`, `.d.ts`, `generated` files
 
-### Test Coverage (13 packages, all passing — 233 unit tests + 22 real-repo subtests)
+### Phase 9: Cold Start Enhancement (Commits 40-43)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 40 | `e2cecd6` | Cold Start gitmeta package + go-git + config flags | Opus (worktree) | Done |
+| 41 | `ae72156` | Schema migration v3 + storage CRUD for git tables | Opus (worktree) | Done |
+| 42 | `a39e052` | Integrate Cold Start into indexRepo/indexPath + MCP tool enhancements | 2 Opus agents | Done |
+| 43 | `b1caa27` | Fix H1-H4: rows.Err, embedding intent, git error handling, stop sentinel + M1-M7 | 2 Opus agents | Done |
+
+**Key changes:**
+- `internal/gitmeta` package: pure Go Git metadata extraction via go-git (repo snapshot, commit history, file history walking, intent compaction, low-signal commit filtering)
+- Schema migration v3: `repo_git_snapshot`, `git_commits`, `git_file_history`, `git_file_intent` tables
+- Cold Start in `indexRepo()`: snapshot → commits → file history → intent compaction → embedding enrichment
+- Cold Start in `indexPath()`: incremental file history + intent refresh for changed files (30s context timeout)
+- Cold Start in `processFileEvent()`: embedding text enriched with file intent
+- Embedding enrichment: `[git-intent]` text appended to `ContentSum` for semantic retrieval
+- MCP `context` tool: `git_context` field with repo snapshot + file intents
+- MCP `detect_changes` tool: `file_intents` for changed files
+- MCP `understand` tool: `file_intent` for symbol's file
+- Config flags: `--cold-start`, `--git-history-depth`, `--git-per-file-cap`, `--git-max-message`, `--git-max-intent`
+- DA review #11: 0 CRITICAL, 4 HIGH (all fixed), 8 MEDIUM (7 fixed), 8 LOW
+
+### Test Coverage (13 packages, all passing — 268+ unit tests + 22 real-repo subtests)
 - `internal/types` — 12 tests (ID generation, enum values, null byte separator collision, hex format validation)
-- `internal/storage` — 14 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT, write rejection, transactional upsert)
+- `internal/gitmeta` — 21 tests (non-git graceful degradation, normal/detached/dirty snapshots, commit history with depth caps, file history with per-file caps and path filtering, intent compaction with dedup/low-signal filtering/truncation, helpers)
+- `internal/storage` — 28 tests (CRUD, FTS5, search, raw query, cascade delete, node_scores, project_summaries, deterministic order, schema version, edges without FK, RawQuery LIMIT, write rejection, transactional upsert, **14 git storage tests**: snapshot CRUD, commit dedup, file history, file intents, batch lookup, latest commit hash)
 - `internal/parser` — 15 tests (Go/JS/TS/PHP parsing, edge extraction, import edges, class methods, findBlockEnd states, docblocks, indented PHP classes, file-level nodes, cross-file edges)
 - `internal/embedding` — 36 tests (hash embedder, TFIDF embedder, semantic locality, CamelCase similarity, tokenization, serialization, BPE tokenizer load/encode/roundtrip/unknown tokens, ONNX embedder basic/similarity/invalidDim/OS-portable)
 - `internal/graph` — 42 tests (BFS, cycles, depth limits, true PPR, PPR personalization bias, DAG, betweenness theoretical normalization, blast radius depth/multi-edge, communities, in-degree caching/copy, search signals, change counter, trace call path, graph connectivity)
@@ -400,6 +437,10 @@ qb-context/
   - MEDIUM #4 (accepted): `symbolIndex` first-wins is non-deterministic for duplicate names — acceptable for Laravel (one class per file); would need FQN for disambiguation (future).
   - MEDIUM #5 (accepted): Stop words "end", "flow", "logic" may suppress legitimate searches — CamelCase splitting mitigates (`AuthFlow` → `Auth` + `Flow`); plain `flow` is rare as a code search.
   - LOW #6: DEFINES_METHOD source may be dangling for cross-file receivers — pre-existing, same-file resolution only.
+- **Review #11 (Cold Start DA)**: 16 issues found (0 CRITICAL, 4 HIGH, 8 MEDIUM, 8 LOW). **4 HIGH + 7 MEDIUM fixed**:
+  - HIGH: H1 missing rows.Err() in GetFileIntentsByPaths, H2 processFileEvent lacks embedding intent enrichment, H3 NewExtractor swallows all git errors (now only returns nil for ErrRepositoryNotExists), H4 fragile stop sentinel (replaced with errStopIteration). All fixed.
+  - MEDIUM: M1 UTF-8-safe truncateBytes, M2 Snapshot auto-sets RepoRoot from Extractor, M3 UpsertRepoSnapshot error handling in indexPath, M4 trailer key validation fix, M5 json.Marshal for trailers, M6 context.Context with timeouts, M7 UTC author_time storage. All fixed.
+  - LOW (accepted): L1 nil-nil return pattern, L2 manual FNV, L3 non-deterministic test times, L4 map iteration order, L5 inconsistent API shapes, L6 revert filtering, L7 untested time parse, L8 directory entries in initial commits.
 
 ---
 
@@ -521,11 +562,26 @@ qb-context/
 - **DA Review**: 2 HIGH + 4 MEDIUM issues fixed (ONNX bounds check, output cleanup, Close safety, sync.Once, PHP offset, vec0 logging)
 - **Real-repo test** (build tag: `fts5,realrepo`): 3 test functions, 22 subtests against qbapi Laravel project (31K+ nodes, 8K+ edges)
 
+### Feature 14: Cold Start Enhancement — Git-Derived Intent (Done)
+- **Pure Go Git integration** via `go-git/v5` — repo open, log, diff, status, worktree support
+- **`internal/gitmeta` package**: `Extractor` with `Snapshot()`, `RecentCommits()`, `FileHistory()`, `CompactFileIntents()`, `RecentCommitsSummary()`
+- **Schema migration v3**: 4 new tables (`repo_git_snapshot`, `git_commits`, `git_file_history`, `git_file_intent`)
+- **Repo snapshot**: branch/HEAD state, dirty/staged/modified/untracked counts, human-readable summary
+- **File-level intent compaction**: dedup, low-signal filtering (lint/fmt/wip/merge), bounded text (default 1500 bytes)
+- **Embedding enrichment**: `[git-intent]` text appended to `ContentSum` for all three indexing paths
+- **MCP tool enhancements**: `git_context` in context, `file_intents` in detect_changes, `file_intent` in understand
+- **Config flags**: `--cold-start` (default on), `--git-history-depth` (500), `--git-per-file-cap` (20), `--git-max-message` (2000), `--git-max-intent` (1500)
+- **Graceful degradation**: non-git dirs → silently disabled, shallow repos → partial history, errors → logged, not fatal
+- **Context-aware timeouts**: 60s for full index, 30s for incremental
+- **Tests**: 21 gitmeta tests + 14 storage tests = 35 new tests
+- **DA Review #11**: 16 issues found, 11 fixed (4 HIGH + 7 MEDIUM)
+
 ### Features Explicitly Skipped (for now)
 - HTTP UI server / graph visualization
 - Cypher query language
-- Co-change frequency (requires git history integration)
+- ~~Co-change frequency (requires git history integration)~~ **Now partially addressed by Cold Start file history**
 - HITS authority/hub scores (C project uses, but InDegree covers similar ground)
+- Symbol-level git attribution via blame (Phase 5 of Cold Start plan — deferred)
 
 ---
 
