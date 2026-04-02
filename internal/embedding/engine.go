@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"unicode"
+
+	"github.com/naman/qb-context/internal/tokenutil"
 )
 
 // embeddingDim stores the embedding dimension atomically for thread safety (H11).
@@ -208,7 +210,7 @@ func tokenize(text string) []string {
 			continue
 		}
 		// Split camelCase words
-		parts := splitCamelCase(word)
+		parts := tokenutil.SplitCamelCase(word)
 		for _, part := range parts {
 			lower := strings.ToLower(part)
 			if lower != "" && len(lower) >= 2 {
@@ -230,34 +232,6 @@ func splitOnDelimiters(text string) []string {
 			r == '+' || r == '*' || r == '&' || r == '|' || r == '<' ||
 			r == '>' || r == '#' || r == '@' || r == '!' || r == '?'
 	})
-}
-
-// splitCamelCase splits a CamelCase or camelCase identifier into its component words.
-// E.g., "ReadFileContents" -> ["Read", "File", "Contents"]
-// E.g., "parseJSON" -> ["parse", "JSON"]
-// E.g., "HTTPServer" -> ["HTTP", "Server"]
-func splitCamelCase(s string) []string {
-	if s == "" {
-		return nil
-	}
-
-	var parts []string
-	runes := []rune(s)
-	start := 0
-
-	for i := 1; i < len(runes); i++ {
-		// Split on transitions: lower->upper or upper->upper+lower
-		if unicode.IsUpper(runes[i]) && unicode.IsLower(runes[i-1]) {
-			parts = append(parts, string(runes[start:i]))
-			start = i
-		} else if i+1 < len(runes) && unicode.IsUpper(runes[i-1]) && unicode.IsUpper(runes[i]) && unicode.IsLower(runes[i+1]) {
-			parts = append(parts, string(runes[start:i]))
-			start = i
-		}
-	}
-	parts = append(parts, string(runes[start:]))
-
-	return parts
 }
 
 // ---------------------------------------------------------------------------

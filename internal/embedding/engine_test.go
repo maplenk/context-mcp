@@ -452,29 +452,4 @@ func TestEmbeddingDimMismatch_StorageSafe(t *testing.T) {
 	}
 }
 
-// TestSplitCamelCase verifies CamelCase splitting.
-func TestSplitCamelCase(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected []string
-	}{
-		{"ReadFile", []string{"Read", "File"}},
-		{"HTTPServer", []string{"HTTP", "Server"}},
-		{"parseJSON", []string{"parse", "JSON"}},
-		{"simple", []string{"simple"}},
-		{"ABC", []string{"ABC"}},
-	}
-
-	for _, tt := range tests {
-		got := splitCamelCase(tt.input)
-		if len(got) != len(tt.expected) {
-			t.Errorf("splitCamelCase(%q) = %v, want %v", tt.input, got, tt.expected)
-			continue
-		}
-		for i := range got {
-			if got[i] != tt.expected[i] {
-				t.Errorf("splitCamelCase(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.expected[i])
-			}
-		}
-	}
-}
+// TestSplitCamelCase moved to internal/tokenutil/camelcase_test.go (M6 dedup).
