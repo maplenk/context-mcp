@@ -1,0 +1,156 @@
+{
+  "benchmark_version": "1.0.0",
+  "qb_context_version": "pre-cold-start",
+  "qb_context_commit": "fab5104",
+  "qb_context_commit_message": "Merge branch 'worktree-agent-a0422449' (last commit before Cold Start Phase 9)",
+  "run_date": "2026-04-02T13:57:00Z",
+  "environment": {
+    "os": "darwin/arm64",
+    "go_version": "1.25",
+    "target_repo": "QBApps/qbapi",
+    "target_repo_branch": "staging",
+    "target_repo_description": "Laravel multi-tenant retail/POS backend",
+    "schema_migrations_applied": [1, 2],
+    "note": "No schema v3 (git metadata tables) — cold start not yet implemented",
+    "index_stats": {
+      "total_nodes": 12653,
+      "total_edges": 16294,
+      "graph_nodes": 12544,
+      "graph_edges": 16013
+    },
+    "indexing_time_seconds": 20.2
+  },
+  "results": [
+    {
+      "id": "A1",
+      "category": "Exact Match",
+      "tool": "read_symbol",
+      "query": "FiscalYearController",
+      "elapsed_us": 568,
+      "elapsed_human": "568µs",
+      "status": "PASS",
+      "result_summary": {
+        "symbol_name": "FiscalYearController",
+        "node_type": "class",
+        "file_path": "app/Http/Controllers/FiscalYearController.php",
+        "source_length_chars": 14373,
+        "fields_returned": 6
+      }
+    },
+    {
+      "id": "A3",
+      "category": "Exact Match",
+      "tool": "search_code",
+      "query": "POST.*order",
+      "elapsed_us": 88663,
+      "elapsed_human": "89ms",
+      "status": "PASS",
+      "result_summary": {
+        "match_count": 10,
+        "files_matched": [
+          "app/Agriculture.php",
+          "app/Http/Controllers/OrderController.php",
+          "app/Http/Controllers/OrderDeletionController.php",
+          "app/Http/Controllers/v2/OrderController.php",
+          "app/JSONSchema.php"
+        ]
+      }
+    },
+    {
+      "id": "B1",
+      "category": "Concept Search",
+      "tool": "context",
+      "query": "payment processing and billing logic",
+      "elapsed_us": 4738,
+      "elapsed_human": "4.7ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 10,
+        "top_score": 0.6167,
+        "min_score": 0.4159,
+        "score_distribution": [0.6167, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4512, 0.4159]
+      }
+    },
+    {
+      "id": "B6",
+      "category": "Concept Search",
+      "tool": "context",
+      "query": "omnichannel integration sync logic",
+      "elapsed_us": 1554,
+      "elapsed_human": "1.6ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 10,
+        "top_score": 0.5309,
+        "min_score": 0.4251,
+        "score_distribution": [0.5309, 0.5206, 0.5001, 0.4309, 0.4309, 0.4266, 0.4266, 0.4266, 0.4251, 0.4251]
+      }
+    },
+    {
+      "id": "C1",
+      "category": "Cross-file Flow",
+      "tool": "context",
+      "query": "complete flow of creating a new order end to end",
+      "elapsed_us": 3241,
+      "elapsed_human": "3.2ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 15,
+        "top_score": 0.6167,
+        "min_score": 0.1284,
+        "score_distribution": [0.6167, 0.6167, 0.6167, 0.6167, 0.6167, 0.6167, 0.6164, 0.5942, 0.5815, 0.5393, 0.1678, 0.1344, 0.1299, 0.1284, 0.1284]
+      }
+    },
+    {
+      "id": "C5",
+      "category": "Cross-file Flow",
+      "tool": "context",
+      "query": "complete API request to database write flow for inventory",
+      "elapsed_us": 2254,
+      "elapsed_human": "2.3ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 15,
+        "top_score": 0.4559,
+        "min_score": 0.0838,
+        "score_distribution": [0.4559, 0.4559, 0.4500, 0.4340, 0.4340, 0.4313, 0.4243, 0.4189, 0.4152, 0.4070, 0.3843, 0.1208, 0.1208, 0.0995, 0.0838]
+      }
+    }
+  ],
+  "go_benchmarks": {
+    "graph_100_nodes": {
+      "PageRank": {
+        "iterations": 21065,
+        "ns_per_op": 57111,
+        "bytes_per_op": 61608,
+        "allocs_per_op": 829
+      },
+      "BlastRadius": {
+        "iterations": 385245,
+        "ns_per_op": 3039,
+        "bytes_per_op": 5192,
+        "allocs_per_op": 74
+      },
+      "ComputeBetweenness": {
+        "iterations": 260,
+        "ns_per_op": 4607830,
+        "bytes_per_op": 2761839,
+        "allocs_per_op": 40357
+      }
+    }
+  },
+  "search_quality_tests": {
+    "total_subtests": 7,
+    "passed": 7,
+    "failed": 0,
+    "domains_tested": [
+      "authentication",
+      "database",
+      "controller",
+      "model",
+      "middleware",
+      "request_validation",
+      "route"
+    ]
+  }
+}
