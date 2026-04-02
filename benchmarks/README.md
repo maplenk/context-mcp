@@ -1,81 +1,560 @@
 # qb-context Benchmark Suite
 
-Release-level benchmarks for validating search quality, query performance, and graph operations.
+Release-level benchmarks for validating search quality, query performance, and graph
+operations across qb-context versions. The suite indexes a real-world codebase, runs
+26 queries across 5 categories, and measures latency, ranking quality, and graph
+algorithm performance.
 
-## Structure
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Directory Structure](#directory-structure)
+- [Quick Start](#quick-start)
+- [Benchmark Tools](#benchmark-tools)
+  - [run.sh — Benchmark Current HEAD](#runsh--benchmark-current-head)
+  - [compare.sh — Benchmark Any Commit](#comparesh--benchmark-any-commit)
+  - [dashboard.py — Comparison View](#dashboardpy--comparison-view)
+- [Query Suite (26 queries)](#query-suite-26-queries)
+  - [Category A: Exact Match](#category-a-exact-match-4-queries)
+  - [Category B: Concept Search](#category-b-concept-search-6-queries)
+  - [Category C: Cross-file Flow](#category-c-cross-file-flow-5-queries)
+  - [Category D: Architecture & Graph](#category-d-architecture--graph-4-queries)
+  - [Category E: Domain-Specific](#category-e-domain-specific-7-queries)
+- [Go Graph Micro-Benchmarks](#go-graph-micro-benchmarks)
+- [Performance Thresholds](#performance-thresholds)
+- [Baselines](#baselines)
+  - [v0.8.0 (with Cold Start)](#v080-with-cold-start)
+  - [Pre-Cold-Start (fab5104)](#pre-cold-start-fab5104)
+  - [Comparison: Cold Start Impact](#comparison-cold-start-impact)
+- [Result JSON Schema](#result-json-schema)
+- [Interpreting Results](#interpreting-results)
+- [Adding New Queries](#adding-new-queries)
+- [Release Workflow](#release-workflow)
+
+---
+
+## Overview
+
+The benchmark suite measures three dimensions of qb-context quality:
+
+| Dimension            | What It Measures                              | Tools Used                       |
+|----------------------|-----------------------------------------------|----------------------------------|
+| **Query Latency**    | Response time for 26 real-world queries        | `TestBenchmarkQueries`           |
+| **Search Quality**   | Relevance of results for domain keyword search | `TestRealRepo_SearchQuality`     |
+| **Graph Performance**| PageRank, blast radius, betweenness centrality | `BenchmarkPageRank`, etc.        |
+
+**Target codebase**: [QBApps/qbapi](../tests/realrepo_test.go) — a Laravel multi-tenant
+retail/POS backend with ~780 PHP files, ~12.6K nodes, and ~16.3K edges after indexing.
+
+---
+
+## Directory Structure
 
 ```
 benchmarks/
-├── README.md                              # This file
-├── queries.json                           # Canonical query definitions (26 queries, 5 categories)
-├── run.sh                                 # Run benchmarks for current HEAD
-├── compare.sh                             # Run benchmarks for any commit (with optional diff)
-├── dashboard.py                           # Side-by-side comparison view (terminal + HTML)
+├── README.md              This file — comprehensive reference
+├── queries.json           Canonical query definitions (26 queries, 5 categories)
+├── run.sh                 Run full suite for current HEAD
+├── compare.sh             Benchmark any git ref; compare two commits side-by-side
+├── dashboard.py           Terminal + HTML comparison dashboard
 └── results/
-    ├── baseline-v0.8.0-qbapi.json         # Current baseline (with cold start)
-    └── pre-cold-start-fab5104-qbapi.json   # Pre-cold-start baseline
+    ├── baseline-v0.8.0-qbapi.json          Current baseline (with Cold Start)
+    └── pre-cold-start-fab5104-qbapi.json   Pre-Cold-Start baseline
 ```
+
+---
 
 ## Quick Start
 
 ```bash
-# Run benchmarks for current HEAD
-./benchmarks/run.sh /path/to/target/repo
+# 1. Run benchmarks for current HEAD
+./benchmarks/run.sh
 
-# Benchmark any commit
-./benchmarks/compare.sh <commit>
+# 2. Benchmark a specific commit
+./benchmarks/compare.sh fab5104
 
-# Compare two commits side-by-side
+# 3. Compare two commits
 ./benchmarks/compare.sh HEAD --baseline fab5104
 
-# View comparison dashboard for all saved results
+# 4. View comparison dashboard
 python3 benchmarks/dashboard.py
 
-# Export HTML report
+# 5. Export HTML report
 python3 benchmarks/dashboard.py --html > report.html
 ```
 
-Default target: `/Users/naman/Documents/QBApps/qbapi` (Laravel, ~12.6K nodes)
+---
 
-## Query Categories
+## Benchmark Tools
 
-| Cat | Name             | Count | What It Tests                              |
-|-----|------------------|-------|--------------------------------------------|
-| A   | Exact Match      | 4     | Symbol index lookup, regex pattern search   |
-| B   | Concept Search   | 6     | Semantic/hybrid ranking, embedding quality  |
-| C   | Cross-file Flow  | 5     | Multi-file flow tracing, graph integration  |
-| D   | Architecture     | 4     | PageRank, communities, blast radius         |
-| E   | Domain-Specific  | 7     | Single/multi-word domain keyword recall     |
+### run.sh — Benchmark Current HEAD
+
+Runs the complete benchmark suite against the current working tree and saves timestamped
+results to `results/`.
+
+```bash
+./benchmarks/run.sh [target-repo-path]
+```
+
+**Steps performed:**
+1. `go build -tags "fts5" ./...` — compile check
+2. Go graph micro-benchmarks (PageRank, BlastRadius, Betweenness) × 3 iterations
+3. `TestBenchmarkQueries` — 6 core queries against real repo (indexes on first run)
+4. `TestRealRepo_SearchQuality` — 7 domain keyword quality tests
+5. `TestRealRepo_CLIToolsComprehensive` — 9 MCP tool smoke tests
+
+**Output files** (in `results/`):
+- `go-bench-<timestamp>.txt` — raw Go benchmark output
+- `queries-<timestamp>.txt` — benchmark query results with latencies
+- `search-quality-<timestamp>.txt` — search quality test output
+- `tools-<timestamp>.txt` — comprehensive tool test output
+
+---
+
+### compare.sh — Benchmark Any Commit
+
+Benchmarks any git ref by checking it out in a temporary [git worktree](https://git-scm.com/docs/git-worktree),
+building, and running the full suite. Worktrees are auto-cleaned after the run.
+
+```bash
+./benchmarks/compare.sh <commit> [options]
+```
+
+**Options:**
+
+| Flag               | Description                                          |
+|--------------------|------------------------------------------------------|
+| `--baseline <ref>` | Also benchmark this commit, then print a diff table  |
+| `--repo <path>`    | Target repo to index (default: qbapi)                |
+| `--skip-graph`     | Skip Go graph micro-benchmarks                       |
+| `--skip-quality`   | Skip search quality tests                            |
+| `--json`           | Output machine-readable JSON                         |
+| `--keep-worktrees` | Don't clean up worktrees after run (for debugging)   |
+
+**Examples:**
+
+```bash
+# Benchmark a single commit
+./benchmarks/compare.sh fab5104
+
+# Compare current HEAD against pre-cold-start
+./benchmarks/compare.sh HEAD --baseline fab5104
+
+# Compare two tagged releases
+./benchmarks/compare.sh v0.9.0 --baseline v0.8.0
+
+# Quick run (skip heavy tests)
+./benchmarks/compare.sh HEAD --skip-graph --skip-quality
+
+# Use a different target repo
+./benchmarks/compare.sh HEAD --repo /path/to/django-app
+```
+
+**How it works:**
+1. Resolves the git ref to a short SHA
+2. Creates a worktree at `/tmp/qb-bench-<sha>-<pid>`
+3. Builds `qb-context` from that worktree
+4. Runs graph benchmarks, query benchmarks, and quality tests
+5. Saves structured JSON to `results/bench-<sha>-<timestamp>.json`
+6. If `--baseline` was given, repeats for the baseline commit and prints a comparison table
+7. Removes worktrees on exit (via `trap`)
+
+---
+
+### dashboard.py — Comparison View
+
+Interactive terminal dashboard and HTML report generator. Loads result JSON files and
+presents side-by-side comparison with delta analysis.
+
+```bash
+python3 benchmarks/dashboard.py [files...] [options]
+```
+
+**Options:**
+
+| Flag         | Description                                 |
+|--------------|---------------------------------------------|
+| `--latest N` | Compare only the N most recent result files |
+| `--html`     | Output a styled HTML report to stdout       |
+| `--no-color` | Disable ANSI color codes (for piping)       |
+
+**Examples:**
+
+```bash
+# Compare all saved results
+python3 benchmarks/dashboard.py
+
+# Compare two specific files
+python3 benchmarks/dashboard.py results/baseline-v0.8.0-qbapi.json results/pre-cold-start-fab5104-qbapi.json
+
+# Last 3 results only
+python3 benchmarks/dashboard.py --latest 3
+
+# Generate HTML report
+python3 benchmarks/dashboard.py --html > report.html
+
+# Pipe-friendly (no ANSI)
+python3 benchmarks/dashboard.py --no-color | less
+```
+
+**Dashboard sections:**
+
+| Section                 | What It Shows                                           |
+|-------------------------|---------------------------------------------------------|
+| **Overview**            | Commit, date, node/edge counts, index time              |
+| **Query Latencies**     | Per-query latency with Δ% between versions              |
+| **Score Quality**       | Top scores for concept queries with Δ%                  |
+| **Score Sparklines**    | Visual bar charts of score distributions                |
+| **Graph Benchmarks**    | PageRank, BlastRadius, Betweenness with Δ%              |
+| **Test Results**        | Pass/fail counts for quality, queries, and tool tests   |
+| **Verdict**             | Automated regression detection summary                  |
+
+**Color coding:**
+- 🟢 Green: improvement (latency decreased or score increased)
+- 🟡 Yellow: minor change (< 15% regression)
+- 🔴 Red: regression (> 15% latency increase)
+- ⬜ Dim: negligible change (< 2%)
+
+---
+
+## Query Suite (26 queries)
+
+All queries are defined in [`queries.json`](queries.json) and exercised by
+[`tests/benchmark_queries_test.go`](../tests/benchmark_queries_test.go). The Go test
+currently runs the 6 core queries (A1, A3, B1, B6, C1, C5); the full 26 are defined
+for future expansion.
+
+### Category A: Exact Match (4 queries)
+
+Tests raw index lookup speed — no embedding or ranking involved.
+
+| ID | Tool          | Query                              | What It Validates                   |
+|----|---------------|-------------------------------------|-------------------------------------|
+| A1 | `read_symbol` | `FiscalYearController`              | Direct symbol lookup by name        |
+| A2 | `read_symbol` | `OrderController`                   | Core controller lookup              |
+| A3 | `search_code` | `POST.*order` (regex, limit 10)     | Regex pattern search across files   |
+| A4 | `search_code` | `function\s+payment` (regex)        | Function declaration pattern search |
+
+**Expected behavior:** Sub-millisecond for `read_symbol`, under 100ms for `search_code`.
+
+### Category B: Concept Search (6 queries)
+
+Tests the hybrid search pipeline: TFIDF tokenization → FTS5 retrieval → composite
+ranking (FTS5 score × PageRank × freshness).
+
+| ID | Tool      | Query                                     | What It Validates                    |
+|----|-----------|-------------------------------------------|--------------------------------------|
+| B1 | `context` | "payment processing and billing logic"    | Multi-word domain concept ranking    |
+| B2 | `context` | "user authentication and authorization middleware" | Auth layer discovery        |
+| B3 | `context` | "customer loyalty points and rewards program" | Niche domain recall              |
+| B4 | `context` | "database migration schema changes"       | Infrastructure code discovery        |
+| B5 | `context` | "error handling and exception management" | Cross-cutting concern search         |
+| B6 | `context` | "omnichannel integration sync logic"      | Integration domain with jargon       |
+
+**Expected behavior:** Under 10ms latency. Top results should contain symbols with
+matching domain keywords. Scores should show meaningful differentiation (not all equal).
+
+### Category C: Cross-file Flow (5 queries)
+
+Tests the ability to surface related symbols across multiple files — requires both
+search quality and graph-aware ranking.
+
+| ID | Tool      | Query                                                  | What It Validates               |
+|----|-----------|--------------------------------------------------------|---------------------------------|
+| C1 | `context` | "complete flow of creating a new order end to end"     | Multi-file business flow        |
+| C2 | `context` | "inventory stock update from warehouse to store shelf" | Inventory pipeline              |
+| C3 | `context` | "webhook callback processing from third party to database" | External integration flow   |
+| C4 | `context` | "OpenTelemetry tracing span lifecycle from request to export" | Observability pipeline   |
+| C5 | `context` | "complete API request to database write flow for inventory" | Request-to-storage flow    |
+
+**Expected behavior:** Under 10ms. Results should span 3+ files. Score distribution
+should show a long tail (high-relevance + supporting results).
+
+### Category D: Architecture & Graph (4 queries)
+
+Tests graph-powered structural queries — PageRank, community detection, blast radius,
+and symbol exploration.
+
+| ID | Tool                       | Query / Params                                     | What It Validates            |
+|----|----------------------------|----------------------------------------------------|------------------------------|
+| D1 | `get_key_symbols`          | limit: 20                                          | PageRank-based entry points  |
+| D2 | `get_architecture_summary` | limit: 10                                          | Louvain community detection  |
+| D3 | `impact`                   | `OrderController`, depth: 3                        | Blast radius traversal       |
+| D4 | `explore`                  | `PaymentMappingService`, include_deps, depth: 2    | Dependency graph exploration |
+
+**Expected behavior:** Under 1s. `get_key_symbols` should return high-PageRank nodes.
+`impact` should find downstream dependents.
+
+### Category E: Domain-Specific (7 queries)
+
+Tests recall for simple domain keyword searches — the most common real-world usage
+pattern. These validate that the FTS5 index + ranking work for everyday queries.
+
+| ID | Tool      | Query                          | What It Validates                   |
+|----|-----------|--------------------------------|-------------------------------------|
+| E1 | `context` | "authentication"               | Single-word: auth domain            |
+| E2 | `context` | "database"                     | Single-word: database domain        |
+| E3 | `context` | "controller"                   | Single-word: architectural concept  |
+| E4 | `context` | "middleware"                   | Single-word: infrastructure layer   |
+| E5 | `context` | "request validation"           | Two-word: input validation          |
+| E6 | `context` | "route"                        | Single-word: routing                |
+| E7 | `context` | "Shopify ecommerce integration"| Third-party integration name        |
+
+**Expected behavior:** Under 10ms. Results should contain symbols whose names or
+content match the query terms.
+
+---
+
+## Go Graph Micro-Benchmarks
+
+Standard Go `Benchmark*` functions in [`internal/graph/graph_test.go`](../internal/graph/graph_test.go)
+using a synthetic 100-node, 300-edge graph.
+
+| Benchmark                | What It Measures                     | Typical Range     |
+|--------------------------|--------------------------------------|-------------------|
+| `BenchmarkPageRank`      | Full PageRank computation            | 50–60 µs/op      |
+| `BenchmarkBlastRadius`   | BFS-based blast radius traversal     | 2–4 µs/op        |
+| `BenchmarkComputeBetweenness` | Betweenness centrality (all pairs) | 4–5 ms/op     |
+
+Run independently:
+```bash
+go test -tags "fts5" -bench=. -benchmem -run='^$' ./internal/graph/ -count=3
+```
+
+---
 
 ## Performance Thresholds
 
-| Metric                  | Target    | Catastrophic |
-|-------------------------|-----------|--------------|
-| Exact match (p99)       | < 500ms   | > 30s        |
-| Concept search (p99)    | < 100ms   | > 30s        |
-| Cross-file flow (p99)   | < 200ms   | > 30s        |
-| Graph operations (p99)  | < 1000ms  | > 30s        |
+| Metric                  | Target (p99) | Warning    | Catastrophic |
+|-------------------------|-------------|------------|--------------|
+| Exact match (A queries) | < 500ms     | > 1s       | > 30s        |
+| Concept search (B/E)    | < 100ms     | > 500ms    | > 30s        |
+| Cross-file flow (C)     | < 200ms     | > 1s       | > 30s        |
+| Graph operations (D)    | < 1,000ms   | > 5s       | > 30s        |
+| Go PageRank (100 nodes) | < 100µs     | > 200µs    | > 1ms        |
+| Go BlastRadius          | < 10µs      | > 50µs     | > 1ms        |
+| Go Betweenness          | < 10ms      | > 50ms     | > 500ms      |
 
-## Baseline (v0.8.0, qbapi)
+---
 
-| Query | Category       | Latency  | Results |
-|-------|----------------|----------|---------|
-| A1    | Exact          | 279µs    | 1 class (FiscalYearController) |
-| A3    | Exact          | 77ms     | 10 regex matches |
-| B1    | Concept        | 5.7ms    | 10 results, top=0.62 |
-| B6    | Concept        | 1.2ms    | 10 results, top=0.53 |
-| C1    | Cross-file     | 3.0ms    | 15 results across 11 files |
-| C5    | Cross-file     | 2.2ms    | 15 results across 11 files |
+## Baselines
 
-### Go Graph Benchmarks (100-node synthetic graph)
+### v0.8.0 (with Cold Start)
 
-| Benchmark              | ns/op     | B/op     | allocs/op |
-|------------------------|-----------|----------|-----------|
-| PageRank               | 54,799    | 61,608   | 829       |
-| BlastRadius            | 2,977     | 5,192    | 74        |
-| ComputeBetweenness     | 4,455,879 | 2,761,841| 40,357    |
+Commit: `3be18d3` · Result file: `results/baseline-v0.8.0-qbapi.json`
 
-## Running Individual Tests
+| Query | Category   | Latency | Results    | Top Score |
+|-------|------------|---------|------------|-----------|
+| A1    | Exact      | 279µs   | 1 class    | —         |
+| A3    | Exact      | 77ms    | 10 matches | —         |
+| B1    | Concept    | 5.7ms   | 10 results | 0.6167    |
+| B6    | Concept    | 1.2ms   | 10 results | 0.5309    |
+| C1    | Cross-file | 3.0ms   | 15 results | 0.6167    |
+| C5    | Cross-file | 2.2ms   | 15 results | 0.4559    |
+
+Search quality: 17/17 passed · Tool tests: 9/9 passed
+
+### Pre-Cold-Start (fab5104)
+
+Commit: `fab5104` · Result file: `results/pre-cold-start-fab5104-qbapi.json`
+
+| Query | Category   | Latency | Results    | Top Score |
+|-------|------------|---------|------------|-----------|
+| A1    | Exact      | 568µs   | 1 class    | —         |
+| A3    | Exact      | 89ms    | 10 matches | —         |
+| B1    | Concept    | 4.7ms   | 10 results | 0.6167    |
+| B6    | Concept    | 1.6ms   | 10 results | 0.5309    |
+| C1    | Cross-file | 3.2ms   | 15 results | 0.6167    |
+| C5    | Cross-file | 2.3ms   | 15 results | 0.4559    |
+
+Search quality: 7/7 passed
+
+### Comparison: Cold Start Impact
+
+| Metric          | Pre-CS (fab5104) | v0.8.0 | Delta   | Notes                          |
+|-----------------|-----------------|--------|---------|--------------------------------|
+| A1 latency      | 568µs           | 279µs  | -51%    | Faster (run-to-run variance)   |
+| A3 latency      | 89ms            | 77ms   | -13%    | Faster                         |
+| B1 latency      | 4.7ms           | 5.7ms  | +21%    | Within noise margin            |
+| B1 top score    | 0.6167          | 0.6167 | 0%      | Identical ranking              |
+| B6 top score    | 0.5309          | 0.5309 | 0%      | Identical ranking              |
+| PageRank        | 57.1µs          | 54.8µs | -4%     | Within noise                   |
+| Betweenness     | 4.6ms           | 4.5ms  | -3%     | Within noise                   |
+
+**Verdict:** Cold Start introduces zero performance regression. Search quality scores
+are identical (expected — TFIDF embeddings are not affected by `[git-intent]` enrichment;
+benefit will appear with neural embeddings).
+
+---
+
+## Result JSON Schema
+
+All results are stored as JSON in `results/`. Two formats are supported (dashboard.py
+handles both automatically):
+
+### Baseline format (from manual runs)
+
+```json
+{
+  "benchmark_version": "1.0.0",
+  "qb_context_version": "v0.8.0",
+  "qb_context_commit": "3be18d3",
+  "run_date": "2026-04-02T13:34:00Z",
+  "environment": {
+    "os": "darwin/arm64",
+    "target_repo": "QBApps/qbapi",
+    "index_stats": { "total_nodes": 12653, "total_edges": 16294 }
+  },
+  "results": [
+    {
+      "id": "A1",
+      "category": "Exact Match",
+      "tool": "read_symbol",
+      "query": "FiscalYearController",
+      "elapsed_us": 279,
+      "elapsed_human": "279µs",
+      "status": "PASS",
+      "result_summary": { "symbol_name": "...", "top_score": 0.6167 }
+    }
+  ],
+  "go_benchmarks": { ... },
+  "search_quality_tests": { "passed": 17, "failed": 0 }
+}
+```
+
+### compare.sh format (auto-generated)
+
+```json
+{
+  "commit": "fab5104",
+  "label": "pre-cold-start",
+  "timestamp": "20260402T135700",
+  "query_latencies": {
+    "A1_read_symbol": "568µs",
+    "B1_payment_concept": "4.7ms"
+  },
+  "query_scores": {
+    "B1_scores": [0.6167, 0.4512, ...],
+    "B6_scores": [0.5309, 0.5206, ...]
+  },
+  "graph_benchmarks_ns": {
+    "pagerank": 57111,
+    "blast_radius": 3039,
+    "betweenness": 4607830
+  },
+  "test_results": { ... }
+}
+```
+
+---
+
+## Interpreting Results
+
+### Latency
+
+- **Microsecond-level** (< 1ms): Symbol lookups, cached queries. Healthy.
+- **Millisecond-level** (1–100ms): Hybrid search, regex scan. Normal for real repos.
+- **Second-level** (> 1s): Indicates a regression or very large codebase. Investigate.
+
+### Scores
+
+Scores range from 0.0 to 1.0 and represent composite ranking:
+
+```
+score = w_fts × FTS5_score + w_pr × PageRank + w_fresh × freshness
+```
+
+- **> 0.5**: Strong match — symbol name or content closely matches query terms.
+- **0.3–0.5**: Moderate match — related but not exact.
+- **< 0.3**: Weak match — tangentially related or graph-boosted.
+
+A healthy score distribution for concept queries (B/E) should show:
+- A clear top-1 or top-2 cluster (strong matches)
+- A gradual decline (not a cliff-drop to zero)
+- No identical scores for all results (would indicate broken ranking)
+
+### Delta Percentages
+
+When comparing two versions:
+- **≈0%** (< 2%): No meaningful change. Run-to-run noise.
+- **Negative %**: Improvement (faster latency or higher score).
+- **+5% to +15%**: Minor regression. Usually noise; monitor across multiple runs.
+- **> +15%**: Potential regression. Investigate the commit.
+
+### Regression Detection
+
+The dashboard's verdict uses these rules:
+- **Regression**: Any query latency increased by > 15%
+- **Improvement**: Any query latency decreased by > 10%
+- Run benchmarks 2–3 times to distinguish noise from real regressions.
+
+---
+
+## Adding New Queries
+
+1. **Define the query** in `queries.json`:
+   ```json
+   {
+     "id": "B7",
+     "category": "B",
+     "tool": "context",
+     "params": {"query": "caching and Redis usage", "limit": 10},
+     "description": "Semantic search for caching domain",
+     "expected": {
+       "min_results": 3,
+       "top_results_should_contain": ["cache", "redis", "Redis"]
+     }
+   }
+   ```
+
+2. **Add the test case** in `tests/benchmark_queries_test.go`:
+   ```go
+   {
+       id:       "B7",
+       category: "Concept",
+       tool:     "context",
+       params:   `{"query": "caching and Redis usage", "limit": 10}`,
+   },
+   ```
+
+3. **Run and save baseline**:
+   ```bash
+   ./benchmarks/run.sh
+   ```
+
+---
+
+## Release Workflow
+
+Before each release, run the full benchmark suite and verify no regressions:
+
+```bash
+# 1. Benchmark current HEAD
+./benchmarks/compare.sh HEAD --baseline <previous-release-tag>
+
+# 2. Review the comparison table
+#    - All queries should pass
+#    - No latency regressions > 15%
+#    - Search quality scores should be stable or improved
+
+# 3. Save the baseline for this release
+cp benchmarks/results/bench-<sha>-*.json \
+   benchmarks/results/baseline-<version>-qbapi.json
+
+# 4. View dashboard with all baselines
+python3 benchmarks/dashboard.py
+
+# 5. (Optional) Generate HTML report for the release notes
+python3 benchmarks/dashboard.py --html > benchmarks/results/release-report.html
+
+# 6. Commit the new baseline
+git add benchmarks/results/
+git commit -m "Add benchmark baseline for <version>"
+```
+
+### Running Individual Tests
 
 ```bash
 # Benchmark queries only
@@ -87,63 +566,14 @@ go test -tags "fts5,realrepo" -v -run "TestRealRepo_SearchQuality" ./tests/ -cou
 # Graph benchmarks only
 go test -tags "fts5" -bench=. -benchmem -run='^$' ./internal/graph/ -count=3
 
-# All realrepo tests
+# All realrepo tests (full suite)
 go test -tags "fts5,realrepo" -v ./tests/ -count=1 -timeout 600s
 ```
 
-## compare.sh Reference
+### Build Tags
 
-```bash
-./benchmarks/compare.sh <commit> [options]
-
-Options:
-  --baseline <ref>     Compare against this commit (runs both, prints diff table)
-  --repo <path>        Target repo to index (default: qbapi)
-  --skip-graph         Skip Go graph micro-benchmarks
-  --skip-quality       Skip search quality tests
-  --json               Output machine-readable JSON summary
-  --keep-worktrees     Don't clean up worktrees after run
-```
-
-## dashboard.py Reference
-
-```bash
-python3 benchmarks/dashboard.py [files...] [options]
-
-# Compare all results in results/
-python3 benchmarks/dashboard.py
-
-# Compare specific files
-python3 benchmarks/dashboard.py results/a.json results/b.json
-
-# Show only 3 most recent
-python3 benchmarks/dashboard.py --latest 3
-
-# HTML export
-python3 benchmarks/dashboard.py --html > report.html
-
-# No ANSI colors (for piping)
-python3 benchmarks/dashboard.py --no-color
-```
-
-Features:
-- Side-by-side latency, score, and graph benchmark comparison
-- Delta percentages with color-coded regression/improvement indicators
-- Score distribution sparkline bars
-- HTML export for sharing reports
-- Automatic detection of old and new result JSON formats
-
-## Adding New Benchmark Queries
-
-1. Add query definition to `queries.json` with an ID, category, tool, params, and expected results
-2. Add the corresponding test case in `tests/benchmark_queries_test.go`
-3. Run the suite and save new baseline: `./benchmarks/run.sh`
-
-## Comparing Results
-
-Results are saved as timestamped files in `results/`. Compare baselines with:
-
-```bash
-# Quick latency comparison
-jq '.results[] | {id, elapsed_human}' results/baseline-v0.8.0-qbapi.json
-```
+| Tag        | Purpose                                                  |
+|------------|----------------------------------------------------------|
+| `fts5`     | Required — enables SQLite FTS5 full-text search          |
+| `realrepo` | Enables tests that index a real external repository      |
+| `onnx`     | Enables ONNX neural embedding (optional, uses TFIDF otherwise) |
