@@ -1139,26 +1139,95 @@ func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
 	}
 	g.mu.RUnlock()
 
-	// Slow path: recompute under write lock
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	// Slow path: snapshot under read lock, compute without lock, publish under write lock
 
-	// Double-check after acquiring write lock (another goroutine may have computed)
-	if g.communityValid {
+	// Step 1: Snapshot the graph data under read lock
+	undirected := g.snapshotUndirectedGraph()
+
+	// Step 2: Run Louvain on snapshot (no lock held — readers are not blocked)
+	if undirected.Nodes().Len() == 0 {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if !g.communityValid {
+			g.communityValid = true
+			g.communities = nil
+			g.modularity = 0
+		}
 		var result []types.Community
 		for i, nodeIDs := range g.communities {
-			result = append(result, types.Community{
-				ID:      i,
-				NodeIDs: nodeIDs,
-			})
+			result = append(result, types.Community{ID: i, NodeIDs: nodeIDs})
 		}
 		return result, g.modularity
 	}
 
-	return g.detectCommunitiesLocked()
+	reduced := community.Modularize(undirected, 1.0, nil)
+	communities := reduced.Communities()
+	mod := community.Q(undirected, communities, 1.0)
+
+	// Step 3: Publish results under write lock
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Another goroutine may have populated the cache while we were computing
+	if g.communityValid {
+		var result []types.Community
+		for i, nodeIDs := range g.communities {
+			result = append(result, types.Community{ID: i, NodeIDs: nodeIDs})
+		}
+		return result, g.modularity
+	}
+
+	// Convert gonum IDs back to hash IDs and cache
+	g.communities = make([][]string, len(communities))
+	for i, comm := range communities {
+		var nodeIDs []string
+		for _, node := range comm {
+			if hashID, ok := g.reverseMap[node.ID()]; ok {
+				nodeIDs = append(nodeIDs, hashID)
+			}
+		}
+		g.communities[i] = nodeIDs
+	}
+	g.modularity = mod
+	g.communityValid = true
+
+	var result []types.Community
+	for i, nodeIDs := range g.communities {
+		result = append(result, types.Community{ID: i, NodeIDs: nodeIDs})
+	}
+	return result, mod
 }
 
-// detectCommunitiesLocked is the inner implementation of DetectCommunities.
+// snapshotUndirectedGraph builds an undirected copy of the directed graph under a read lock.
+// The returned graph is independent and safe to use without holding any lock.
+func (g *GraphEngine) snapshotUndirectedGraph() *simple.UndirectedGraph {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	undirected := simple.NewUndirectedGraph()
+
+	edges := g.dg.Edges()
+	for edges.Next() {
+		e := edges.Edge()
+		from := e.From().ID()
+		to := e.To().ID()
+		if from != to && !undirected.HasEdgeBetween(from, to) {
+			undirected.SetEdge(undirected.NewEdge(simple.Node(from), simple.Node(to)))
+		}
+	}
+
+	allNodes := g.dg.Nodes()
+	for allNodes.Next() {
+		id := allNodes.Node().ID()
+		if undirected.Node(id) == nil {
+			undirected.AddNode(simple.Node(id))
+		}
+	}
+
+	return undirected
+}
+
+// detectCommunitiesLocked is the inner implementation used by GetConnectors.
 // Caller must hold g.mu (write lock).
 func (g *GraphEngine) detectCommunitiesLocked() ([]types.Community, float64) {
 	if g.communityValid {
