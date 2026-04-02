@@ -1,6 +1,7 @@
 package gitmeta
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -67,10 +68,14 @@ type FileIntent struct {
 	LastUpdatedAt  time.Time
 }
 
+// errStopIteration is a sentinel error used to break out of go-git ForEach loops.
+var errStopIteration = fmt.Errorf("stop iteration")
+
 // Extractor extracts Git metadata from a repository
 type Extractor struct {
-	repo   *git.Repository
-	config Config
+	repo     *git.Repository
+	repoRoot string
+	config   Config
 }
 
 // NewExtractor opens a git repository at the given path.
@@ -81,10 +86,12 @@ func NewExtractor(repoRoot string, cfg Config) (*Extractor, error) {
 		EnableDotGitCommonDir: true, // support linked worktrees
 	})
 	if err != nil {
-		// Not a git repo — Cold Start disabled silently
-		return nil, nil
+		if err == git.ErrRepositoryNotExists {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("opening git repository: %w", err)
 	}
-	return &Extractor{repo: repo, config: cfg}, nil
+	return &Extractor{repo: repo, repoRoot: repoRoot, config: cfg}, nil
 }
 
 // Snapshot captures the current repository state.
@@ -95,6 +102,7 @@ func (e *Extractor) Snapshot() (*RepoSnapshot, error) {
 	}
 
 	snap := &RepoSnapshot{
+		RepoRoot:   e.repoRoot,
 		HeadCommit: head.Hash().String(),
 		UpdatedAt:  time.Now(),
 	}
@@ -151,7 +159,7 @@ func (e *Extractor) Snapshot() (*RepoSnapshot, error) {
 
 // RecentCommits returns the last N commits from HEAD (bounded by config.HistoryDepth).
 // If maxCount <= 0, uses config.HistoryDepth.
-func (e *Extractor) RecentCommits(maxCount int) ([]CommitInfo, error) {
+func (e *Extractor) RecentCommits(ctx context.Context, maxCount int) ([]CommitInfo, error) {
 	if maxCount <= 0 {
 		maxCount = e.config.HistoryDepth
 	}
@@ -173,8 +181,11 @@ func (e *Extractor) RecentCommits(maxCount int) ([]CommitInfo, error) {
 	var commits []CommitInfo
 	count := 0
 	err = iter.ForEach(func(c *object.Commit) error {
+		if ctx.Err() != nil {
+			return errStopIteration
+		}
 		if count >= maxCount {
-			return fmt.Errorf("stop") // break iteration
+			return errStopIteration
 		}
 		count++
 
@@ -205,8 +216,7 @@ func (e *Extractor) RecentCommits(maxCount int) ([]CommitInfo, error) {
 		commits = append(commits, ci)
 		return nil
 	})
-	// The "stop" error is our break signal, not a real error
-	if err != nil && err.Error() != "stop" {
+	if err != nil && err != errStopIteration {
 		return nil, fmt.Errorf("iterating commits: %w", err)
 	}
 
@@ -216,7 +226,7 @@ func (e *Extractor) RecentCommits(maxCount int) ([]CommitInfo, error) {
 // FileHistory returns commit associations for the given file paths.
 // Walks up to config.HistoryDepth commits and maps file changes.
 // If filePaths is nil, returns history for all files encountered.
-func (e *Extractor) FileHistory(filePaths map[string]bool) ([]FileChange, error) {
+func (e *Extractor) FileHistory(ctx context.Context, filePaths map[string]bool) ([]FileChange, error) {
 	head, err := e.repo.Head()
 	if err != nil {
 		return nil, fmt.Errorf("reading HEAD: %w", err)
@@ -237,8 +247,11 @@ func (e *Extractor) FileHistory(filePaths map[string]bool) ([]FileChange, error)
 	commitCount := 0
 
 	err = iter.ForEach(func(c *object.Commit) error {
+		if ctx.Err() != nil {
+			return errStopIteration
+		}
 		if commitCount >= e.config.HistoryDepth {
-			return fmt.Errorf("stop")
+			return errStopIteration
 		}
 		commitCount++
 
@@ -286,7 +299,7 @@ func (e *Extractor) FileHistory(filePaths map[string]bool) ([]FileChange, error)
 
 		return nil
 	})
-	if err != nil && err.Error() != "stop" {
+	if err != nil && err != errStopIteration {
 		return nil, fmt.Errorf("iterating file history: %w", err)
 	}
 
@@ -371,8 +384,8 @@ func (e *Extractor) CompactFileIntents(changes []FileChange) []FileIntent {
 }
 
 // RecentCommitsSummary returns a bounded human-readable summary of recent commits.
-func (e *Extractor) RecentCommitsSummary(count int) (string, error) {
-	commits, err := e.RecentCommits(count)
+func (e *Extractor) RecentCommitsSummary(ctx context.Context, count int) (string, error) {
+	commits, err := e.RecentCommits(ctx, count)
 	if err != nil {
 		return "", err
 	}

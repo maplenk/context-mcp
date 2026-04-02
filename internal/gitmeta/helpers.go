@@ -1,8 +1,10 @@
 package gitmeta
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -66,12 +68,15 @@ func truncateBytes(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	// Find a good break point
 	truncated := s[:maxBytes]
-	if idx := strings.LastIndexByte(truncated, '\n'); idx > maxBytes/2 {
+	// Ensure we don't split a multi-byte UTF-8 rune
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	if idx := strings.LastIndexByte(truncated, '\n'); idx > len(truncated)/2 {
 		return truncated[:idx]
 	}
-	if idx := strings.LastIndexByte(truncated, ' '); idx > maxBytes/2 {
+	if idx := strings.LastIndexByte(truncated, ' '); idx > len(truncated)/2 {
 		return truncated[:idx]
 	}
 	return truncated
@@ -128,9 +133,9 @@ func extractTrailersJSON(body string) string {
 		return ""
 	}
 	lines := strings.Split(body, "\n")
-	var trailers []string
 
-	// Trailers are at the end of the body, key: value format
+	// Trailers are key: value pairs at the end of the body
+	m := make(map[string]string)
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line == "" {
@@ -138,31 +143,23 @@ func extractTrailersJSON(body string) string {
 		}
 		if idx := strings.Index(line, ": "); idx > 0 {
 			key := line[:idx]
-			// Validate key looks like a trailer (no spaces in key, or contains hyphen)
-			if !strings.Contains(key, " ") || strings.Contains(key, "-") {
-				trailers = append(trailers, line)
+			if !strings.Contains(key, " ") {
+				m[key] = line[idx+2:]
 				continue
 			}
 		}
-		break // Non-trailer line — stop
+		break
 	}
 
-	if len(trailers) == 0 {
+	if len(m) == 0 {
 		return ""
 	}
 
-	// Simple JSON encoding
-	var sb strings.Builder
-	sb.WriteByte('{')
-	for i, t := range trailers {
-		parts := strings.SplitN(t, ": ", 2)
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		sb.WriteString(fmt.Sprintf("%q:%q", parts[0], parts[1]))
+	b, err := json.Marshal(m)
+	if err != nil {
+		return ""
 	}
-	sb.WriteByte('}')
-	return sb.String()
+	return string(b)
 }
 
 // hashString returns a simple hash for content tracking.

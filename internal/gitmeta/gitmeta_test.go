@@ -1,6 +1,7 @@
 package gitmeta
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,7 +184,7 @@ func TestRecentCommits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	commits, err := ext.RecentCommits(3)
+	commits, err := ext.RecentCommits(context.Background(),3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +217,7 @@ func TestRecentCommits_HistoryDepthCap(t *testing.T) {
 	}
 
 	// Pass 0 to use config.HistoryDepth
-	commits, err := ext.RecentCommits(0)
+	commits, err := ext.RecentCommits(context.Background(),0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func TestRecentCommits_MergeFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commits, err := ext.RecentCommits(1)
+	commits, err := ext.RecentCommits(context.Background(),1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +256,7 @@ func TestRecentCommits_SubjectBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commits, err := ext.RecentCommits(1)
+	commits, err := ext.RecentCommits(context.Background(),1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +279,7 @@ func TestFileHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, err := ext.FileHistory(nil)
+	changes, err := ext.FileHistory(context.Background(),nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +321,7 @@ func TestFileHistory_PerFileCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, err := ext.FileHistory(nil)
+	changes, err := ext.FileHistory(context.Background(),nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestFileHistory_FilteredPaths(t *testing.T) {
 	}
 
 	filter := map[string]bool{"a.go": true, "c.go": true}
-	changes, err := ext.FileHistory(filter)
+	changes, err := ext.FileHistory(context.Background(),filter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +390,7 @@ func TestCompactFileIntents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, err := ext.FileHistory(nil)
+	changes, err := ext.FileHistory(context.Background(),nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +440,7 @@ func TestCompactFileIntents_MaxIntentBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, err := ext.FileHistory(nil)
+	changes, err := ext.FileHistory(context.Background(),nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +535,7 @@ func TestRecentCommitsSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := ext.RecentCommitsSummary(5)
+	summary, err := ext.RecentCommitsSummary(context.Background(),5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +625,7 @@ func TestCompactFileIntents_Deterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, err := ext.FileHistory(nil)
+	changes, err := ext.FileHistory(context.Background(),nil)
 	if err != nil {
 		t.Fatal(err)
 	}

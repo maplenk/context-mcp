@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -555,12 +556,14 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		if gitErr != nil {
 			log.Printf("Cold Start: failed to open git repo: %v", gitErr)
 		} else if extractor != nil {
+			gitCtx, gitCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer gitCancel()
+
 			// 1. Repo snapshot
 			snap, snapErr := extractor.Snapshot()
 			if snapErr != nil {
 				log.Printf("Cold Start: snapshot error: %v", snapErr)
 			} else {
-				snap.RepoRoot = cfg.RepoRoot
 				if err := store.UpsertRepoSnapshot(*snap); err != nil {
 					log.Printf("Cold Start: failed to store snapshot: %v", err)
 				} else {
@@ -569,7 +572,7 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			}
 
 			// 2. Recent commits
-			commits, commitErr := extractor.RecentCommits(0)
+			commits, commitErr := extractor.RecentCommits(gitCtx, 0)
 			if commitErr != nil {
 				log.Printf("Cold Start: commit history error: %v", commitErr)
 			} else if len(commits) > 0 {
@@ -581,7 +584,7 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			}
 
 			// 3. File history
-			changes, histErr := extractor.FileHistory(nil) // all files
+			changes, histErr := extractor.FileHistory(gitCtx, nil) // all files
 			if histErr != nil {
 				log.Printf("Cold Start: file history error: %v", histErr)
 			} else if len(changes) > 0 {
@@ -914,6 +917,9 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		if gitErr != nil {
 			log.Printf("Cold Start incremental: failed to open git repo: %v", gitErr)
 		} else if extractor != nil {
+			gitCtx, gitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer gitCancel()
+
 			// Build set of affected file paths (relative to repo root)
 			affectedFiles := make(map[string]bool)
 			for _, f := range files {
@@ -921,7 +927,7 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			}
 
 			if len(affectedFiles) > 0 {
-				changes, chErr := extractor.FileHistory(affectedFiles)
+				changes, chErr := extractor.FileHistory(gitCtx, affectedFiles)
 				if chErr != nil {
 					log.Printf("Cold Start incremental: file history error: %v", chErr)
 				} else if len(changes) > 0 {
@@ -940,8 +946,9 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			// Update snapshot
 			snap, snapErr := extractor.Snapshot()
 			if snapErr == nil {
-				snap.RepoRoot = cfg.RepoRoot
-				store.UpsertRepoSnapshot(*snap)
+				if err := store.UpsertRepoSnapshot(*snap); err != nil {
+					log.Printf("Cold Start incremental: failed to update snapshot: %v", err)
+				}
 			}
 		}
 	}
@@ -1098,9 +1105,22 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 			}
 		}
 
+		// Cold Start: look up file intent to enrich embeddings
+		var intentText string
+		if cfg.ColdStartEnabled {
+			fi, fiErr := store.GetFileIntent(event.Path)
+			if fiErr == nil && fi != nil && fi.IntentText != "" {
+				intentText = fi.IntentText
+			}
+		}
+
 		// Generate embeddings for new/updated nodes
 		for _, node := range result.Nodes {
-			vec, err := embedder.Embed(node.ContentSum)
+			text := node.ContentSum
+			if intentText != "" {
+				text = text + "\n[git-intent]\n" + intentText
+			}
+			vec, err := embedder.Embed(text)
 			if err != nil {
 				log.Printf("Embedding error for %s: %v", node.SymbolName, err)
 				continue

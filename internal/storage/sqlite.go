@@ -1116,7 +1116,7 @@ func (s *Store) UpsertGitCommits(commits []gitmeta.CommitInfo) error {
 	defer stmt.Close()
 
 	for _, c := range commits {
-		_, err = stmt.Exec(c.Hash, c.AuthorName, c.AuthorEmail, c.AuthorTime.Format(time.RFC3339),
+		_, err = stmt.Exec(c.Hash, c.AuthorName, c.AuthorEmail, c.AuthorTime.UTC().Format(time.RFC3339),
 			c.Subject, c.Body, c.TrailersJSON, boolToInt(c.IsMerge), c.FirstParent)
 		if err != nil {
 			return err
@@ -1244,6 +1244,9 @@ func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileI
 			result[fi.FilePath] = &fi
 		}
 		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
