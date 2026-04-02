@@ -17,6 +17,7 @@ import (
 	"github.com/naman/qb-context/internal/adr"
 	"github.com/naman/qb-context/internal/config"
 	"github.com/naman/qb-context/internal/embedding"
+	"github.com/naman/qb-context/internal/gitmeta"
 	"github.com/naman/qb-context/internal/graph"
 	"github.com/naman/qb-context/internal/mcp"
 	"github.com/naman/qb-context/internal/parser"
@@ -542,6 +543,88 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		}
 	}
 
+	// --- Cold Start: Git metadata ingestion ---
+	if cfg.ColdStartEnabled {
+		gitCfg := gitmeta.Config{
+			HistoryDepth:     cfg.GitHistoryDepth,
+			PerFileCommitCap: cfg.GitPerFileCommitCap,
+			MaxMessageBytes:  cfg.GitMaxMessageBytes,
+			MaxIntentBytes:   cfg.GitMaxIntentBytes,
+		}
+		extractor, gitErr := gitmeta.NewExtractor(cfg.RepoRoot, gitCfg)
+		if gitErr != nil {
+			log.Printf("Cold Start: failed to open git repo: %v", gitErr)
+		} else if extractor != nil {
+			// 1. Repo snapshot
+			snap, snapErr := extractor.Snapshot()
+			if snapErr != nil {
+				log.Printf("Cold Start: snapshot error: %v", snapErr)
+			} else {
+				snap.RepoRoot = cfg.RepoRoot
+				if err := store.UpsertRepoSnapshot(*snap); err != nil {
+					log.Printf("Cold Start: failed to store snapshot: %v", err)
+				} else {
+					log.Printf("Cold Start: snapshot stored (%s)", snap.Summary)
+				}
+			}
+
+			// 2. Recent commits
+			commits, commitErr := extractor.RecentCommits(0)
+			if commitErr != nil {
+				log.Printf("Cold Start: commit history error: %v", commitErr)
+			} else if len(commits) > 0 {
+				if err := store.UpsertGitCommits(commits); err != nil {
+					log.Printf("Cold Start: failed to store commits: %v", err)
+				} else {
+					log.Printf("Cold Start: stored %d commits", len(commits))
+				}
+			}
+
+			// 3. File history
+			changes, histErr := extractor.FileHistory(nil) // all files
+			if histErr != nil {
+				log.Printf("Cold Start: file history error: %v", histErr)
+			} else if len(changes) > 0 {
+				if err := store.UpsertFileHistory(changes); err != nil {
+					log.Printf("Cold Start: failed to store file history: %v", err)
+				} else {
+					log.Printf("Cold Start: stored %d file-commit associations", len(changes))
+				}
+
+				// 4. Compact file intents
+				intents := extractor.CompactFileIntents(changes)
+				if len(intents) > 0 {
+					if err := store.UpsertFileIntents(intents); err != nil {
+						log.Printf("Cold Start: failed to store file intents: %v", err)
+					} else {
+						log.Printf("Cold Start: stored intent summaries for %d files", len(intents))
+					}
+				}
+			}
+		} else {
+			log.Printf("Cold Start: not a git repository, skipping git metadata")
+		}
+	}
+
+	// Look up file intents for embedding enrichment
+	var fileIntents map[string]*gitmeta.FileIntent
+	if cfg.ColdStartEnabled {
+		// Collect unique file paths
+		filePaths := make(map[string]bool)
+		for _, n := range allNodes {
+			filePaths[n.FilePath] = true
+		}
+		paths := make([]string, 0, len(filePaths))
+		for p := range filePaths {
+			paths = append(paths, p)
+		}
+		var fiErr error
+		fileIntents, fiErr = store.GetFileIntentsByPaths(paths)
+		if fiErr != nil {
+			log.Printf("Cold Start: failed to look up file intents for embedding: %v", fiErr)
+		}
+	}
+
 	// Generate embeddings in batches
 	if len(allNodes) > 0 {
 		batchSize := cfg.EmbeddingBatchSize
@@ -554,7 +637,14 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 
 			texts := make([]string, len(batch))
 			for j, node := range batch {
-				texts[j] = node.ContentSum
+				text := node.ContentSum
+				if fileIntents != nil {
+					if fi, ok := fileIntents[node.FilePath]; ok && fi.IntentText != "" {
+						// Append bounded git intent to embedding text
+						text = text + "\n[git-intent]\n" + fi.IntentText
+					}
+				}
+				texts[j] = text
 			}
 
 			vectors, err := embedder.EmbedBatch(texts)
@@ -808,6 +898,50 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 				log.Printf("Failed to store node scores after targeted re-index: %v", err)
 			} else {
 				log.Printf("Stored scores for %d nodes after targeted re-index", len(scores))
+			}
+		}
+	}
+
+	// --- Cold Start: incremental refresh for changed files ---
+	if cfg.ColdStartEnabled {
+		gitCfg := gitmeta.Config{
+			HistoryDepth:     cfg.GitHistoryDepth,
+			PerFileCommitCap: cfg.GitPerFileCommitCap,
+			MaxMessageBytes:  cfg.GitMaxMessageBytes,
+			MaxIntentBytes:   cfg.GitMaxIntentBytes,
+		}
+		extractor, gitErr := gitmeta.NewExtractor(cfg.RepoRoot, gitCfg)
+		if gitErr != nil {
+			log.Printf("Cold Start incremental: failed to open git repo: %v", gitErr)
+		} else if extractor != nil {
+			// Build set of affected file paths (relative to repo root)
+			affectedFiles := make(map[string]bool)
+			for _, f := range files {
+				affectedFiles[f] = true
+			}
+
+			if len(affectedFiles) > 0 {
+				changes, chErr := extractor.FileHistory(affectedFiles)
+				if chErr != nil {
+					log.Printf("Cold Start incremental: file history error: %v", chErr)
+				} else if len(changes) > 0 {
+					if err := store.UpsertFileHistory(changes); err != nil {
+						log.Printf("Cold Start incremental: failed to store file history: %v", err)
+					}
+					intents := extractor.CompactFileIntents(changes)
+					if len(intents) > 0 {
+						if err := store.UpsertFileIntents(intents); err != nil {
+							log.Printf("Cold Start incremental: failed to store intents: %v", err)
+						}
+					}
+				}
+			}
+
+			// Update snapshot
+			snap, snapErr := extractor.Snapshot()
+			if snapErr == nil {
+				snap.RepoRoot = cfg.RepoRoot
+				store.UpsertRepoSnapshot(*snap)
 			}
 		}
 	}

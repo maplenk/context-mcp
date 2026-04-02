@@ -182,6 +182,47 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
+	// Cold Start: build git context if available
+	type gitContextInfo struct {
+		RepoSnapshot string            `json:"repo_snapshot,omitempty"`
+		FileIntents  map[string]string `json:"file_intents,omitempty"`
+	}
+	var gitContext *gitContextInfo
+
+	// Get repo snapshot
+	snap, snapErr := deps.Store.GetRepoSnapshot(deps.RepoRoot)
+	if snapErr == nil && snap != nil {
+		gitContext = &gitContextInfo{
+			RepoSnapshot: snap.Summary,
+		}
+	}
+
+	// Get file intents for result files
+	if len(results) > 0 {
+		filePaths := make([]string, 0)
+		seen := make(map[string]bool)
+		for _, r := range results {
+			if !seen[r.Node.FilePath] {
+				filePaths = append(filePaths, r.Node.FilePath)
+				seen[r.Node.FilePath] = true
+			}
+		}
+		intents, intentErr := deps.Store.GetFileIntentsByPaths(filePaths)
+		if intentErr == nil && len(intents) > 0 {
+			if gitContext == nil {
+				gitContext = &gitContextInfo{}
+			}
+			gitContext.FileIntents = make(map[string]string)
+			for path, fi := range intents {
+				gitContext.FileIntents[path] = fi.IntentText
+			}
+		}
+	}
+
+	// Build response
+	response := make(map[string]interface{})
+	response["results"] = results
+
 	// Load architecture context if available
 	summaries, _ := deps.Store.GetAllProjectSummaries()
 	if len(summaries) > 0 {
@@ -189,13 +230,14 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		for _, s := range summaries {
 			adrTexts = append(adrTexts, fmt.Sprintf("[%s] %s", s.Project, s.Summary))
 		}
-		return map[string]interface{}{
-			"results":              results,
-			"architecture_context": strings.Join(adrTexts, "\n\n"),
-		}, nil
+		response["architecture_context"] = strings.Join(adrTexts, "\n\n")
 	}
 
-	return results, nil
+	if gitContext != nil {
+		response["git_context"] = gitContext
+	}
+
+	return response, nil
 }
 
 func registerContextTool(s *Server, deps ToolDeps) {
@@ -1208,7 +1250,7 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		}
 	}
 
-	return map[string]interface{}{
+	response := map[string]interface{}{
 		"changed_files":   changedFiles,
 		"changed_symbols": changedSymbols,
 		"new_symbols":     newSymbols,
@@ -1216,7 +1258,21 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		"note":            "Symbols in modified files are listed as 'file_modified'. Re-index to detect precise symbol-level changes.",
 		"summary": fmt.Sprintf("%d files changed, %d symbols in modified files, %d new files, %d deleted symbols",
 			len(changedFiles), len(changedSymbols), len(newSymbols), len(deletedSymbols)),
-	}, nil
+	}
+
+	// Cold Start: add file intents for changed files
+	if len(changedFiles) > 0 {
+		intents, intentErr := deps.Store.GetFileIntentsByPaths(changedFiles)
+		if intentErr == nil && len(intents) > 0 {
+			fileIntents := make(map[string]string)
+			for path, fi := range intents {
+				fileIntents[path] = fi.IntentText
+			}
+			response["file_intents"] = fileIntents
+		}
+	}
+
+	return response, nil
 }
 
 func registerDetectChangesTool(s *Server, deps ToolDeps) {
@@ -1675,6 +1731,12 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 	result := map[string]interface{}{
 		"symbol":     found,
 		"resolution": resolution,
+	}
+
+	// Cold Start: add file intent for the symbol's file
+	fi, fiErr := deps.Store.GetFileIntent(found.FilePath)
+	if fiErr == nil && fi != nil {
+		result["file_intent"] = fi.IntentText
 	}
 
 	// Get callers and callees from graph
