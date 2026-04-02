@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version.
 // Increment this when adding new migrations.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // migrationSet maps schema versions to their SQL statements.
 // Version 1 is the initial schema.
@@ -90,6 +90,63 @@ var migrationSet = map[int][]string{
 		`ALTER TABLE edges_new RENAME TO edges`,
 		`CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)`,
+	},
+
+	// Migration v3: Git metadata tables for Cold Start Enhancement.
+	// Stores repository snapshots, commit history, file-level attribution, and intent summaries.
+	3: {
+		// repo_git_snapshot: one-row snapshot of repository state
+		`CREATE TABLE IF NOT EXISTS repo_git_snapshot (
+			repo_root TEXT PRIMARY KEY,
+			head_ref TEXT NOT NULL DEFAULT '',
+			head_commit TEXT NOT NULL DEFAULT '',
+			is_detached INTEGER NOT NULL DEFAULT 0,
+			is_dirty INTEGER NOT NULL DEFAULT 0,
+			ahead_count INTEGER NOT NULL DEFAULT 0,
+			behind_count INTEGER NOT NULL DEFAULT 0,
+			staged_files INTEGER NOT NULL DEFAULT 0,
+			modified_files INTEGER NOT NULL DEFAULT 0,
+			untracked_files INTEGER NOT NULL DEFAULT 0,
+			snapshot_summary TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+
+		// git_commits: normalized commit metadata for bounded local history
+		`CREATE TABLE IF NOT EXISTS git_commits (
+			commit_hash TEXT PRIMARY KEY,
+			author_name TEXT NOT NULL DEFAULT '',
+			author_email TEXT NOT NULL DEFAULT '',
+			author_time TEXT NOT NULL DEFAULT '',
+			subject TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT '',
+			trailers_json TEXT NOT NULL DEFAULT '',
+			is_merge INTEGER NOT NULL DEFAULT 0,
+			first_parent_hash TEXT NOT NULL DEFAULT '',
+			source_rank REAL NOT NULL DEFAULT 0
+		)`,
+
+		// git_file_history: file-level attribution between paths and commits
+		`CREATE TABLE IF NOT EXISTS git_file_history (
+			file_path TEXT NOT NULL,
+			commit_hash TEXT NOT NULL,
+			change_type TEXT NOT NULL DEFAULT 'unknown',
+			commit_time TEXT NOT NULL DEFAULT '',
+			summary_text TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (file_path, commit_hash)
+		)`,
+
+		// Index for efficient file lookups
+		`CREATE INDEX IF NOT EXISTS idx_git_file_history_path ON git_file_history(file_path)`,
+
+		// git_file_intent: compacted intent summaries per file
+		`CREATE TABLE IF NOT EXISTS git_file_intent (
+			file_path TEXT PRIMARY KEY,
+			intent_text TEXT NOT NULL DEFAULT '',
+			source_hash TEXT NOT NULL DEFAULT '',
+			commit_count INTEGER NOT NULL DEFAULT 0,
+			last_commit_hash TEXT NOT NULL DEFAULT '',
+			last_updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 	},
 }
 

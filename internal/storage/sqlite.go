@@ -13,9 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/naman/qb-context/internal/gitmeta"
 	"github.com/naman/qb-context/internal/types"
 )
 
@@ -1040,4 +1042,219 @@ func serializeFloat32(v []float32) []byte {
 		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
 	}
 	return buf
+}
+
+// boolToInt converts a bool to an int (0 or 1) for SQLite storage.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// ---- Git metadata CRUD methods ----
+
+// UpsertRepoSnapshot stores or updates the repository git snapshot.
+func (s *Store) UpsertRepoSnapshot(snap gitmeta.RepoSnapshot) error {
+	_, err := s.db.Exec(`INSERT INTO repo_git_snapshot
+		(repo_root, head_ref, head_commit, is_detached, is_dirty, ahead_count, behind_count,
+		 staged_files, modified_files, untracked_files, snapshot_summary, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(repo_root) DO UPDATE SET
+			head_ref=excluded.head_ref, head_commit=excluded.head_commit,
+			is_detached=excluded.is_detached, is_dirty=excluded.is_dirty,
+			ahead_count=excluded.ahead_count, behind_count=excluded.behind_count,
+			staged_files=excluded.staged_files, modified_files=excluded.modified_files,
+			untracked_files=excluded.untracked_files, snapshot_summary=excluded.snapshot_summary,
+			updated_at=excluded.updated_at`,
+		snap.RepoRoot, snap.HeadRef, snap.HeadCommit,
+		boolToInt(snap.IsDetached), boolToInt(snap.IsDirty),
+		snap.AheadCount, snap.BehindCount,
+		snap.StagedFiles, snap.ModifiedFiles, snap.UntrackedFiles,
+		snap.Summary, snap.UpdatedAt.Format(time.RFC3339))
+	return err
+}
+
+// GetRepoSnapshot returns the stored git snapshot for the given repo root.
+func (s *Store) GetRepoSnapshot(repoRoot string) (*gitmeta.RepoSnapshot, error) {
+	var snap gitmeta.RepoSnapshot
+	var isDetached, isDirty int
+	var updatedAt string
+	err := s.db.QueryRow(`SELECT repo_root, head_ref, head_commit, is_detached, is_dirty,
+		ahead_count, behind_count, staged_files, modified_files, untracked_files,
+		snapshot_summary, updated_at FROM repo_git_snapshot WHERE repo_root = ?`, repoRoot).
+		Scan(&snap.RepoRoot, &snap.HeadRef, &snap.HeadCommit, &isDetached, &isDirty,
+			&snap.AheadCount, &snap.BehindCount, &snap.StagedFiles, &snap.ModifiedFiles,
+			&snap.UntrackedFiles, &snap.Summary, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	snap.IsDetached = isDetached != 0
+	snap.IsDirty = isDirty != 0
+	snap.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	return &snap, nil
+}
+
+// UpsertGitCommits stores commit metadata in batch.
+func (s *Store) UpsertGitCommits(commits []gitmeta.CommitInfo) error {
+	if len(commits) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO git_commits
+		(commit_hash, author_name, author_email, author_time, subject, body, trailers_json, is_merge, first_parent_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(commit_hash) DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, c := range commits {
+		_, err = stmt.Exec(c.Hash, c.AuthorName, c.AuthorEmail, c.AuthorTime.Format(time.RFC3339),
+			c.Subject, c.Body, c.TrailersJSON, boolToInt(c.IsMerge), c.FirstParent)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// UpsertFileHistory stores file-commit associations in batch.
+func (s *Store) UpsertFileHistory(changes []gitmeta.FileChange) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO git_file_history
+		(file_path, commit_hash, change_type, commit_time, summary_text)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(file_path, commit_hash) DO UPDATE SET
+			change_type=excluded.change_type, commit_time=excluded.commit_time, summary_text=excluded.summary_text`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, c := range changes {
+		_, err = stmt.Exec(c.FilePath, c.CommitHash, c.ChangeType, c.CommitTime.Format(time.RFC3339), c.Summary)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// UpsertFileIntents stores compacted file intent summaries in batch.
+func (s *Store) UpsertFileIntents(intents []gitmeta.FileIntent) error {
+	if len(intents) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO git_file_intent
+		(file_path, intent_text, source_hash, commit_count, last_commit_hash, last_updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			intent_text=excluded.intent_text, source_hash=excluded.source_hash,
+			commit_count=excluded.commit_count, last_commit_hash=excluded.last_commit_hash,
+			last_updated_at=excluded.last_updated_at`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, fi := range intents {
+		_, err = stmt.Exec(fi.FilePath, fi.IntentText, fi.SourceHash, fi.CommitCount,
+			fi.LastCommitHash, fi.LastUpdatedAt.Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// GetFileIntent returns the stored intent summary for a file.
+func (s *Store) GetFileIntent(filePath string) (*gitmeta.FileIntent, error) {
+	var fi gitmeta.FileIntent
+	var lastUpdated string
+	err := s.db.QueryRow(`SELECT file_path, intent_text, source_hash, commit_count, last_commit_hash, last_updated_at
+		FROM git_file_intent WHERE file_path = ?`, filePath).
+		Scan(&fi.FilePath, &fi.IntentText, &fi.SourceHash, &fi.CommitCount, &fi.LastCommitHash, &lastUpdated)
+	if err != nil {
+		return nil, err
+	}
+	fi.LastUpdatedAt, _ = time.Parse(time.RFC3339, lastUpdated)
+	return &fi, nil
+}
+
+// GetFileIntentsByPaths returns intent summaries for multiple files.
+func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileIntent, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]*gitmeta.FileIntent)
+
+	// Process in batches to avoid SQL variable limits
+	batchSize := 500
+	for i := 0; i < len(paths); i += batchSize {
+		end := i + batchSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		batch := paths[i:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, p := range batch {
+			placeholders[j] = "?"
+			args[j] = p
+		}
+
+		query := fmt.Sprintf(`SELECT file_path, intent_text, source_hash, commit_count, last_commit_hash, last_updated_at
+			FROM git_file_intent WHERE file_path IN (%s)`, strings.Join(placeholders, ","))
+
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+
+		for rows.Next() {
+			var fi gitmeta.FileIntent
+			var lastUpdated string
+			if err := rows.Scan(&fi.FilePath, &fi.IntentText, &fi.SourceHash, &fi.CommitCount, &fi.LastCommitHash, &lastUpdated); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			fi.LastUpdatedAt, _ = time.Parse(time.RFC3339, lastUpdated)
+			result[fi.FilePath] = &fi
+		}
+		rows.Close()
+	}
+	return result, nil
+}
+
+// GetLatestStoredCommitHash returns the most recent commit hash stored in git_commits.
+// Returns empty string if no commits stored.
+func (s *Store) GetLatestStoredCommitHash() (string, error) {
+	var hash string
+	err := s.db.QueryRow(`SELECT commit_hash FROM git_commits ORDER BY author_time DESC LIMIT 1`).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return hash, err
 }
