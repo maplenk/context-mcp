@@ -44,6 +44,21 @@ type Config struct {
 	// Matryoshka support, valid values are 64, 128, 256, 512, 896.
 	// Defaults to 384 (TFIDF) or 256 (ONNX).
 	EmbeddingDim int
+
+	// ColdStartEnabled enables Git-derived intent metadata ingestion
+	ColdStartEnabled bool
+
+	// GitHistoryDepth is the maximum number of commits to scan per repository
+	GitHistoryDepth int
+
+	// GitPerFileCommitCap is the maximum commits to associate per file
+	GitPerFileCommitCap int
+
+	// GitMaxMessageBytes is the maximum bytes per commit message/body to store
+	GitMaxMessageBytes int
+
+	// GitMaxIntentBytes is the maximum bytes for compacted file intent text
+	GitMaxIntentBytes int
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -57,6 +72,11 @@ func DefaultConfig() *Config {
 		WorkerCount:        4,
 		ExcludedDirs:       []string{".git", ".qb-context"},
 		EmbeddingDim:       384,
+		ColdStartEnabled:    true,
+		GitHistoryDepth:     500,
+		GitPerFileCommitCap: 20,
+		GitMaxMessageBytes:  2000,
+		GitMaxIntentBytes:   1500,
 	}
 }
 
@@ -77,6 +97,11 @@ func ParseFlags() (*Config, error) {
 	fs.StringVar(&cfg.ONNXModelDir, "onnx-model", cfg.ONNXModelDir, "Path to ONNX model directory (enables neural embeddings)")
 	fs.StringVar(&cfg.ONNXLibPath, "onnx-lib", cfg.ONNXLibPath, "Path to ONNX Runtime shared library")
 	fs.IntVar(&cfg.EmbeddingDim, "embedding-dim", cfg.EmbeddingDim, "Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896)")
+	fs.BoolVar(&cfg.ColdStartEnabled, "cold-start", cfg.ColdStartEnabled, "Enable Git-derived intent metadata ingestion")
+	fs.IntVar(&cfg.GitHistoryDepth, "git-history-depth", cfg.GitHistoryDepth, "Maximum commits to scan per repository")
+	fs.IntVar(&cfg.GitPerFileCommitCap, "git-per-file-cap", cfg.GitPerFileCommitCap, "Maximum commits per file")
+	fs.IntVar(&cfg.GitMaxMessageBytes, "git-max-message", cfg.GitMaxMessageBytes, "Maximum bytes per commit message")
+	fs.IntVar(&cfg.GitMaxIntentBytes, "git-max-intent", cfg.GitMaxIntentBytes, "Maximum bytes per file intent summary")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, fmt.Errorf("parsing flags: %w", err)
 	}
@@ -95,6 +120,19 @@ func ParseFlags() (*Config, error) {
 	}
 	if cfg.EmbeddingDim < 1 {
 		return nil, fmt.Errorf("embedding-dim must be positive, got %d", cfg.EmbeddingDim)
+	}
+
+	if cfg.GitHistoryDepth < 1 {
+		cfg.GitHistoryDepth = 500
+	}
+	if cfg.GitPerFileCommitCap < 1 {
+		cfg.GitPerFileCommitCap = 20
+	}
+	if cfg.GitMaxMessageBytes < 100 {
+		cfg.GitMaxMessageBytes = 2000
+	}
+	if cfg.GitMaxIntentBytes < 100 {
+		cfg.GitMaxIntentBytes = 1500
 	}
 
 	// Resolve absolute paths
