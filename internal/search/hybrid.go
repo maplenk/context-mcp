@@ -88,6 +88,20 @@ func GetStopWords() []string {
 	return result
 }
 
+// queryAliases maps common developer/business vocabulary to code-level identifiers.
+// When a query term matches a key, the alias terms are appended to the FTS query
+// with OR, broadening lexical search to cover vocabulary gaps.
+var queryAliases = map[string][]string{
+	"omnichannel": {"easyecom", "unicommerce", "onlineorder"},
+	"auth":        {"oauth", "login", "token", "session", "authenticate"},
+	"webhook":     {"callback", "hook", "dispatchwebhook"},
+	"payment":     {"razorpay", "billing", "invoice"},
+	"inventory":   {"stock", "stocktransaction", "stockledger", "warehouse"},
+	"schema":      {"migration", "updateschema"},
+	"logging":     {"sentry", "log", "errortracker"},
+	"error":       {"exception", "handler", "sentry"},
+}
+
 // camelCaseRe splits CamelCase identifiers into words.
 // fts5SpecialRe matches FTS5 special characters that must be sanitized before query construction.
 var fts5SpecialRe = regexp.MustCompile("[\"':(){}^+\\-*/`]")
@@ -386,6 +400,17 @@ func buildFTSQuery(query string) string {
 	if len(expanded) == 0 {
 		return query // fallback to original if everything was filtered
 	}
+
+	// Apply query alias expansion — broaden vocabulary coverage
+	var withAliases []string
+	for _, term := range expanded {
+		withAliases = append(withAliases, term)
+		lower := strings.ToLower(term)
+		if aliases, ok := queryAliases[lower]; ok {
+			withAliases = append(withAliases, aliases...)
+		}
+	}
+	expanded = withAliases
 
 	// Add prefix matching with *
 	var terms []string
