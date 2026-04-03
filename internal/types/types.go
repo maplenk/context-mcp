@@ -17,6 +17,7 @@ const (
 	NodeTypeMethod
 	NodeTypeInterface // H22: distinct type for interfaces
 	NodeTypeFile      // C1: file-level node for import edge anchoring
+	NodeTypeRoute     // HTTP route endpoint (e.g., "POST /v1/merchant/{storeID}/order")
 )
 
 // String returns the string representation of a NodeType
@@ -34,6 +35,8 @@ func (nt NodeType) String() string {
 		return "interface"
 	case NodeTypeFile:
 		return "file"
+	case NodeTypeRoute:
+		return "route"
 	default:
 		return "unknown"
 	}
@@ -61,6 +64,8 @@ func (nt *NodeType) UnmarshalJSON(data []byte) error {
 			*nt = NodeTypeInterface
 		case "file":
 			*nt = NodeTypeFile
+		case "route":
+			*nt = NodeTypeRoute
 		case "unknown":
 			*nt = 0
 		default:
@@ -76,7 +81,7 @@ func (nt *NodeType) UnmarshalJSON(data []byte) error {
 	// M54: Validate numeric value is within the valid range
 	candidate := NodeType(n)
 	if candidate.String() == "unknown" && n != 0 {
-		return fmt.Errorf("invalid NodeType numeric value: %d (valid range: %d–%d)", n, NodeTypeFunction, NodeTypeFile)
+		return fmt.Errorf("invalid NodeType numeric value: %d (valid range: %d–%d)", n, NodeTypeFunction, NodeTypeRoute)
 	}
 	*nt = candidate
 	return nil
@@ -100,6 +105,7 @@ const (
 	EdgeTypeDefines       // file → class/function (containment)
 	EdgeTypeDefinesMethod // class → method (containment)
 	EdgeTypeInherits      // class → parent class (extends)
+	EdgeTypeHandles       // route → controller method (handler resolution)
 )
 
 // String returns the string representation of an EdgeType
@@ -119,6 +125,8 @@ func (et EdgeType) String() string {
 		return "defines_method"
 	case EdgeTypeInherits:
 		return "inherits"
+	case EdgeTypeHandles:
+		return "handles"
 	default:
 		return "unknown"
 	}
@@ -148,6 +156,8 @@ func (et *EdgeType) UnmarshalJSON(data []byte) error {
 			*et = EdgeTypeDefinesMethod
 		case "inherits":
 			*et = EdgeTypeInherits
+		case "handles":
+			*et = EdgeTypeHandles
 		case "unknown":
 			*et = 0
 		default:
@@ -163,7 +173,7 @@ func (et *EdgeType) UnmarshalJSON(data []byte) error {
 	// M54: Validate numeric value is within the valid range
 	candidate := EdgeType(n)
 	if candidate.String() == "unknown" && n != 0 {
-		return fmt.Errorf("invalid EdgeType numeric value: %d (valid range: %d–%d)", n, EdgeTypeCalls, EdgeTypeInherits)
+		return fmt.Errorf("invalid EdgeType numeric value: %d (valid range: %d–%d)", n, EdgeTypeCalls, EdgeTypeHandles)
 	}
 	*et = candidate
 	return nil

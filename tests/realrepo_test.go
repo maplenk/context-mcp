@@ -183,6 +183,16 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 		}
 	}
 
+	// Also index method symbols for route handler resolution (EdgeTypeHandles).
+	// Added after class/struct/interface indexing so class-level symbols take priority.
+	for _, n := range allNodes {
+		if n.NodeType == types.NodeTypeMethod {
+			if _, exists := symbolIndex[n.SymbolName]; !exists {
+				symbolIndex[n.SymbolName] = n.ID
+			}
+		}
+	}
+
 	nodeIDSet := make(map[string]bool, len(allNodes))
 	for _, n := range allNodes {
 		nodeIDSet[n.ID] = true

@@ -682,7 +682,7 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 	// Extract call edges using regex on node bodies (M9: deduplicate)
 	callSeen := map[string]bool{}
 	for i, node := range result.Nodes {
-		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface {
+		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface || node.NodeType == types.NodeTypeRoute {
 			continue
 		}
 		if node.EndByte > uint32(len(content)) {
@@ -1071,6 +1071,13 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		return true // continue
 	})
 
+	// Extract Laravel routes from route files (regex-based, not tree-sitter)
+	if isRouteFile(relPath) {
+		routeNodes, routeEdges := ExtractRoutes(content, relPath)
+		result.Nodes = append(result.Nodes, routeNodes...)
+		result.Edges = append(result.Edges, routeEdges...)
+	}
+
 	// M1: Collect comment ranges from tree-sitter AST to filter phantom call edges in PHP
 	phpCommentRanges := collectCommentRanges(root)
 	phpStringRanges := collectStringRanges(root)
@@ -1080,7 +1087,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 	// M9: deduplicate call edges
 	callSeen := map[string]bool{}
 	for _, node := range result.Nodes {
-		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface {
+		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface || node.NodeType == types.NodeTypeRoute {
 			continue
 		}
 		if node.EndByte > uint32(len(content)) {
