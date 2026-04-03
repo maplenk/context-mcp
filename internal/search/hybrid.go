@@ -269,10 +269,8 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 			weightInDegree*inDegree +
 			weightSemantic*semantic
 
-		// Penalize auto-generated/helper files to prevent them dominating results
-		if isHelperFile(node.FilePath) {
-			composite *= 0.3
-		}
+		// Apply path-based penalty: migrations, tests, vendor, etc. score lower
+		composite *= pathPenalty(node.FilePath)
 
 		results = append(results, types.SearchResult{
 			Node:  node,
@@ -489,16 +487,16 @@ func safeGet(m map[string]float64, key string) float64 {
 }
 
 // applyPerFileCap limits results to maxPerFile entries per unique file_path.
-// Helper files (_ide_helper, generated, .d.ts) are capped at 1 to prevent
-// large auto-generated files from dominating results.
+// Files with pathPenalty <= 0.3 (generated, vendor, IDE helpers) are capped at 1
+// to prevent large auto-generated files from dominating results.
 func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
 	fileCounts := make(map[string]int)
 	var capped []types.SearchResult
 
 	for _, r := range results {
 		cap := maxPerFile
-		if isHelperFile(r.Node.FilePath) {
-			cap = 1
+		if pathPenalty(r.Node.FilePath) <= 0.3 {
+			cap = 1 // generated/vendor/IDE helpers: 1 result max
 		}
 		count := fileCounts[r.Node.FilePath]
 		if count < cap {
@@ -510,20 +508,64 @@ func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.Searc
 	return capped
 }
 
-// isHelperFile returns true for auto-generated or helper files that should
-// have reduced per-file caps in search results.
-func isHelperFile(filePath string) bool {
+// pathPenalty returns a scoring multiplier for a file path.
+// Core source files return 1.0; non-core paths return lower values
+// so they don't dominate results over the actual implementation files.
+func pathPenalty(filePath string) float64 {
 	lower := strings.ToLower(filePath)
+
+	// Auto-generated / IDE helpers — strongest penalty
 	if strings.Contains(lower, "_ide_helper") || strings.HasSuffix(lower, ".d.ts") {
-		return true
+		return 0.3
 	}
-	// Match "generated" only as a path component or file prefix to avoid false positives
-	// like "UserGeneratedContent.php"
 	for _, part := range strings.Split(lower, "/") {
 		if part == "generated" || strings.HasPrefix(part, "generated.") ||
 			strings.HasPrefix(part, "generated_") {
-			return true
+			return 0.3
 		}
 	}
-	return false
+
+	// Vendor / third-party dependencies
+	for _, part := range strings.Split(lower, "/") {
+		if part == "vendor" || part == "node_modules" || part == "lib" {
+			return 0.3
+		}
+	}
+
+	// Database migrations — schema changes, not business logic
+	for _, part := range strings.Split(lower, "/") {
+		if part == "migrations" || part == "migration" {
+			return 0.4
+		}
+	}
+
+	// Test files
+	for _, part := range strings.Split(lower, "/") {
+		if part == "tests" || part == "test" || part == "__tests__" || part == "spec" {
+			return 0.5
+		}
+	}
+	// File-name patterns for tests
+	base := lower
+	if idx := strings.LastIndex(lower, "/"); idx >= 0 {
+		base = lower[idx+1:]
+	}
+	if strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.js") ||
+		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".spec.js") ||
+		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, "test.php") {
+		return 0.5
+	}
+	// CamelCase test convention (e.g., OrderControllerTest.php, FooTest.java)
+	if strings.Contains(base, "test.") || strings.Contains(base, "Test.") {
+		return 0.5
+	}
+
+	// Examples
+	for _, part := range strings.Split(lower, "/") {
+		if part == "examples" || part == "example" {
+			return 0.6
+		}
+	}
+
+	return 1.0
 }

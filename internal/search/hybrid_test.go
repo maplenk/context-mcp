@@ -537,46 +537,62 @@ func TestSearch_WhitespaceOnlyQuery(t *testing.T) {
 	t.Logf("Search('   ') returned %d results", len(results))
 }
 
-// ---- M7: Direct unit tests for isHelperFile and applyPerFileCap ----
+// ---- M7: Direct unit tests for pathPenalty and applyPerFileCap ----
 
-// TestIsHelperFile verifies that auto-generated and IDE helper files are correctly
-// identified, and regular source files are not misclassified.
-func TestIsHelperFile(t *testing.T) {
+// TestPathPenalty verifies that path-based scoring penalties are correctly
+// assigned for different file categories.
+func TestPathPenalty(t *testing.T) {
 	tests := []struct {
 		name     string
 		filePath string
-		want     bool
+		want     float64
 	}{
-		// Positive cases: should be classified as helper files
-		{"ide helper PHP", "_ide_helper.php", true},
-		{"ide helper models", "_ide_helper_models.php", true},
-		{"nested ide helper", "vendor/laravel/_ide_helper.php", true},
-		{"ide helper mixed case", "src/_IDE_Helper.php", true},
-		{"TypeScript declaration", "types/react.d.ts", true},
-		{"nested d.ts", "node_modules/@types/node/index.d.ts", true},
-		{"generated directory", "generated/models.go", true},
-		{"generated prefix with dot", "src/generated.pb.go", true},
-		{"generated prefix with underscore", "src/generated_types.go", true},
-		{"generated dir nested", "api/generated/client.ts", true},
+		// 0.3x: IDE helpers, generated, vendor
+		{"ide helper PHP", "_ide_helper.php", 0.3},
+		{"ide helper models", "_ide_helper_models.php", 0.3},
+		{"TypeScript declaration", "types/react.d.ts", 0.3},
+		{"generated directory", "generated/models.go", 0.3},
+		{"generated prefix dot", "src/generated.pb.go", 0.3},
+		{"vendor directory", "vendor/laravel/framework/src/Auth.php", 0.3},
+		{"node_modules", "node_modules/@types/node/index.js", 0.3},
+		{"lib directory", "lib/legacy/utils.js", 0.3},
 
-		// Negative cases: should NOT be classified as helper files
-		{"regular Go file", "main.go", false},
-		{"regular TypeScript", "app.ts", false},
-		{"regular PHP", "Controller.php", false},
-		{"file with generate in name", "UserGeneratedContent.php", false},
-		{"code generator", "codegenerator.go", false},
-		{"regenerate script", "regenerate.sh", false},
-		{"path with generated substring", "src/regenerated/foo.go", false},
-		{"empty path", "", false},
-		{"just a dot ts", "foo.ts", false},
-		{"d.tsx file", "component.d.tsx", false},
+		// 0.4x: migrations
+		{"database migrations", "database/migrations/2024_01_create_orders.php", 0.4},
+		{"migration directory", "migrations/001_init.sql", 0.4},
+
+		// 0.5x: test files
+		{"tests directory", "tests/Unit/OrderTest.php", 0.5},
+		{"test directory", "test/helpers/setup.js", 0.5},
+		{"__tests__ directory", "__tests__/Order.test.js", 0.5},
+		{"spec directory", "spec/models/order_spec.rb", 0.5},
+		{"_test.go suffix", "internal/search/hybrid_test.go", 0.5},
+		{".test.js suffix", "src/utils.test.js", 0.5},
+		{".spec.ts suffix", "src/api.spec.ts", 0.5},
+		{"Test.php suffix", "tests/OrderControllerTest.php", 0.5},
+
+		// 0.6x: examples
+		{"examples directory", "examples/basic/main.go", 0.6},
+		{"example directory", "example/quickstart.py", 0.6},
+
+		// 1.0x: regular source files
+		{"regular Go", "internal/search/hybrid.go", 1.0},
+		{"regular PHP", "app/Http/Controllers/OrderController.php", 1.0},
+		{"regular JS", "src/components/App.tsx", 1.0},
+		{"model file", "app/Order.php", 1.0},
+		{"service file", "app/Services/PaymentService.php", 1.0},
+		{"empty path", "", 1.0},
+
+		// Edge cases: should NOT misclassify
+		{"file with generate in name", "UserGeneratedContent.php", 1.0},
+		{"code generator", "codegenerator.go", 1.0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isHelperFile(tt.filePath)
+			got := pathPenalty(tt.filePath)
 			if got != tt.want {
-				t.Errorf("isHelperFile(%q) = %v, want %v", tt.filePath, got, tt.want)
+				t.Errorf("pathPenalty(%q) = %v, want %v", tt.filePath, got, tt.want)
 			}
 		})
 	}
@@ -875,4 +891,52 @@ func TestHybridSearch_ScoreBreakdown(t *testing.T) {
 	}
 	t.Logf("Top result %s breakdown: PPR=%.4f BM25=%.4f Betweenness=%.4f InDegree=%.4f Semantic=%.4f",
 		r.Node.SymbolName, bd.PPR, bd.BM25, bd.Betweenness, bd.InDegree, bd.Semantic)
+}
+
+// TestSearch_PathPenaltyAffectsRanking verifies that migration files rank lower
+// than regular source files when both match the same query.
+func TestSearch_PathPenaltyAffectsRanking(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a migration file and a regular source file, both matching "inventory"
+	nodes := []types.ASTNode{
+		{
+			ID:         types.GenerateNodeID("database/migrations/create_inventory.php", "CreateInventoryTable"),
+			FilePath:   "database/migrations/create_inventory.php",
+			SymbolName: "CreateInventoryTable",
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  0,
+			EndByte:    200,
+			ContentSum: "CreateInventoryTable migration creates the inventory stock table",
+		},
+		{
+			ID:         types.GenerateNodeID("app/Inventory.php", "stockTransaction"),
+			FilePath:   "app/Inventory.php",
+			SymbolName: "stockTransaction",
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  0,
+			EndByte:    300,
+			ContentSum: "stockTransaction handles inventory stock movement and ledger updates",
+		},
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	embedder := embedding.NewHashEmbedder()
+	g := graph.New()
+	hs := New(s, embedder, g)
+
+	results, err := hs.Search("inventory stock", 10, nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+
+	// The regular source file should rank higher than the migration
+	if results[0].Node.FilePath != "app/Inventory.php" {
+		t.Errorf("expected app/Inventory.php to rank #1 (path penalty on migration), got %s", results[0].Node.FilePath)
+	}
 }
