@@ -221,8 +221,9 @@ func GenerateNodeID(filePath, symbolName string) string {
 
 // SearchResult represents a ranked result from hybrid search
 type SearchResult struct {
-	Node  ASTNode `json:"node"`
-	Score float64 `json:"score"`
+	Node      ASTNode        `json:"node"`
+	Score     float64        `json:"score"`
+	Breakdown ScoreBreakdown `json:"breakdown,omitempty"`
 }
 
 // RiskLevel represents the severity of impact from a change
@@ -253,4 +254,35 @@ type ProjectSummary struct {
 	Project    string `json:"project"`
 	Summary    string `json:"summary"`
 	SourceHash string `json:"source_hash"`
+}
+
+// ScoreBreakdown holds the per-signal normalized scores that compose the final composite score.
+type ScoreBreakdown struct {
+	PPR         float64 `json:"ppr"`
+	BM25        float64 `json:"bm25"`
+	Betweenness float64 `json:"betweenness"`
+	InDegree    float64 `json:"in_degree"`
+	Semantic    float64 `json:"semantic"`
+}
+
+// Inspectable is a ranked discovery result returned by all discovery tools.
+type Inspectable struct {
+	Rank       int               `json:"rank"`
+	TargetType string            `json:"target_type"`
+	Name       string            `json:"name"`
+	FilePath   string            `json:"file_path"`
+	ID         string            `json:"id,omitempty"`
+	Score      float64           `json:"score"`
+	Reason     string            `json:"reason"`
+	WhyNow     string            `json:"why_now,omitempty"`
+	NextTool   string            `json:"next_tool"`
+	NextArgs   map[string]string `json:"next_args,omitempty"`
+}
+
+// InspectableResponse wraps discovery tool output with metadata.
+type InspectableResponse struct {
+	Inspectables []Inspectable `json:"inspectables"`
+	Total        int           `json:"total"`
+	Query        string        `json:"query,omitempty"`
+	Summary      string        `json:"summary"`
 }
