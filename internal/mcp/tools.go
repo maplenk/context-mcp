@@ -19,6 +19,7 @@ import (
 	"github.com/naman/qb-context/internal/graph"
 	"github.com/naman/qb-context/internal/search"
 	"github.com/naman/qb-context/internal/storage"
+	"github.com/naman/qb-context/internal/types"
 )
 
 // Version is the package-level version string, referenced by server.go.
@@ -36,7 +37,7 @@ type ToolDeps struct {
 // Tags provide JSON schema metadata for the MCP SDK.
 type ContextParams struct {
 	Query       string   `json:"query" jsonschema:"description=Natural language or keyword query to search for relevant code"`
-	Limit       int      `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 10)"`
+	Limit       int      `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 5)"`
 	Mode        string   `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
 	MaxPerFile  int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 3)"`
 	ActiveFiles []string `json:"active_files,omitempty" jsonschema:"description=File paths the developer is currently editing for PPR personalization"`
@@ -141,9 +142,9 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		return nil, fmt.Errorf("query is required (use mode='architecture' for community detection)")
 	}
 	if p.Limit == 0 {
-		p.Limit = 10
+		p.Limit = 5
 	}
-	// Architecture mode: return community detection results + ADR context
+	// Architecture mode: return community detection results (backward compat, undocumented)
 	if p.Mode == "architecture" {
 		if deps.Graph == nil {
 			return nil, fmt.Errorf("graph engine not initialized")
@@ -155,7 +156,6 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 			"modularity":  modularity,
 			"count":       len(communities),
 		}
-		// Include ADR documents in architecture mode
 		summaries, _ := deps.Store.GetAllProjectSummaries()
 		if len(summaries) > 0 {
 			var adrTexts []string
@@ -182,22 +182,8 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
-	// Cold Start: build git context if available
-	type gitContextInfo struct {
-		RepoSnapshot string            `json:"repo_snapshot,omitempty"`
-		FileIntents  map[string]string `json:"file_intents,omitempty"`
-	}
-	var gitContext *gitContextInfo
-
-	// Get repo snapshot
-	snap, snapErr := deps.Store.GetRepoSnapshot(deps.RepoRoot)
-	if snapErr == nil && snap != nil {
-		gitContext = &gitContextInfo{
-			RepoSnapshot: snap.Summary,
-		}
-	}
-
-	// Get file intents for result files
+	// Collect file intents for why_now
+	fileIntents := make(map[string]string)
 	if len(results) > 0 {
 		filePaths := make([]string, 0)
 		seen := make(map[string]bool)
@@ -208,40 +194,92 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 			}
 		}
 		intents, intentErr := deps.Store.GetFileIntentsByPaths(filePaths)
-		if intentErr == nil && len(intents) > 0 {
-			if gitContext == nil {
-				gitContext = &gitContextInfo{}
-			}
-			gitContext.FileIntents = make(map[string]string)
+		if intentErr == nil {
 			for path, fi := range intents {
-				gitContext.FileIntents[path] = fi.IntentText
+				fileIntents[path] = fi.IntentText
 			}
 		}
 	}
 
-	// Build response
-	response := make(map[string]interface{})
-	response["results"] = results
+	// Convert to Inspectables
+	inspectables := make([]types.Inspectable, 0, len(results))
+	for i, r := range results {
+		targetType := r.Node.NodeType.String()
 
-	// Load architecture context if available
-	summaries, _ := deps.Store.GetAllProjectSummaries()
-	if len(summaries) > 0 {
-		var adrTexts []string
-		for _, s := range summaries {
-			adrTexts = append(adrTexts, fmt.Sprintf("[%s] %s", s.Project, s.Summary))
+		// Determine next tool based on node type
+		nextTool := "read_symbol"
+		if r.Node.NodeType == types.NodeTypeStruct || r.Node.NodeType == types.NodeTypeClass || r.Node.NodeType == types.NodeTypeInterface {
+			nextTool = "understand"
 		}
-		response["architecture_context"] = strings.Join(adrTexts, "\n\n")
+
+		// Build next_args using ID (durable hash) with name as fallback
+		symbolRef := r.Node.ID
+		if symbolRef == "" {
+			symbolRef = r.Node.SymbolName
+		}
+		nextArgs := map[string]string{"symbol_id": symbolRef}
+
+		item := types.Inspectable{
+			Rank:       i + 1,
+			TargetType: targetType,
+			Name:       r.Node.SymbolName,
+			FilePath:   r.Node.FilePath,
+			ID:         r.Node.ID,
+			Score:      r.Score,
+			Reason:     generateReason(r.Breakdown),
+			NextTool:   nextTool,
+			NextArgs:   nextArgs,
+		}
+
+		// Attach why_now from file intents
+		if intent, ok := fileIntents[r.Node.FilePath]; ok {
+			item.WhyNow = intent
+		}
+
+		inspectables = append(inspectables, item)
 	}
 
-	if gitContext != nil {
-		response["git_context"] = gitContext
-	}
+	summary := fmt.Sprintf("%d results for %q", len(inspectables), p.Query)
 
-	return response, nil
+	return types.InspectableResponse{
+		Inspectables: inspectables,
+		Total:        len(inspectables),
+		Query:        p.Query,
+		Summary:      summary,
+	}, nil
+}
+
+// generateReason produces a human-readable explanation from a ScoreBreakdown.
+func generateReason(b types.ScoreBreakdown) string {
+	type signal struct {
+		name  string
+		value float64
+	}
+	signals := []signal{
+		{"PageRank", b.PPR},
+		{"Lexical match", b.BM25},
+		{"Betweenness (bottleneck)", b.Betweenness},
+		{"In-degree (popular)", b.InDegree},
+		{"Semantic similarity", b.Semantic},
+	}
+	sort.Slice(signals, func(i, j int) bool {
+		return signals[i].value > signals[j].value
+	})
+	// Pick top 2 non-zero signals
+	var parts []string
+	for _, s := range signals {
+		if s.value > 0.01 && len(parts) < 2 {
+			parts = append(parts, s.name)
+		}
+	}
+	if len(parts) == 0 {
+		return "Composite match"
+	}
+	return strings.Join(parts, " + ")
 }
 
 func registerContextTool(s *Server, deps ToolDeps) {
-	desc := "Discovers relevant code symbols using hybrid lexical + semantic search. Returns ranked summaries of functions, classes, and structs matching the query."
+	desc := "Ranked code discovery. Returns the top 5 symbols most relevant to your query with scores, reasons, and next-step tool recommendations. Start here for any code search or exploration."
 
 	// CLI handler (json.RawMessage)
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -264,8 +302,8 @@ func registerContextTool(s *Server, deps ToolDeps) {
 				},
 				"limit": map[string]interface{}{
 					"type":        "integer",
-					"description": "Maximum number of results to return (default: 10)",
-					"default":     10,
+					"description": "Maximum number of results to return (default: 5)",
+					"default":     5,
 				},
 				"mode": map[string]interface{}{
 					"type":        "string",

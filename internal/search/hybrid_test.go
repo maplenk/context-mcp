@@ -834,3 +834,42 @@ func TestBuildFTSQuery_AllStopWords(t *testing.T) {
 		t.Fatal("buildFTSQuery returned empty string for single stop word")
 	}
 }
+
+// TestHybridSearch_ScoreBreakdown verifies that search results contain populated ScoreBreakdown fields.
+func TestHybridSearch_ScoreBreakdown(t *testing.T) {
+	s := newTestStore(t)
+	insertTestNodes(t, s)
+
+	embedder := embedding.NewHashEmbedder()
+	// Upsert embeddings for semantic signal
+	nodes := insertTestNodes(t, s) // re-insert is idempotent via upsert
+	for _, n := range nodes {
+		vec, err := embedder.Embed(n.SymbolName + " " + n.ContentSum)
+		if err != nil {
+			t.Fatalf("Embed(%s): %v", n.SymbolName, err)
+		}
+		if err := s.UpsertEmbedding(n.ID, vec); err != nil {
+			t.Fatalf("UpsertEmbedding(%s): %v", n.SymbolName, err)
+		}
+	}
+
+	g := graph.New()
+	hs := New(s, embedder, g)
+
+	results, err := hs.Search("checksum", 10, nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result for 'checksum'")
+	}
+
+	r := results[0]
+	bd := r.Breakdown
+	hasNonZero := bd.PPR > 0 || bd.BM25 > 0 || bd.Betweenness > 0 || bd.InDegree > 0 || bd.Semantic > 0
+	if !hasNonZero {
+		t.Errorf("expected at least one non-zero field in ScoreBreakdown, got %+v", bd)
+	}
+	t.Logf("Top result %s breakdown: PPR=%.4f BM25=%.4f Betweenness=%.4f InDegree=%.4f Semantic=%.4f",
+		r.Node.SymbolName, bd.PPR, bd.BM25, bd.Betweenness, bd.InDegree, bd.Semantic)
+}

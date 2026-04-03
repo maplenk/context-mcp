@@ -253,6 +253,13 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		results = append(results, types.SearchResult{
 			Node:  node,
 			Score: composite,
+			Breakdown: types.ScoreBreakdown{
+				PPR:         ppr,
+				BM25:        bm25,
+				Betweenness: betweenness,
+				InDegree:    inDegree,
+				Semantic:    semantic,
+			},
 		})
 	}
 

@@ -927,6 +927,76 @@ func TestContextHandler_SearchMode(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
+
+	// Verify the result is an InspectableResponse
+	resp, ok := result.(types.InspectableResponse)
+	if !ok {
+		t.Fatalf("expected types.InspectableResponse, got %T", result)
+	}
+	if resp.Query != "processOrder" {
+		t.Errorf("expected Query='processOrder', got %q", resp.Query)
+	}
+	if len(resp.Inspectables) == 0 {
+		t.Fatal("expected at least one inspectable result")
+	}
+}
+
+func TestContext_InspectableResponse(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("context")
+	if !ok {
+		t.Fatal("context handler not registered")
+	}
+
+	params, _ := json.Marshal(ContextParams{Query: "processOrder", Limit: 5})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("context error: %v", err)
+	}
+
+	resp, ok := result.(types.InspectableResponse)
+	if !ok {
+		t.Fatalf("expected types.InspectableResponse, got %T", result)
+	}
+
+	if len(resp.Inspectables) == 0 {
+		t.Fatal("expected at least one inspectable")
+	}
+
+	for i, item := range resp.Inspectables {
+		if item.Rank != i+1 {
+			t.Errorf("inspectable[%d]: expected Rank=%d, got %d", i, i+1, item.Rank)
+		}
+		if item.Name == "" {
+			t.Errorf("inspectable[%d]: Name is empty", i)
+		}
+		if item.NextTool == "" {
+			t.Errorf("inspectable[%d]: NextTool is empty", i)
+		}
+		if item.NextTool != "read_symbol" && item.NextTool != "understand" {
+			t.Errorf("inspectable[%d]: unexpected NextTool=%q", i, item.NextTool)
+		}
+		if item.NextArgs == nil {
+			t.Errorf("inspectable[%d]: NextArgs is nil", i)
+		} else if item.NextArgs["symbol_id"] == "" {
+			t.Errorf("inspectable[%d]: NextArgs missing symbol_id", i)
+		}
+		if item.Reason == "" {
+			t.Errorf("inspectable[%d]: Reason is empty", i)
+		}
+	}
+
+	if resp.Total != len(resp.Inspectables) {
+		t.Errorf("expected Total=%d, got %d", len(resp.Inspectables), resp.Total)
+	}
+	if resp.Summary == "" {
+		t.Error("expected non-empty Summary")
+	}
 }
 
 func TestContextHandler_ArchitectureMode(t *testing.T) {
