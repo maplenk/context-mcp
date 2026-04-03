@@ -270,7 +270,7 @@ func (w *Watcher) isExcluded(path string) bool {
 func isWatchableFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".go", ".js", ".jsx", ".ts", ".tsx", ".php":
+	case ".go", ".js", ".jsx", ".ts", ".tsx", ".php", ".sql":
 		return true
 	default:
 		return false
@@ -721,4 +721,64 @@ func WalkSourceFilesUnder(repoRoot string, walkDir string, excludedDirs []string
 		return nil
 	})
 	return files, walkErr
+}
+
+// WalkAllFiles walks the repository and returns relative paths of ALL files,
+// respecting excluded dirs and .gitignore rules, but NOT filtering by extension.
+// This is used by the file document indexer to find config, Blade, and SQL files
+// that are not covered by tree-sitter parsing.
+func WalkAllFiles(repoRoot string, excludedDirs []string) ([]string, error) {
+	excluded := make(map[string]bool)
+	for _, d := range excludedDirs {
+		excluded[d] = true
+	}
+
+	// Parse root .gitignore
+	var gitignores []gitignoreEntry
+	gitignorePath := filepath.Join(repoRoot, ".gitignore")
+	if _, err := os.Stat(gitignorePath); err == nil {
+		gi, err := ignore.CompileIgnoreFile(gitignorePath)
+		if err == nil {
+			gitignores = append(gitignores, gitignoreEntry{matcher: gi, baseDir: "."})
+		}
+	}
+
+	// M78: Use shared exclusion logic
+	isExcluded := func(path string) bool {
+		return checkExcluded(path, repoRoot, excluded, gitignores)
+	}
+
+	var files []string
+	err := symlinkWalk(repoRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if isExcluded(path) {
+				return filepath.SkipDir
+			}
+			// Discover nested .gitignore files (only in non-excluded dirs)
+			nestedGI := filepath.Join(path, ".gitignore")
+			if _, statErr := os.Stat(nestedGI); statErr == nil {
+				rel, relErr := filepath.Rel(repoRoot, path)
+				if relErr == nil {
+					gi, parseErr := ignore.CompileIgnoreFile(nestedGI)
+					if parseErr == nil {
+						gitignores = append(gitignores, gitignoreEntry{matcher: gi, baseDir: rel})
+					}
+				}
+			}
+			return nil
+		}
+		if isExcluded(path) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(repoRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		files = append(files, rel)
+		return nil
+	})
+	return files, err
 }
