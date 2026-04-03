@@ -503,6 +503,111 @@ python3 benchmarks/dashboard.py benchmarks/results/*.json
 
 ---
 
+### Cross-Engine Comparison: qb-context vs codebase-memory-mcp
+
+Head-to-head benchmark of **qb-context v0.9.0** vs **codebase-memory-mcp v0.8.0**
+(CLI mode), both run against the canonical qbapi target.
+
+#### Index Comparison
+
+| Dimension           | qb-context      | CBM              | Notes      |
+|---------------------|-----------------|------------------|------------|
+| Nodes indexed       | 12,653          | 16,806           | CBM +33%   |
+| Edges indexed       | 16,294          | 35,189           | CBM +116%  |
+| Parser technology   | regex           | tree-sitter      |            |
+| Languages supported | 6               | 66               |            |
+
+#### Query Latency (lower = better)
+
+| ID | Query                      | qb-context | CBM       | Speedup       | Winner     |
+|----|----------------------------|-----------|-----------|---------------|------------|
+| A1 | Symbol lookup              | **279µs** | 32.4ms    | **116× faster** | qb-context |
+| A3 | Regex code search          | **77ms**  | 119.5ms   | **2× faster**  | qb-context |
+| B1 | Payment concept            | **5.7ms** | 104.9ms   | **18× faster** | qb-context |
+| B6 | Omnichannel concept        | **1.2ms** | 104.1ms   | **87× faster** | qb-context |
+| C1 | Order flow (cross-file)    | **3.0ms** | 20.4ms    | **7× faster**  | qb-context |
+| C5 | API→DB flow               | **2.2ms** | 120.3ms   | **55× faster** | qb-context |
+
+**Scoreboard: qb-context 6 — 0 CBM**
+
+#### Query Result Quality
+
+**A1 — Symbol Lookup**
+- qb-context (`read_symbol`): Returns full source code (14,373 chars) for
+  `FiscalYearController` class at `app/Http/Controllers/FiscalYearController.php`
+- CBM (`search_graph`): Returns metadata only — name, file path, pagerank=0.000049
+
+**A3 — Regex Code Search**
+- qb-context (`search_code`): 10 matches across `Agriculture.php`,
+  `OrderController.php`, `OrderDeletionController.php`, `v2/OrderController.php`
+- CBM (`search_graph`): 473 name-pattern matches — `recordPaymentIntent`,
+  `getPaymentModes`, `generatePryagrajPaymentHash` (different query: `.*payment.*`)
+
+**B1 — Payment Concept**
+- qb-context (`context` PPR+BM25): 10 results, top_score=0.617 — ranks by
+  relevance: `BillingWeb.generateUTAPToken`, `partner.payment`, `partnerController.payment`
+- CBM (`search_graph`): 473 total (name match only) — no semantic ranking,
+  returns all symbols matching `.*[Pp]ayment.*`
+
+**B6 — Omnichannel Concept**
+- qb-context (`context` PPR+BM25): 10 results, top_score=0.531 —
+  `integrationBilling.handle`, `SyncInventoryJob`, `Admin.syncBrevoWebsiteContact`
+- CBM (`search_graph`): Name-pattern match only — cannot understand
+  "omnichannel integration sync logic" as a concept
+
+**C1 — Order Flow (Cross-file)**
+- qb-context (`context` PPR+BM25): 15 results spanning multiple files,
+  ranked by structural + semantic relevance
+- CBM (`trace_call_path`): 5 callers of `store()` — `ZohoOrder.handle`,
+  `AutoMailer.sendCustomChainWiseSalesSummary`. 0 callees.
+
+**C5 — API→DB Flow**
+- qb-context (`context` PPR+BM25): 15 results including migration tables
+  and API trackers — understands the "API request to database write" concept
+- CBM (`search_graph`): Name-pattern match `.*[Ii]nventory.*` — cannot
+  interpret "API→DB flow" semantically
+
+#### CBM-Only Tools (no qb-context equivalent)
+
+| Tool                 | Latency   | Description                              |
+|----------------------|-----------|------------------------------------------|
+| `get_architecture`   | 25.5ms   | Project overview with routes and clusters |
+| `explore`            | 416.2ms  | Area exploration with dependencies        |
+| `understand`         | 375.4ms  | Symbol deep-dive with callers/callees     |
+| `get_impact_analysis`| 15.6ms   | Blast radius with risk scoring            |
+| `get_key_symbols`    | 24.9ms   | Top-K symbols by PageRank                 |
+
+#### Key Takeaways
+
+1. **qb-context wins all 6 comparable queries** — 2× to 116× faster
+2. **Semantic understanding is the differentiator**: qb-context's PPR+BM25 hybrid
+   search understands natural language concepts ("omnichannel integration sync logic"),
+   while CBM relies on regex name-pattern matching
+3. **CBM extracts richer structure** — 33% more nodes and 116% more edges via
+   tree-sitter (66 langs vs 6)
+4. **CBM CLI adds ~15ms process startup overhead** per invocation (subprocess spawn)
+5. **CBM offers compound tools** (`explore`, `understand`, `prepare_change`) that
+   qb-context does not yet have
+6. **Score relevance**: qb-context returns ranked scores (0.13–0.62), CBM returns
+   binary (match/no-match) or PageRank values
+
+#### Reproduce
+
+```bash
+# Run qb-context benchmarks
+go test -tags "fts5,realrepo" -v -run "TestBenchmarkQueries" ./tests/ -count=1
+
+# Run CBM benchmarks (requires codebase-memory-mcp installed)
+codebase-memory-mcp cli search_graph \
+  '{"name_pattern":"FiscalYearController","label":"Class","project":"Users-naman-Documents-QBApps-qbapi"}'
+
+# Result files
+# qb-context: benchmarks/results/v0.9.0-e1a93bc-qbapi.json
+# CBM:        benchmarks/results/cbm-v0.8.0-qbapi.json
+```
+
+---
+
 ## Result JSON Schema
 
 All results are stored as JSON in `results/`. Two formats are supported (dashboard.py
