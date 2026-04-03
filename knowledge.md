@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-04-02 (post-Phase 9 — Cold Start Enhancement: Git-derived intent metadata via go-git, schema migration v3, embedding enrichment, MCP tool git_context, DA review #11).
+> Living document for team reference. Last updated: 2026-04-03 (post-Phase 11 — Security workflow hardening: enforced findings, scheduled scans, module verification, guarded SARIF uploads, DA review #13).
 
 ---
 
@@ -66,7 +66,10 @@ qb-context/
 - `ASTNode`: ID (SHA-256 of path + null byte + symbol), FilePath, SymbolName, NodeType, StartByte, EndByte, ContentSum
 - `ASTEdge`: SourceID, TargetID, EdgeType, TargetSymbol (optional — raw symbol name for cross-file resolution)
 - `FileEvent`: Path, Action (Created/Modified/Deleted)
-- `SearchResult`: Node, Score
+- `SearchResult`: Node, Score, Breakdown (*ScoreBreakdown, omitempty)
+- `ScoreBreakdown`: PPR, BM25, Betweenness, InDegree, Semantic (per-signal normalized scores)
+- `Inspectable`: Rank, TargetType, Name, FilePath, ID, Score, Reason, WhyNow, NextTool, NextArgs (ranked discovery result)
+- `InspectableResponse`: Inspectables, Total, Query, Summary (wraps discovery tool output)
 - `RiskLevel` string: CRITICAL, HIGH, MEDIUM, LOW (hop-based impact classification)
 - `NodeScore`: NodeID, PageRank, Betweenness (precomputed graph metrics)
 - `Community`: ID, NodeIDs (Louvain cluster membership)
@@ -384,6 +387,38 @@ qb-context/
 - Config flags: `--cold-start`, `--git-history-depth`, `--git-per-file-cap`, `--git-max-message`, `--git-max-intent`
 - DA review #11: 0 CRITICAL, 4 HIGH (all fixed), 8 MEDIUM (7 fixed), 8 LOW
 
+### Phase 10: Harness-First MCP Phase 1 (Commits 44-46)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 44 | `5a355de` | Inspectable contract + ScoreBreakdown + context handler refactor | Opus (worktree) | Done |
+| 45 | `356b010` | Architecture summary handler refactor — ranked top-5, drop member lists | Opus (worktree) | Done |
+| 46 | `0be1a8f` | Fix 3 HIGH + 2 MEDIUM DA review issues | Opus (worktree) | Done |
+
+**Key changes:**
+- New types: `ScoreBreakdown`, `Inspectable`, `InspectableResponse` — shared contract for all discovery tools
+- `SearchResult.Breakdown` (*ScoreBreakdown): per-signal scores (PPR, BM25, Betweenness, InDegree, Semantic) populated in hybrid search loop
+- `contextHandler` refactored: returns `InspectableResponse` (default limit 5), per-result `why_now` from file intents, `reason` from top-2 score signals, `next_tool`/`next_args` for tool chaining, removed `architecture_context` blob and raw `git_context`
+- `architectureSummaryHandler` refactored: pools entry points/hubs/connectors, ranks by composite (0.4*normalized_pagerank + 0.3*betweenness + 0.3*normalized_degree), returns `InspectableResponse` top 5 — drops full community member lists (5-100KB → <3KB)
+- `generateReason()` helper: picks top 2 non-zero score signals for human-readable explanation
+- DA review #12: 0 CRITICAL, 3 HIGH (all fixed: rank gap, omitempty struct, unnormalized PageRank), 4 MEDIUM (2 fixed: Total mismatch, file-node routing), 5 LOW
+- Benchmarks: all 26 queries pass, search quality 7/7, CLI tools 9/9
+
+### Phase 11: Security Workflow Hardening (working tree)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 47 | `working tree` | Harden `.github/workflows/security.yml` to act as an enforcing security gate instead of report-only CI | Opus agents + orchestrator | Done |
+
+**Key changes:**
+- `security.yml` now runs on weekly schedule (`0 6 * * 1`) in addition to push/PR/manual dispatch to catch newly disclosed dependency CVEs without a code change
+- `govulncheck` and `gosec` installs are pinned (`v1.1.4`, `v2.22.11`) and findings now fail the workflow instead of being swallowed by `@latest` drift or `|| true`
+- Go jobs use `persist-credentials: false` on checkout plus `go mod download && go mod verify` so module verification is meaningful on isolated cold runners
+- Trivy table output now fails on HIGH/CRITICAL findings, while the SARIF run remains non-blocking so results still reach the GitHub Security tab
+- `aquasecurity/trivy-action` is SHA-pinned and `github/codeql-action/upload-sarif` is pinned to `38697555549f1db7851b81482ff19f1fa5c4fedc # v4` using the reusable pattern from the C project workflows
+- SARIF uploads are guarded for fork PR permission downgrades and missing output files via `hashFiles(...)` checks, so upload steps do not mask the real scanner failure reason
+- DA review #13: no CRITICAL, HIGH, or MEDIUM issues remaining in the final workflow
+
 ### Test Coverage (13 packages, all passing — 268+ unit tests + 22 real-repo subtests)
 - `internal/types` — 12 tests (ID generation, enum values, null byte separator collision, hex format validation)
 - `internal/gitmeta` — 21 tests (non-git graceful degradation, normal/detached/dirty snapshots, commit history with depth caps, file history with per-file caps and path filtering, intent compaction with dedup/low-signal filtering/truncation, helpers)
@@ -391,8 +426,8 @@ qb-context/
 - `internal/parser` — 15 tests (Go/JS/TS/PHP parsing, edge extraction, import edges, class methods, findBlockEnd states, docblocks, indented PHP classes, file-level nodes, cross-file edges)
 - `internal/embedding` — 36 tests (hash embedder, TFIDF embedder, semantic locality, CamelCase similarity, tokenization, serialization, BPE tokenizer load/encode/roundtrip/unknown tokens, ONNX embedder basic/similarity/invalidDim/OS-portable)
 - `internal/graph` — 42 tests (BFS, cycles, depth limits, true PPR, PPR personalization bias, DAG, betweenness theoretical normalization, blast radius depth/multi-edge, communities, in-degree caching/copy, search signals, change counter, trace call path, graph connectivity)
-- `internal/search` — 25 tests (composite scoring, per-file cap, custom max_per_file, CamelCase, stop words, FTS sanitization, limits, concurrent SetStopWords, boolean operator neutralization)
-- `internal/mcp` — 40 tests (CLI handlers, SDK protocol, initialize, tools/list, tools/call, all 13 tools, concurrent registration, data race fix, 5 core blueprint tool handler tests)
+- `internal/search` — 26 tests (composite scoring, per-file cap, custom max_per_file, CamelCase, stop words, FTS sanitization, limits, concurrent SetStopWords, boolean operator neutralization, ScoreBreakdown population)
+- `internal/mcp` — 42 tests (CLI handlers, SDK protocol, initialize, tools/list, tools/call, all 13 tools, concurrent registration, data race fix, 5 core blueprint tool handler tests, InspectableResponse context test, architecture summary inspectable test)
 - `internal/adr` — 20 tests (discover files, ADR directory, empty repo, max chars truncation, symlink boundary validation)
 - `internal/watcher` — 11 tests (create/modify/delete events, debounce, gitignore, excluded dirs, stop safety, walk existing, subdirectory events)
 - `tests/integration_test.go` — full pipeline (parse → store → embed → graph → search → delete → graph connectivity assertion)

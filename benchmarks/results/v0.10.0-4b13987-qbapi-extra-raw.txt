@@ -1,0 +1,150 @@
+=== RUN   TestExtraBenchmarkQueries
+=== RUN   TestExtraBenchmarkQueries/A2_Exact_read_symbol
+    extra_bench_test.go:46: Query A2 [Exact] tool=read_symbol elapsed=2.91975ms
+    extra_bench_test.go:93:   source: class OrderController extends Controller
+        {
+        
+            
+            // Middleware to authenticate 
+            public funct... (268179 chars)
+    extra_bench_test.go:98:   start_byte: 3230
+    extra_bench_test.go:95:   symbol_name: OrderController
+    extra_bench_test.go:98:   end_byte: 271409
+    extra_bench_test.go:95:   file_path: app/Http/Controllers/OrderController.php
+    extra_bench_test.go:95:   node_type: class
+=== RUN   TestExtraBenchmarkQueries/A4_Exact_search_code
+    extra_bench_test.go:46: Query A4 [Exact] tool=search_code elapsed=14.258875ms
+    extra_bench_test.go:73: Matches: 15
+    extra_bench_test.go:82:   [0] file=app/AUMMunicipal.php line=56 content=if($dataArray['paymentMode'] == 'CHEQUE'){
+    extra_bench_test.go:82:   [1] file=app/AUMMunicipal.php line=81 content=$postData['paymentMode'] = Municipal::AUMTenderType(strtolower($dataArray['paymentMode']));
+    extra_bench_test.go:82:   [2] file=app/AUMMunicipal.php line=135 content=$status['message'] = "error in payment update  ".$data['reason'];
+    extra_bench_test.go:82:   [3] file=app/Account.php line=78 content=public static function paymentAccountIDMapping($restId, $accountId)
+    extra_bench_test.go:82:   [4] file=app/Account.php line=81 content=$paymentAccountMappingTable = Constants::getGlobalTableName("globalPaymentAccountMapping");
+    extra_bench_test.go:82:   [5] file=app/Account.php line=88 content=$temp = convertToArray(DB::table($paymentAccountMappingTable)->where('accountTypeValueID', $res)->get());
+    extra_bench_test.go:82:   [6] file=app/Account.php line=89 content=$res  = $temp[0]["paymentTypeValueID"];
+    extra_bench_test.go:82:   [7] file=app/Account.php line=109 content=// Check if accounts information in the payments section is valid
+    extra_bench_test.go:82:   [8] file=app/Account.php line=110 content=public static function paymentsCheck($restId, $dataArray)
+    extra_bench_test.go:82:   [9] file=app/Account.php line=113 content=for ($j = 0; $j < count($dataArray["payments"]); $j++) {
+    extra_bench_test.go:82:   [10] file=app/Account.php line=115 content=if (isset($dataArray["payments"][$j])) {
+    extra_bench_test.go:82:   [11] file=app/Account.php line=116 content=if (isset($dataArray["payments"][$j]["accountId"]) && isset($dataArray["payments"][$j]["accountName"]) && isset($dataArr
+    extra_bench_test.go:82:   [12] file=app/Account.php line=117 content=$temp2 = self::accountsCheck($restId, $dataArray["payments"][$j]["accountId"], $dataArray["payments"][$j]["accountName"]
+    extra_bench_test.go:82:   [13] file=app/Account.php line=397 content=// Returns payment related information
+    extra_bench_test.go:82:   [14] file=app/Account.php line=425 content=if (isset($orderArray["paymentList"])) {
+=== RUN   TestExtraBenchmarkQueries/B2_Concept_context
+    extra_bench_test.go:46: Query B2 [Concept] tool=context elapsed=7.648667ms
+    extra_bench_test.go:57: Results: 10 inspectables
+    extra_bench_test.go:64:   [0] name=app/Http/Middleware/Authenticate.php type=file file=app/Http/Middleware/Authenticate.php score=0.5835
+    extra_bench_test.go:64:   [1] name=Authenticate.__construct type=method file=app/Http/Middleware/Authenticate.php score=0.5091
+    extra_bench_test.go:64:   [2] name=Session type=class file=_ide_helper.php score=0.1389
+    extra_bench_test.go:64:   [3] name=AirportController.__construct type=method file=app/Http/Controllers/AirportController.php score=0.1000
+    extra_bench_test.go:64:   [4] name=UTAPController.__construct type=method file=app/Http/Controllers/UTAPController.php score=0.1000
+    extra_bench_test.go:64:   [5] name=RecipeController.__construct type=method file=app/Http/Controllers/RecipeController.php score=0.1000
+    extra_bench_test.go:64:   [6] name=ScriptController.__construct type=method file=app/Http/Controllers/ScriptController.php score=0.1000
+    extra_bench_test.go:64:   [7] name=WeraWebhookController.__construct type=method file=app/Http/Controllers/WeraWebhookController.php score=0.1000
+    extra_bench_test.go:64:   [8] name=accountingController.__construct type=method file=app/Http/Controllers/accountingController.php score=0.1000
+    extra_bench_test.go:64:   [9] name=FlightApp.__construct type=method file=app/Http/Controllers/FlightApp.php score=0.1000
+=== RUN   TestExtraBenchmarkQueries/B3_Concept_context
+    extra_bench_test.go:46: Query B3 [Concept] tool=context elapsed=1.505417ms
+    extra_bench_test.go:57: Results: 10 inspectables
+    extra_bench_test.go:64:   [0] name=RewardsEngine.calculateProgramRewards type=method file=app/RewardsEngine.php score=0.6127
+    extra_bench_test.go:64:   [1] name=RewardsController.getRewardPrograms type=method file=app/Http/Controllers/v2/RewardsController.php score=0.6125
+    extra_bench_test.go:64:   [2] name=RewardsController.getRewardProgramDetails type=method file=app/Http/Controllers/v2/RewardsController.php score=0.6064
+    extra_bench_test.go:64:   [3] name=RewardsController.createRewardProgram type=method file=app/Http/Controllers/v2/RewardsController.php score=0.6064
+    extra_bench_test.go:64:   [4] name=RewardsEngine.getActiveRewardPrograms type=method file=app/RewardsEngine.php score=0.6024
+    extra_bench_test.go:64:   [5] name=RewardsEngine.checkProgramEligibility type=method file=app/RewardsEngine.php score=0.5933
+    extra_bench_test.go:64:   [6] name=JobDispatcher.dispatchLoyaltyPointJob type=method file=app/Services/JobDispatcher.php score=0.5266
+    extra_bench_test.go:64:   [7] name=EasyRewardz.getCustomerAvailablePoints type=method file=app/EasyRewardz.php score=0.5241
+    extra_bench_test.go:64:   [8] name=JobDispatcher.dispatchQBLoyaltyJob type=method file=app/Services/JobDispatcher.php score=0.1782
+    extra_bench_test.go:64:   [9] name=loyaltyPointAdjustmentJob.__construct type=method file=app/Jobs/loyaltyPointAdjustmentJob.php score=0.1510
+=== RUN   TestExtraBenchmarkQueries/B4_Concept_context
+    extra_bench_test.go:46: Query B4 [Concept] tool=context elapsed=2.164209ms
+    extra_bench_test.go:57: Results: 10 inspectables
+    extra_bench_test.go:64:   [0] name=ManageCacheDependencies.seedDependencies type=method file=app/Console/Commands/ManageCacheDependencies.php score=0.6538
+    extra_bench_test.go:64:   [1] name=database/migrations/2026_03_30_125428_chargehsn.php type=file file=database/migrations/2026_03_30_125428_chargehsn.php score=0.6000
+    extra_bench_test.go:64:   [2] name=database/migrations/2026_02_26_155435_servicecharge.php type=file file=database/migrations/2026_02_26_155435_servicecharge.php score=0.6000
+    extra_bench_test.go:64:   [3] name=database/migrations/2026_03_11_115734_membershipid.php type=file file=database/migrations/2026_03_11_115734_membershipid.php score=0.6000
+    extra_bench_test.go:64:   [4] name=database/migrations/2025_09_26_152051_addCostPriceIncustomPriceListDetail.php type=file file=database/migrations/2025_09_26_152051_addCostPriceIncustomPriceListDetail.php score=0.6000
+    extra_bench_test.go:64:   [5] name=database/migrations/2026_01_23_155941_store_integration.php type=file file=database/migrations/2026_01_23_155941_store_integration.php score=0.5920
+    extra_bench_test.go:64:   [6] name=database/migrations/2025_11_11_125035_update_enableonlinebillingonly.php type=file file=database/migrations/2025_11_11_125035_update_enableonlinebillingonly.php score=0.5920
+    extra_bench_test.go:64:   [7] name=database/migrations/2016_12_03_074747_create_jobs_table.php type=file file=database/migrations/2016_12_03_074747_create_jobs_table.php score=0.5843
+    extra_bench_test.go:64:   [8] name=database/migrations/2014_10_12_000000_create_users_table.php type=file file=database/migrations/2014_10_12_000000_create_users_table.php score=0.5843
+    extra_bench_test.go:64:   [9] name=database/migrations/2026_02_13_144003_enable_pinelab_invoicing.php type=file file=database/migrations/2026_02_13_144003_enable_pinelab_invoicing.php score=0.2343
+=== RUN   TestExtraBenchmarkQueries/B5_Concept_context
+    extra_bench_test.go:46: Query B5 [Concept] tool=context elapsed=2.511917ms
+    extra_bench_test.go:57: Results: 10 inspectables
+    extra_bench_test.go:64:   [0] name=MonitoringRun.handle type=method file=app/Console/Commands/MonitoringRun.php score=0.6111
+    extra_bench_test.go:64:   [1] name=monitor type=function file=monitorusage.js score=0.4497
+    extra_bench_test.go:64:   [2] name=ErrorTrackerJob.handle type=method file=app/Jobs/ErrorTrackerJob.php score=0.4031
+    extra_bench_test.go:64:   [3] name=PrometheusQueueExporterIntegrationTest.it_can_generate_metrics_with_error_handling type=method file=tests/Integration/PrometheusQueueExporterIntegrationTest.php score=0.3789
+    extra_bench_test.go:64:   [4] name=LogOrderErrors.handle type=method file=app/Http/Middleware/LogOrderErrors.php score=0.3653
+    extra_bench_test.go:64:   [5] name=Casio.logCasioError type=method file=app/Casio.php score=0.3397
+    extra_bench_test.go:64:   [6] name=MonitoringRun type=class file=app/Console/Commands/MonitoringRun.php score=0.2938
+    extra_bench_test.go:64:   [7] name=monitorusage.js type=file file=monitorusage.js score=0.2778
+    extra_bench_test.go:64:   [8] name=PrometheusEnhancedJob.writeJobLog type=method file=app/Jobs/PrometheusEnhancedJob.php score=0.1419
+    extra_bench_test.go:64:   [9] name=MonitoringService.sectionHeader type=method file=app/Services/MonitoringService.php score=0.1262
+=== RUN   TestExtraBenchmarkQueries/C2_Cross-file_context
+    extra_bench_test.go:46: Query C2 [Cross-file] tool=context elapsed=2.79075ms
+    extra_bench_test.go:57: Results: 15 inspectables
+    extra_bench_test.go:64:   [0] name=ApiMonitorMiddlewareTest.test_enforce_store_access_skips_chain_level_stock_request_history_route type=method file=tests/Feature/ApiMonitorMiddlewareTest.php score=0.6111
+    extra_bench_test.go:64:   [1] name=StockLedger.stockTransaction type=method file=app/StockLedger.php score=0.5808
+    extra_bench_test.go:64:   [2] name=database/migrations/2026_03_06_000000_create_stock_health_intelligence_tables.php type=file file=database/migrations/2026_03_06_000000_create_stock_health_intelligence_tables.php score=0.5773
+    extra_bench_test.go:64:   [3] name=database/migrations/2026_02_19_000000_create_gupshup_api_call_logs_table.php type=file file=database/migrations/2026_02_19_000000_create_gupshup_api_call_logs_table.php score=0.5726
+    extra_bench_test.go:64:   [4] name=report.stockTransactionFile type=method file=app/v2/report.php score=0.5680
+    extra_bench_test.go:64:   [5] name=DatabaseManager.transaction type=method file=app/Services/DatabaseManager.php score=0.5665
+    extra_bench_test.go:64:   [6] name=database/migrations/2025_01_16_000000_create_global_nector_api_call_logs_table.php type=file file=database/migrations/2025_01_16_000000_create_global_nector_api_call_logs_table.php score=0.5647
+    extra_bench_test.go:64:   [7] name=database/migrations/2025_12_20_000000_create_global_nector_api_usage_tracker_table.php type=file file=database/migrations/2025_12_20_000000_create_global_nector_api_usage_tracker_table.php score=0.5647
+    extra_bench_test.go:64:   [8] name=StockLedger.processSourceChunkToFile type=method file=app/StockLedger.php score=0.4898
+    extra_bench_test.go:64:   [9] name=MetricsLoadTest.metrics_endpoint_stays_fast_under_load type=method file=tests/Performance/MetricsLoadTest.php score=0.4379
+    extra_bench_test.go:64:   [10] name=WriterException type=class file=lib/openspout/Writer/Exception/WriterException.php score=0.1119
+    extra_bench_test.go:64:   [11] name=GST.APIRequestTracker type=method file=app/GST.php score=0.1000
+    extra_bench_test.go:64:   [12] name=GSTIntegration.APIRequestTracker type=method file=app/GSTIntegration.php score=0.0889
+    extra_bench_test.go:64:   [13] name=StockLedger.generateStockMovementViaLedgerFileChunked type=method file=app/StockLedger.php score=0.0877
+    extra_bench_test.go:64:   [14] name=DatabaseManager.serializableTransaction type=method file=app/Services/DatabaseManager.php score=0.0740
+=== RUN   TestExtraBenchmarkQueries/C3_Cross-file_context
+    extra_bench_test.go:46: Query C3 [Cross-file] tool=context elapsed=2.143584ms
+    extra_bench_test.go:57: Results: 15 inspectables
+    extra_bench_test.go:64:   [0] name=integrationBilling.handle type=method file=app/Console/Commands/integrationBilling.php score=0.6500
+    extra_bench_test.go:64:   [1] name=GeneralMiddleware.handle type=method file=app/Http/Middleware/GeneralMiddleware.php score=0.4269
+    extra_bench_test.go:64:   [2] name=Authenticate.handle type=method file=app/Http/Middleware/Authenticate.php score=0.4269
+    extra_bench_test.go:64:   [3] name=NavisionMiddleware.handle type=method file=app/Http/Middleware/NavisionMiddleware.php score=0.4269
+    extra_bench_test.go:64:   [4] name=OpenTelemetryMiddleware.handle type=method file=app/Http/Middleware/OpenTelemetryMiddleware.php score=0.4269
+    extra_bench_test.go:64:   [5] name=OauthMiddleware.handle type=method file=app/Http/Middleware/OauthMiddleware.php score=0.4269
+    extra_bench_test.go:64:   [6] name=MetricsAuth.handle type=method file=app/Http/Middleware/MetricsAuth.php score=0.4269
+    extra_bench_test.go:64:   [7] name=GitMiddleware.handle type=method file=app/Http/Middleware/GitMiddleware.php score=0.4269
+    extra_bench_test.go:64:   [8] name=PayPhiMiddleware.handle type=method file=app/Http/Middleware/PayPhiMiddleware.php score=0.4269
+    extra_bench_test.go:64:   [9] name=MerchantMiddleware.handle type=method file=app/Http/Middleware/MerchantMiddleware.php score=0.4269
+    extra_bench_test.go:64:   [10] name=Scripts.WebhookbyOrderID type=method file=app/Scripts.php score=0.1193
+    extra_bench_test.go:64:   [11] name=UrbanpiperAccess.handle type=method file=app/Http/Middleware/UrbanpiperAccess.php score=0.0769
+    extra_bench_test.go:64:   [12] name=partnerAppToken.handle type=method file=app/Http/Middleware/partnerAppToken.php score=0.0769
+    extra_bench_test.go:64:   [13] name=RedirectIfAuthenticated.handle type=method file=app/Http/Middleware/RedirectIfAuthenticated.php score=0.0769
+    extra_bench_test.go:64:   [14] name=thirdPartyToken.handle type=method file=app/Http/Middleware/thirdPartyToken.php score=0.0769
+=== RUN   TestExtraBenchmarkQueries/C4_Cross-file_context
+    extra_bench_test.go:46: Query C4 [Cross-file] tool=context elapsed=1.99675ms
+    extra_bench_test.go:57: Results: 15 inspectables
+    extra_bench_test.go:64:   [0] name=OpenTelemetryTracer type=class file=app/OpenTelemetry/OpenTelemetryTracer.php score=0.6008
+    extra_bench_test.go:64:   [1] name=OpenTelemetryMiddleware type=class file=app/Http/Middleware/OpenTelemetryMiddleware.php score=0.4517
+    extra_bench_test.go:64:   [2] name=app/OpenTelemetry/OpenTelemetryMeter.php type=file file=app/OpenTelemetry/OpenTelemetryMeter.php score=0.4078
+    extra_bench_test.go:64:   [3] name=app/OpenTelemetry/OpenTelemetryFactory.php type=file file=app/OpenTelemetry/OpenTelemetryFactory.php score=0.4078
+    extra_bench_test.go:64:   [4] name=app/OpenTelemetry/OpenTelemetrySpan.php type=file file=app/OpenTelemetry/OpenTelemetrySpan.php score=0.4078
+    extra_bench_test.go:64:   [5] name=app/OpenTelemetry/OpenTelemetryTracer.php type=file file=app/OpenTelemetry/OpenTelemetryTracer.php score=0.4078
+    extra_bench_test.go:64:   [6] name=app/OpenTelemetry/OpenTelemetryLogger.php type=file file=app/OpenTelemetry/OpenTelemetryLogger.php score=0.4078
+    extra_bench_test.go:64:   [7] name=app/OpenTelemetry/OpenTelemetrySpanBuilder.php type=file file=app/OpenTelemetry/OpenTelemetrySpanBuilder.php score=0.4078
+    extra_bench_test.go:64:   [8] name=app/OpenTelemetry/ClickHouseExporter.php type=file file=app/OpenTelemetry/ClickHouseExporter.php score=0.4024
+    extra_bench_test.go:64:   [9] name=OpenTelemetrySpan type=class file=app/OpenTelemetry/OpenTelemetrySpan.php score=0.3639
+    extra_bench_test.go:64:   [10] name=OpenTelemetryLogger type=class file=app/OpenTelemetry/OpenTelemetryLogger.php score=0.3205
+    extra_bench_test.go:64:   [11] name=OpenTelemetryFactory type=class file=app/OpenTelemetry/OpenTelemetryFactory.php score=0.3056
+    extra_bench_test.go:64:   [12] name=OpenTelemetryMeter type=class file=app/OpenTelemetry/OpenTelemetryMeter.php score=0.2792
+    extra_bench_test.go:64:   [13] name=OpenTelemetryTracer.trace type=method file=app/OpenTelemetry/OpenTelemetryTracer.php score=0.2648
+    extra_bench_test.go:64:   [14] name=OpenTelemetrySpanBuilder type=class file=app/OpenTelemetry/OpenTelemetrySpanBuilder.php score=0.2638
+--- PASS: TestExtraBenchmarkQueries (0.04s)
+    --- PASS: TestExtraBenchmarkQueries/A2_Exact_read_symbol (0.00s)
+    --- PASS: TestExtraBenchmarkQueries/A4_Exact_search_code (0.01s)
+    --- PASS: TestExtraBenchmarkQueries/B2_Concept_context (0.01s)
+    --- PASS: TestExtraBenchmarkQueries/B3_Concept_context (0.00s)
+    --- PASS: TestExtraBenchmarkQueries/B4_Concept_context (0.00s)
+    --- PASS: TestExtraBenchmarkQueries/B5_Concept_context (0.00s)
+    --- PASS: TestExtraBenchmarkQueries/C2_Cross-file_context (0.00s)
+    --- PASS: TestExtraBenchmarkQueries/C3_Cross-file_context (0.00s)
+    --- PASS: TestExtraBenchmarkQueries/C4_Cross-file_context (0.00s)
+PASS
+ok  	github.com/naman/qb-context/tests	34.390s
