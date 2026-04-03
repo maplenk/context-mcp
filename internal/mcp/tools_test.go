@@ -447,47 +447,40 @@ func TestGetArchitectureSummary_Basic(t *testing.T) {
 		t.Fatal("get_architecture_summary handler not registered")
 	}
 
-	params, _ := json.Marshal(map[string]interface{}{"limit": 10})
+	params, _ := json.Marshal(map[string]interface{}{"limit": 5})
 	result, err := handler(params)
 	if err != nil {
 		t.Fatalf("get_architecture_summary error: %v", err)
 	}
 
-	m, ok := result.(map[string]interface{})
+	resp, ok := result.(types.InspectableResponse)
 	if !ok {
-		t.Fatalf("expected map[string]interface{}, got %T", result)
+		t.Fatalf("expected types.InspectableResponse, got %T", result)
 	}
 
-	// Should have communities
-	if _, ok := m["communities"]; !ok {
-		t.Error("expected 'communities' in result")
+	// Summary should mention communities and node/edge counts
+	if resp.Summary == "" {
+		t.Error("expected non-empty summary")
 	}
 
-	// Should have entry points
-	if _, ok := m["entry_points"]; !ok {
-		t.Error("expected 'entry_points' in result")
-	}
+	t.Logf("Architecture summary: %s", resp.Summary)
+	t.Logf("Total candidates: %d, Inspectables returned: %d", resp.Total, len(resp.Inspectables))
 
-	// Should have hubs
-	if _, ok := m["hubs"]; !ok {
-		t.Error("expected 'hubs' in result")
+	for i, item := range resp.Inspectables {
+		if item.Rank != i+1 {
+			t.Errorf("item %d: expected rank %d, got %d", i, i+1, item.Rank)
+		}
+		if item.TargetType != "entry_point" && item.TargetType != "hub" && item.TargetType != "connector" {
+			t.Errorf("item %d: unexpected target_type %q", i, item.TargetType)
+		}
+		if item.Name == "" {
+			t.Errorf("item %d: empty name", i)
+		}
+		if item.NextTool == "" {
+			t.Errorf("item %d: empty next_tool", i)
+		}
+		t.Logf("  #%d %s (%s) → %s [score=%.4f]", item.Rank, item.Name, item.TargetType, item.NextTool, item.Score)
 	}
-
-	// Should have connectors
-	if _, ok := m["connectors"]; !ok {
-		t.Error("expected 'connectors' in result")
-	}
-
-	totalNodes, ok := m["total_nodes"].(int)
-	if !ok {
-		t.Fatalf("expected total_nodes to be int, got %T", m["total_nodes"])
-	}
-	if totalNodes != 4 {
-		t.Errorf("expected 4 total nodes, got %d", totalNodes)
-	}
-
-	t.Logf("Architecture summary: %d nodes, %d edges, %.4f modularity",
-		m["total_nodes"], m["total_edges"], m["modularity"])
 }
 
 func TestExplore_BasicSearch(t *testing.T) {

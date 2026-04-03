@@ -95,7 +95,7 @@ type DetectChangesParams struct {
 
 // ArchitectureSummaryParams are the parameters for the get_architecture_summary tool
 type ArchitectureSummaryParams struct {
-	Limit int `json:"limit,omitempty" jsonschema:"description=Maximum number of hubs/entry points to return (default: 10)"`
+	Limit int `json:"limit,omitempty" jsonschema:"description=Maximum number of structurally important nodes to return (default: 5)"`
 }
 
 // ExploreParams are the parameters for the explore tool
@@ -1363,101 +1363,140 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 		return nil, fmt.Errorf("graph engine not initialized")
 	}
 	if p.Limit == 0 {
-		p.Limit = 10
+		p.Limit = 5
 	}
 
-	// Communities
+	// Get graph metrics
 	communities, modularity := deps.Graph.DetectCommunities()
+	pageranks := deps.Graph.PageRank()
+	betweenness, _ := deps.Store.GetAllBetweenness()
 
-	// Resolve community nodes to names
-	type namedCommunity struct {
-		ID      int      `json:"id"`
-		Size    int      `json:"size"`
-		Members []string `json:"members"`
+	// Collect all candidates with their structural role
+	type candidate struct {
+		hashID     string
+		targetType string // "entry_point", "hub", "connector"
+		reason     string
+		outDegree  int
 	}
-	var namedComms []namedCommunity
-	for _, c := range communities {
-		var members []string
-		for _, hashID := range c.NodeIDs {
-			if node, err := deps.Store.GetNode(hashID); err == nil {
-				members = append(members, node.SymbolName)
+	candidateMap := make(map[string]*candidate)
+
+	// Entry points: zero in-degree
+	for _, hashID := range deps.Graph.GetEntryPoints() {
+		outDeg := deps.Graph.GetOutDegree(hashID)
+		candidateMap[hashID] = &candidate{
+			hashID:     hashID,
+			targetType: "entry_point",
+			reason:     fmt.Sprintf("Entry point: %d downstream callees", outDeg),
+			outDegree:  outDeg,
+		}
+	}
+
+	// Hubs: highest out-degree (collect more than limit for ranking pool)
+	poolSize := p.Limit * 3
+	if poolSize < 20 {
+		poolSize = 20
+	}
+	for _, h := range deps.Graph.GetHubs(poolSize) {
+		if _, exists := candidateMap[h.HashID]; !exists {
+			candidateMap[h.HashID] = &candidate{
+				hashID:     h.HashID,
+				targetType: "hub",
+				reason:     fmt.Sprintf("Hub: calls %d functions", h.OutDegree),
+				outDegree:  h.OutDegree,
 			}
 		}
-		namedComms = append(namedComms, namedCommunity{
-			ID:      c.ID,
-			Size:    len(c.NodeIDs),
-			Members: members,
+	}
+
+	// Connectors: high betweenness + multi-community edges
+	for _, hashID := range deps.Graph.GetConnectors(betweenness, poolSize) {
+		if _, exists := candidateMap[hashID]; !exists {
+			btwn := betweenness[hashID]
+			candidateMap[hashID] = &candidate{
+				hashID:     hashID,
+				targetType: "connector",
+				reason:     fmt.Sprintf("Connector: betweenness %.3f, bridges communities", btwn),
+				outDegree:  deps.Graph.GetOutDegree(hashID),
+			}
+		}
+	}
+
+	// Normalize out-degrees for scoring
+	var maxOutDegree int
+	for _, c := range candidateMap {
+		if c.outDegree > maxOutDegree {
+			maxOutDegree = c.outDegree
+		}
+	}
+
+	// Score and rank candidates
+	type scoredCandidate struct {
+		candidate
+		score float64
+	}
+	var scored []scoredCandidate
+	for _, c := range candidateMap {
+		pr := pageranks[c.hashID]
+		btwn := betweenness[c.hashID]
+		normalizedDeg := 0.0
+		if maxOutDegree > 0 {
+			normalizedDeg = float64(c.outDegree) / float64(maxOutDegree)
+		}
+		score := 0.4*pr + 0.3*btwn + 0.3*normalizedDeg
+		scored = append(scored, scoredCandidate{candidate: *c, score: score})
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	if len(scored) > p.Limit {
+		scored = scored[:p.Limit]
+	}
+
+	// Build inspectables
+	inspectables := make([]types.Inspectable, 0, len(scored))
+	for i, sc := range scored {
+		node, err := deps.Store.GetNode(sc.hashID)
+		if err != nil {
+			continue
+		}
+
+		// Set next_tool based on structural role
+		nextTool := "understand"
+		if sc.targetType == "hub" || sc.targetType == "connector" {
+			nextTool = "impact"
+		}
+
+		symbolRef := node.ID
+		if symbolRef == "" {
+			symbolRef = node.SymbolName
+		}
+
+		inspectables = append(inspectables, types.Inspectable{
+			Rank:       i + 1,
+			TargetType: sc.targetType,
+			Name:       node.SymbolName,
+			FilePath:   node.FilePath,
+			ID:         node.ID,
+			Score:      sc.score,
+			Reason:     sc.reason,
+			NextTool:   nextTool,
+			NextArgs:   map[string]string{"symbol_id": symbolRef},
 		})
 	}
 
-	// Entry points: zero in-degree
-	entryPointIDs := deps.Graph.GetEntryPoints()
-	type namedNode struct {
-		Name     string `json:"name"`
-		FilePath string `json:"file_path"`
-		ID       string `json:"id"`
-	}
-	var entryPoints []namedNode
-	for _, hashID := range entryPointIDs {
-		if node, err := deps.Store.GetNode(hashID); err == nil {
-			entryPoints = append(entryPoints, namedNode{
-				Name:     node.SymbolName,
-				FilePath: node.FilePath,
-				ID:       node.ID,
-			})
-		}
-		if len(entryPoints) >= p.Limit {
-			break
-		}
-	}
+	summary := fmt.Sprintf("%d communities (modularity %.2f), %d nodes, %d edges — top %d structural nodes shown",
+		len(communities), modularity, deps.Graph.NodeCount(), deps.Graph.EdgeCount(), len(inspectables))
 
-	// Hubs: highest out-degree
-	hubEntries := deps.Graph.GetHubs(p.Limit)
-	type hubInfo struct {
-		Name      string `json:"name"`
-		FilePath  string `json:"file_path"`
-		OutDegree int    `json:"out_degree"`
-	}
-	var hubs []hubInfo
-	for _, h := range hubEntries {
-		if node, err := deps.Store.GetNode(h.HashID); err == nil {
-			hubs = append(hubs, hubInfo{
-				Name:      node.SymbolName,
-				FilePath:  node.FilePath,
-				OutDegree: h.OutDegree,
-			})
-		}
-	}
-
-	// Connectors: high betweenness + edges to multiple communities
-	// Use pre-computed betweenness from node_scores table instead of O(V*E) recomputation
-	betweenness, _ := deps.Store.GetAllBetweenness()
-	connectorIDs := deps.Graph.GetConnectors(betweenness, p.Limit)
-	var connectors []namedNode
-	for _, hashID := range connectorIDs {
-		if node, err := deps.Store.GetNode(hashID); err == nil {
-			connectors = append(connectors, namedNode{
-				Name:     node.SymbolName,
-				FilePath: node.FilePath,
-				ID:       node.ID,
-			})
-		}
-	}
-
-	return map[string]interface{}{
-		"communities":      namedComms,
-		"modularity":       modularity,
-		"community_count":  len(communities),
-		"entry_points":     entryPoints,
-		"hubs":             hubs,
-		"connectors":       connectors,
-		"total_nodes":      deps.Graph.NodeCount(),
-		"total_edges":      deps.Graph.EdgeCount(),
+	return types.InspectableResponse{
+		Inspectables: inspectables,
+		Total:        len(candidateMap),
+		Summary:      summary,
 	}, nil
 }
 
 func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
-	desc := "Provides a comprehensive architecture summary including communities, entry points (zero in-degree), hubs (high out-degree), and cross-community connectors."
+	desc := "Top entry points, hubs, and connectors in the codebase ranked by structural importance. Bounded output — returns counts and top 5 nodes, not full member lists."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -1476,8 +1515,8 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 			"properties": map[string]interface{}{
 				"limit": map[string]interface{}{
 					"type":        "integer",
-					"description": "Maximum number of hubs/entry points to return (default: 10)",
-					"default":     10,
+					"description": "Maximum number of structurally important nodes to return (default: 5)",
+					"default":     5,
 				},
 			},
 		},
