@@ -573,14 +573,22 @@ CBM queries use the **equivalent** tool for each category — `explore` for conc
 - CBM (`explore`): 20 matches, scored 0.49–0.55 —
   `write` (0.552) ⚠️ generic, `writeStderr` (0.509). Less relevant top results.
 
-#### CBM-Only Tools (no qb-context equivalent)
+#### Tool Parity
 
-| Tool                  | Latency   | Description                              |
-|-----------------------|-----------|------------------------------------------|
-| `get_architecture`    | 25.5ms   | Project overview with routes and clusters |
-| `get_impact_analysis` | 15.6ms   | Blast radius with risk scoring            |
-| `get_key_symbols`     | 24.9ms   | Top-K symbols by PageRank                 |
-| `trace_call_path`     | 19.2ms   | BFS callers/callees traversal             |
+Both engines implement the same compound tool set. qb-context tools were developed
+independently with the same design goals (blast radius, architecture summary,
+explore/understand, key symbols, call tracing).
+
+| Tool                     | qb-context         | CBM                   |
+|--------------------------|--------------------|-----------------------|
+| `impact` / blast radius  | ✅ `impact`         | ✅ `get_impact_analysis` |
+| Architecture overview    | ✅ `get_architecture_summary` | ✅ `get_architecture` |
+| Key symbols (PageRank)   | ✅ `get_key_symbols` | ✅ `get_key_symbols`   |
+| Call tracing             | ✅ `trace_call_path` | ✅ `trace_call_path`   |
+| Area exploration         | ✅ `explore`        | ✅ `explore`           |
+| Symbol deep-dive         | ✅ `understand`     | ✅ `understand`        |
+| Pre-change analysis      | ❌                  | ✅ `prepare_change`    |
+| Session memory           | ❌                  | ✅ `get_session_context` |
 
 #### Key Takeaways
 
@@ -595,6 +603,8 @@ CBM queries use the **equivalent** tool for each category — `explore` for conc
    tree-sitter (66 langs vs 6)
 6. **CBM CLI overhead** — ~15ms subprocess spawn + ~600-900ms for `explore` compound
    queries vs qb-context's in-process 1-6ms
+7. **Near-full tool parity** — only `prepare_change` and `get_session_context` are
+   CBM-exclusive; all other compound tools exist in both engines
 
 #### Reproduce
 
