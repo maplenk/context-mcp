@@ -1,135 +1,152 @@
-# Plan: Improve Code Search Quality
+# Plan: Improve Code Search Quality (Revised)
 
 ## Context
 
-Human evaluation of qb-context against 15 benchmark queries on the qbapi PHP codebase shows **13.7% hit rate** (14/102 rubric items) on concept/cross-file queries. The C-reference implementation gets **28.2%** (24/85 tested items) using the same scoring formula. See `benchmarks/human-eval-results.md` for full grading against `benchmarks/human-answers.md`. The gap comes from data quality and pre/post-processing, not the formula itself.
+Human evaluation of qb-context against 15 benchmark queries on the qbapi PHP codebase shows **12.7% hit rate** (13/102 rubric items) on concept/cross-file queries. The C-reference implementation gets **27.1%** (23/85 tested items). See `benchmarks/human-eval-results.md` for grading against `benchmarks/human-answers.md`.
 
-Worst failures (full-rubric scoring from `benchmarks/human-eval-results.md`):
-- **C1** (order creation): 0/11 — `.end()` methods flood results from "end to end" in query
-- **C3** (webhooks): 0/11 — `.handle()` middleware methods flood results from "handling" in query
-- **C5** (inventory flow): 0/8 — migration files dominate from "database write" in query
-- **C2** (stock transaction): 1/8 — test file ranks high, migrations rank #2-4
-- **B6** (omnichannel): 0/10 — "omnichannel" is business vocab, actual code uses "EasyEcom"/"Unicommerce"
-- **B2** (auth/session): 0/9 — found Authenticate.php but missed all 9 rubric items
+## Phase 0: Quick Scoring Fixes [DONE]
 
-## Phase 1: Quick Wins (3 parallel agents)
+Merged in commit `388b971`:
+- **Path penalties**: `pathPenalty()` replaces `isHelperFile()` — migrations 0.4x, tests 0.5x, examples 0.6x, vendor/generated 0.3x
+- **Phrase stripping**: `cleanQuery()` removes "end to end", "step by step", "how does", etc.
+- **Targeted stopwords**: Only `handle` and `end` as code-noise stopwords (not broad list)
 
-### 1A. Code-Aware Stopwords + Phrase Detection
-**File:** `internal/search/hybrid.go`
+## Phase 1: Automated Grading Harness
 
-Add common method names to stopwords (lines 42-58):
-```
-handle, end, get, set, run, start, stop, create, new, make, init,
-close, open, read, write, process, execute, call, invoke, begin,
-finish, complete, update, delete, remove, add, find, search, check,
-test, build, load, save, send, receive
-```
+**Why first:** Can't tune without strict, reproducible measurement. Manual grading is error-prone and slow.
 
-These only filter **standalone lowercase query terms** — the existing `isCamelCase` check (line 319) preserves them inside identifiers like `stockTransaction`.
+**File:** `tests/benchmark_grading_test.go` (new)
 
-Add `cleanQuery()` before `buildFTSQuery` to strip structural phrases:
-- "end to end", "start to finish", "step by step", "front to back", "beginning to end"
+Build a Go test that:
+1. Reads `benchmarks/human-answers.md` — parse each query's expected files/symbols/routes
+2. Runs each of the 15 queries (A1-C5) against the qbapi repo index
+3. Computes hit rate: for each rubric item, check if it appears in the top-N results (N=10 for A-tier, N=20 for B/C-tier)
+4. Outputs per-query scores and aggregate B+C hit rate
+5. Flags regressions: fail the test if any previously-passing query (A1, A3, C4) regresses
 
-**Impact:** Fixes C1 (removes "end" noise), C3 (reduces "handle"/"process" noise), C5 (removes "write"/"complete" noise)
+Run with: `QBCONTEXT_REPO=/Users/naman/Documents/QBApps/qbapi go test -tags "fts5,realrepo" -run TestAutomatedGrading -v ./tests/ -count=1`
 
-### 1B. Path-Based Scoring Penalties
-**File:** `internal/search/hybrid.go`
+**Rubric matching rules:**
+- File paths: match if result's FilePath contains the expected path suffix (case-insensitive)
+- Symbol names: match if result's SymbolName matches expected symbol
+- Route paths: match if result's content/symbol contains the route pattern (e.g., `/v1/merchant/{storeID}/order`)
+- Partial credit: each rubric item is 1 point, no bonuses
 
-Replace `isHelperFile()` with `pathPenalty(filePath) float64`:
+## Phase 2: Laravel Route Indexing
 
-| Path pattern | Penalty |
-|---|---|
-| `_ide_helper`, `.d.ts`, `generated/` | 0.3x |
-| `vendor/`, `node_modules/`, `lib/` | 0.3x |
-| `database/migrations/` | 0.4x |
-| `tests/`, `test/`, `*_test.*`, `*Test.*` | 0.5x |
-| `examples/` | 0.6x |
-| Everything else | 1.0x |
+**Why highest impact:** Answer key is route-heavy. B2, C1, C2, C3, C5 all expect routes in results. Today routes are invisible — the parser sees route files as just PHP files with function calls.
 
-Apply at TWO sites:
-1. Line 273 (composite scoring): `composite *= pathPenalty(node.FilePath)` — replaces `isHelperFile` check
-2. Lines 494-500 (`applyPerFileCap`): replace `isHelperFile(r.Node.FilePath)` with `pathPenalty(r.Node.FilePath) <= 0.3` for the per-file cap logic (cap helper/vendor files to 1 result per file)
+### 2A. New Types
+**File:** `internal/types/types.go`
 
-Then delete the `isHelperFile()` function entirely — `pathPenalty()` subsumes it.
-
-**Impact:** Fixes C2 (test file drops from #1), C5 (migrations drop from #1-4)
-
-### 1C. Query Synonym Expansion
-**File:** `internal/search/hybrid.go`
-
-Small curated synonym map applied during `buildFTSQuery`:
 ```go
-var querySynonyms = map[string][]string{
-    "auth":        {"authentication", "oauth", "login", "session", "token"},
-    "api":         {"endpoint", "route", "controller"},
-    "inventory":   {"stock", "warehouse"},
-    "webhook":     {"callback", "hook"},
-    "payment":     {"billing", "invoice", "razorpay"},
+NodeTypeRoute    NodeType = "route"     // HTTP route endpoint
+
+EdgeTypeHandles  EdgeType = iota + 8    // route → controller method (after existing constants)
+```
+
+### 2B. Route Extractor
+**File:** `internal/parser/routes.go` (new)
+
+Regex-based extractor (not tree-sitter — route definitions are runtime calls, not AST declarations):
+
+1. **Pattern**: `Route::(get|post|put|delete|patch)\(\s*['"]([^'"]+)['"]`
+   - Captures HTTP method + URL path
+   
+2. **Handler resolution**: `'uses'\s*=>\s*['"](\w+)@(\w+)['"]`
+   - Captures controller name + method name
+   
+3. **Route groups**: Track `Route::group(['prefix' => '...'])` nesting to build full paths
+
+4. **Output per route:**
+   - `ASTNode` with `NodeType: NodeTypeRoute`, `SymbolName: "POST /v1/merchant/{storeID}/order"`, `ContentSum` includes controller@method reference
+   - `ASTEdge` with `EdgeType: EdgeTypeHandles` linking route node → controller method node (resolved by matching `SymbolName` in the store)
+
+### 2C. Wire Into Indexing Pipeline
+**File:** `internal/parser/parser.go`
+
+After normal PHP parsing, if file matches `routes*.php` or `routesWeb*.php`:
+- Run route extractor
+- Append route nodes to the file's parse result
+- Route→handler edges get resolved in a second pass after all files are indexed
+
+**File:** `cmd/qb-context/main.go` or `internal/mcp/tools.go`
+
+Add a post-indexing pass: resolve route handler references (`OrderController@postOrder`) to actual node IDs via `store.SearchLexical("OrderController postOrder", 5)` or exact symbol lookup.
+
+### Projected Impact
+Routes appearing in results should move: C1 (+3-4 rubric items), C2 (+2-3), C3 (+3-4), B2 (+2 login endpoints), C5 (+2-3)
+
+## Phase 3: Repo-Specific Query Aliasing
+
+**Why:** Business vocab doesn't match code identifiers. "omnichannel" → code uses "EasyEcom", "Unicommerce", "OnlineOrder".
+
+**File:** `internal/search/hybrid.go`
+
+```go
+var queryAliases = map[string][]string{
     "omnichannel": {"easyecom", "unicommerce", "onlineorder"},
+    "auth":        {"oauth", "login", "token", "session", "authenticate"},
+    "webhook":     {"callback", "hook", "dispatchwebhook"},
+    "payment":     {"razorpay", "billing", "invoice"},
+    "inventory":   {"stock", "stocktransaction", "stockledger", "warehouse"},
 }
 ```
 
-**Impact:** Fixes B6 ("omnichannel" → actual class names), helps B2 ("auth" → specific middleware)
+Apply in `buildFTSQuery`: for each query term, if it matches an alias key, append alias terms with OR.
 
-## Phase 2: PHP Parser Coverage (2 parallel agents)
+**Impact:** Fixes B6 (0/10 → 4-6/10), helps B2 (auth→oauth/login)
 
-### 2A. PHP Trait + Interface Extraction
-**File:** `internal/parser/parser.go`
+## Phase 4: Graph Expansion Reranking
 
-Add `case "trait_declaration":` and `case "interface_declaration":` in the PHP switch. Both mirror `class_declaration` handling — extract name, create node, extract methods from body.
+**Why:** Cross-file failures are missing traversal, not weak scoring. Start with good seeds (top BM25+semantic hits), expand 1-2 hops over calls/defines/imports/routes edges, then rerank the expanded set.
 
-### 2B. PHP Anonymous Function Extraction
-**File:** `internal/parser/parser.go`
-
-Extract named closures: `$handler = function($x) { ... };` → `NodeTypeFunction` with variable name.
-
-**Impact:** ~1.5x more nodes indexed (18K → 27K+), denser graph for better PPR/betweenness signals
-
-## Phase 3: Graph Cluster Boosting (1 agent)
-
-### 3A. Result Cluster Boosting
 **File:** `internal/search/hybrid.go`
 
-After scoring, before sorting: for each pair in top-20 results sharing a graph edge (1-hop), boost both by 1.10x (capped at 1.30x total). Uses existing `GetCallees()`/`GetCallers()` methods.
+After initial scoring, before final sort:
+1. Take top-10 seeds from initial results
+2. For each seed, expand 1 hop via `graph.GetCallees()` + `graph.GetCallers()` + route edges
+3. Fetch expanded nodes from store
+4. Score expanded nodes using the same composite formula
+5. Merge expanded results with originals, deduplicate, re-sort
 
-**Impact:** Helps C2 (StockLedger ↔ Inventory boost), C1 (OrderController ↔ Order.php boost)
+This replaces the "top-20 pair boosting" from the old plan — it's a proper traversal, not just a score bump.
 
-## Phase 4: BM25 Tuning (after validation)
+**Impact:** C1 (OrderController → Order.php → services), C2 (InventoryController → Inventory.php → StockLedger), C3 (routes.webhooks.php → WebhookController → Webhook.php)
 
-### 4A. Reduce Symbol Name Weight
-**File:** `internal/storage/sqlite.go` (lines 557, 594)
+## Phase 5 (Deprioritized)
 
-Change `bm25(nodes_fts, 10.0, 1.0, 0.0)` → `bm25(nodes_fts, 5.0, 2.0, 0.0)`. Let content (doc comments) contribute more.
+### 5A. PHP Parser Coverage
+- Trait + interface extraction
+- Anonymous function extraction
+- Do after routes + graph expansion are validated
 
-## Projected Impact
+### 5B. BM25 Weight Tuning
+- Reduce symbol name weight, increase content weight
+- Do after automated grading shows remaining gaps
 
-| Phase | Hit Rate (B+C) | Delta |
-|---|---|---|
-| Current | ~14% (14/102) | -- |
-| Phase 1 | ~25% | +11% |
-| Phase 2 | ~28% | +3% |
-| Phase 3 | ~31% | +3% |
-| Phase 4 | ~34% | +3% |
+## Execution Order
 
-## Execution
-
-Phase 1: 3 parallel Opus agents (1A, 1B, 1C) — independent changes
-Phase 2: 2 parallel Opus agents (2A, 2B) — independent parser changes  
-Phase 3: 1 agent after Phase 1+2 merge — needs graph + scoring together
-Phase 4: 1 agent after validation — needs before/after measurement
+| Phase | Agents | Depends On |
+|-------|--------|------------|
+| 1: Automated Grading | 1 Opus | — |
+| 2: Route Indexing | 2 parallel Opus (2A+2B, 2C) | Phase 1 (for measurement) |
+| 3: Query Aliasing | 1 Opus | — (can parallel with Phase 2) |
+| 4: Graph Expansion | 1 Opus | Phase 2 (needs route edges) |
 
 ## Verification
 
 After each phase:
 1. `go build -tags "fts5" ./...`
 2. `go test -tags "fts5" ./... -count=1`
-3. `QBCONTEXT_REPO=/Users/naman/Documents/QBApps/qbapi go test -tags "fts5,realrepo" -run TestBenchmarkQueries -v ./tests/ -count=1`
-4. Compare against `benchmarks/human-answers.md`
-5. Ensure A1, A3, C4 (passing queries) don't regress
+3. Run automated grading harness (Phase 1 output)
+4. Compare against previous phase's scores
+5. Ensure A1, A3, C4 don't regress
 
 ## Critical Files
-- `internal/search/hybrid.go` — Phase 1 + Phase 3
-- `internal/search/hybrid_test.go` — all new tests
-- `internal/parser/parser.go` — Phase 2
-- `internal/parser/parser_test.go` — Phase 2 tests
-- `internal/storage/sqlite.go` — Phase 4
+- `tests/benchmark_grading_test.go` — Phase 1 (new)
+- `internal/types/types.go` — Phase 2 (new edge/node types)
+- `internal/parser/routes.go` — Phase 2 (new)
+- `internal/parser/parser.go` — Phase 2 (wire routes)
+- `internal/search/hybrid.go` — Phase 3 + Phase 4
+- `benchmarks/human-answers.md` — grading reference

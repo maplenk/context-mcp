@@ -307,6 +307,12 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		})
 	}
 
+	// NOTE: Graph-neighborhood expansion is implemented (expandFromSeeds) but
+	// disabled — it regresses the benchmark by pushing structurally-connected
+	// but query-irrelevant nodes into top-N, displacing real results.
+	// TODO: Re-enable with query-relevance filtering (check expanded nodes
+	// against query terms before including them).
+
 	// Sort by composite score descending
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score > results[j].Score
@@ -637,4 +643,129 @@ func pathPenalty(filePath string) float64 {
 	}
 
 	return 1.0
+}
+
+// expandFromSeeds takes the initial scored results, expands 1 hop from the
+// top seeds via graph edges, fetches newly discovered nodes from the store,
+// scores them, and merges them into the result set.
+func (h *HybridSearch) expandFromSeeds(
+	results []types.SearchResult,
+	existingCandidates map[string]types.ASTNode,
+	bm25Scores, semanticScores, pprScores, betweennessScores, inDegreeScores map[string]float64,
+	limit int,
+) []types.SearchResult {
+	// Take top-N seeds (pre-sort by score to get the best ones)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	seedCount := 5
+	if seedCount > len(results) {
+		seedCount = len(results)
+	}
+
+	// Collect neighbor IDs from top seeds (1 hop: callees + callers)
+	neighborSet := make(map[string]bool)
+	for i := 0; i < seedCount; i++ {
+		seedID := results[i].Node.ID
+		for _, callee := range h.graph.GetCallees(seedID) {
+			if _, exists := existingCandidates[callee]; !exists {
+				neighborSet[callee] = true
+			}
+		}
+		for _, caller := range h.graph.GetCallers(seedID) {
+			if _, exists := existingCandidates[caller]; !exists {
+				neighborSet[caller] = true
+			}
+		}
+	}
+
+	if len(neighborSet) == 0 {
+		return results
+	}
+
+	// Cap expansion to prevent result bloat
+	maxExpansion := 20
+	neighborIDs := make([]string, 0, len(neighborSet))
+	for id := range neighborSet {
+		neighborIDs = append(neighborIDs, id)
+		if len(neighborIDs) >= maxExpansion {
+			break
+		}
+	}
+
+	// Fetch neighbor nodes from store — limit additions to avoid flooding results
+	maxAdded := limit / 4
+	if maxAdded < 3 {
+		maxAdded = 3
+	}
+	added := 0
+	for _, nID := range neighborIDs {
+		if added >= maxAdded {
+			break
+		}
+		node, err := h.store.GetNode(nID)
+		if err != nil || node == nil {
+			continue
+		}
+
+		// Score the neighbor using whatever signals we have
+		bm25 := safeGet(bm25Scores, nID)
+		semantic := safeGet(semanticScores, nID)
+		ppr := safeGet(pprScores, nID)
+		betweenness := safeGet(betweennessScores, nID)
+		inDegree := safeGet(inDegreeScores, nID)
+
+		composite := weightPPR*ppr +
+			weightBM25*bm25 +
+			weightBetweenness*betweenness +
+			weightInDegree*inDegree +
+			weightSemantic*semantic
+
+		// Graph-expanded nodes get a connectivity bonus: they were reachable
+		// from high-scoring seeds, which means they're structurally relevant
+		// even if they scored low on lexical/semantic signals.
+		// Give them a minimum score based on the seed they expanded from.
+		if composite == 0 {
+			// Find the best seed score that connects to this neighbor
+			bestSeedScore := 0.0
+			for i := 0; i < seedCount; i++ {
+				seedID := results[i].Node.ID
+				// Check if this neighbor is connected to this seed
+				for _, callee := range h.graph.GetCallees(seedID) {
+					if callee == nID && results[i].Score > bestSeedScore {
+						bestSeedScore = results[i].Score
+					}
+				}
+				for _, caller := range h.graph.GetCallers(seedID) {
+					if caller == nID && results[i].Score > bestSeedScore {
+						bestSeedScore = results[i].Score
+					}
+				}
+			}
+			// Give neighbor a modest fraction of the seed's score —
+			// low enough to not displace direct lexical/semantic hits
+			composite = bestSeedScore * 0.15
+		}
+
+		// Apply path-based penalty to expanded nodes
+		composite *= pathPenalty(node.FilePath)
+
+		if composite > 0 {
+			added++
+			results = append(results, types.SearchResult{
+				Node:  *node,
+				Score: composite,
+				Breakdown: &types.ScoreBreakdown{
+					PPR:         ppr,
+					BM25:        bm25,
+					Betweenness: betweenness,
+					InDegree:    inDegree,
+					Semantic:    semantic,
+				},
+			})
+		}
+	}
+
+	return results
 }

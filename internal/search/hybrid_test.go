@@ -1108,3 +1108,140 @@ func TestCleanQuery_PreservesNonPhraseContent(t *testing.T) {
 		t.Errorf("cleanQuery should preserve non-phrase content, got: %q", result)
 	}
 }
+
+// TestSearch_GraphExpansionDiscovery verifies that search works with connected
+// graph nodes. Graph expansion is currently disabled (regresses benchmark),
+// so this test just verifies that connected nodes don't break search.
+func TestSearch_GraphExpansionDiscovery(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create a "seed" node and a connected "neighbor" node
+	seed := types.ASTNode{
+		ID:         types.GenerateNodeID("app/Inventory.php", "stockTransaction"),
+		FilePath:   "app/Inventory.php",
+		SymbolName: "stockTransaction",
+		NodeType:   types.NodeTypeMethod,
+		StartByte:  0,
+		EndByte:    200,
+		ContentSum: "stockTransaction handles inventory stock movements",
+	}
+	neighbor := types.ASTNode{
+		ID:         types.GenerateNodeID("app/Http/routes.php", "POST /inventory/update"),
+		FilePath:   "app/Http/routes.php",
+		SymbolName: "POST /inventory/update",
+		NodeType:   types.NodeType(7), // route node type
+		StartByte:  0,
+		EndByte:    100,
+		ContentSum: "POST endpoint for inventory update via HTTP API",
+	}
+
+	if err := s.UpsertNodes([]types.ASTNode{seed, neighbor}); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	// Build graph with route->method edge (route calls/handles the method)
+	g := graph.New()
+	edges := []types.ASTEdge{
+		{
+			SourceID: neighbor.ID,
+			TargetID: seed.ID,
+			EdgeType: types.EdgeTypeCalls,
+		},
+	}
+	if err := s.UpsertEdges(edges); err != nil {
+		t.Fatalf("UpsertEdges: %v", err)
+	}
+	storedEdges, _ := s.GetAllEdges()
+	g.BuildFromEdges(storedEdges)
+
+	embedder := embedding.NewHashEmbedder()
+	hs := New(s, embedder, g)
+
+	// Search should work and find the seed (direct match)
+	results, err := hs.Search("stock transaction", 20, nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	foundSeed := false
+	for _, r := range results {
+		t.Logf("  %s (%v) in %s — score=%.4f", r.Node.SymbolName, r.Node.NodeType, r.Node.FilePath, r.Score)
+		if r.Node.SymbolName == "stockTransaction" {
+			foundSeed = true
+		}
+	}
+
+	if !foundSeed {
+		t.Error("expected to find seed node 'stockTransaction' via lexical search")
+	}
+}
+
+// TestSearch_GraphExpansionNoGraph verifies that search works normally when
+// no graph is provided (nil graph should skip expansion).
+func TestSearch_GraphExpansionNoGraph(t *testing.T) {
+	s := newTestStore(t)
+	insertTestNodes(t, s)
+
+	embedder := embedding.NewHashEmbedder()
+	hs := New(s, embedder, nil) // nil graph
+
+	results, err := hs.Search("checksum", 10, nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result for 'checksum' with nil graph")
+	}
+}
+
+// TestSearch_GraphExpansionNoNewNeighbors verifies that expansion is a no-op
+// when seeds have no neighbors outside the existing candidate set.
+func TestSearch_GraphExpansionNoNewNeighbors(t *testing.T) {
+	s := newTestStore(t)
+
+	// Two nodes that are both direct FTS matches and connected to each other
+	nodeA := types.ASTNode{
+		ID:         types.GenerateNodeID("a.go", "ProcessData"),
+		FilePath:   "a.go",
+		SymbolName: "ProcessData",
+		NodeType:   types.NodeTypeFunction,
+		StartByte:  0,
+		EndByte:    100,
+		ContentSum: "ProcessData handles data processing operations",
+	}
+	nodeB := types.ASTNode{
+		ID:         types.GenerateNodeID("b.go", "ProcessDataHelper"),
+		FilePath:   "b.go",
+		SymbolName: "ProcessDataHelper",
+		NodeType:   types.NodeTypeFunction,
+		StartByte:  0,
+		EndByte:    80,
+		ContentSum: "ProcessDataHelper assists data processing",
+	}
+	if err := s.UpsertNodes([]types.ASTNode{nodeA, nodeB}); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	g := graph.New()
+	edges := []types.ASTEdge{
+		{SourceID: nodeA.ID, TargetID: nodeB.ID, EdgeType: types.EdgeTypeCalls},
+	}
+	if err := s.UpsertEdges(edges); err != nil {
+		t.Fatalf("UpsertEdges: %v", err)
+	}
+	storedEdges, _ := s.GetAllEdges()
+	g.BuildFromEdges(storedEdges)
+
+	embedder := embedding.NewHashEmbedder()
+	hs := New(s, embedder, g)
+
+	results, err := hs.Search("process data", 20, nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	// Both nodes should appear (direct matches); expansion adds nothing new
+	if len(results) < 2 {
+		t.Errorf("expected at least 2 results, got %d", len(results))
+	}
+}
