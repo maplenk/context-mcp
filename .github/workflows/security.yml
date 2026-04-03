@@ -5,11 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 6 * * 1' # Weekly Monday 6 AM UTC — catches new dependency CVEs
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write  # for uploading SARIF to GitHub Security tab
+  security-events: write # for uploading SARIF to GitHub Security tab
 
 jobs:
   govulncheck:
@@ -17,13 +19,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
 
+      - name: Download and verify modules
+        run: go mod download && go mod verify
+
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Run govulncheck
         run: govulncheck -tags "fts5" ./...
@@ -33,16 +40,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
 
+      - name: Download and verify modules
+        run: go mod download && go mod verify
+
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.22.11
 
       - name: Run gosec
-        run: gosec -tags fts5 -fmt sarif -out gosec-results.sarif ./... || true
+        run: gosec -tags fts5 -fmt sarif -out gosec-results.sarif ./...
 
       - name: Upload SARIF
         if: always()
@@ -55,18 +67,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Run Trivy (table output)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          exit-code: 0
+          exit-code: 1
           format: table
 
       - name: Run Trivy (SARIF for Security tab)
-        uses: aquasecurity/trivy-action@master
+        if: always()
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           scan-type: fs
           scan-ref: .
