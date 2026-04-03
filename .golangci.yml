@@ -1,6 +1,6 @@
 run:
   timeout: 5m
-  go: "1.25"
+  go: "1.23"
 
 linters:
   enable:
@@ -13,12 +13,9 @@ linters:
     - gocritic
     - gosec
     - misspell
+    - prealloc
 
 linters-settings:
-  errcheck:
-    exclude-functions:
-      - (*database/sql.Tx).Rollback
-      - (*github.com/naman/qb-context/internal/watcher.Watcher).Stop
   gocritic:
     enabled-tags:
       - diagnostic
