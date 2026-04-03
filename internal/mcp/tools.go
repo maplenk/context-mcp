@@ -211,6 +211,9 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		if r.Node.NodeType == types.NodeTypeStruct || r.Node.NodeType == types.NodeTypeClass || r.Node.NodeType == types.NodeTypeInterface {
 			nextTool = "understand"
 		}
+		if r.Node.NodeType == types.NodeTypeFile {
+			nextTool = "explore"
+		}
 
 		// Build next_args using ID (durable hash) with name as fallback
 		symbolRef := r.Node.ID
@@ -226,7 +229,7 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 			FilePath:   r.Node.FilePath,
 			ID:         r.Node.ID,
 			Score:      r.Score,
-			Reason:     generateReason(r.Breakdown),
+			Reason:     generateReasonFromBreakdown(r.Breakdown),
 			NextTool:   nextTool,
 			NextArgs:   nextArgs,
 		}
@@ -247,6 +250,15 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		Query:        p.Query,
 		Summary:      summary,
 	}, nil
+}
+
+// generateReasonFromBreakdown produces a human-readable explanation from a *ScoreBreakdown.
+// Returns a generic reason if the breakdown is nil.
+func generateReasonFromBreakdown(b *types.ScoreBreakdown) string {
+	if b == nil {
+		return "Composite match"
+	}
+	return generateReason(*b)
 }
 
 // generateReason produces a human-readable explanation from a ScoreBreakdown.
@@ -1428,6 +1440,14 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 		}
 	}
 
+	// Normalize PageRank among candidates for comparable [0,1] scale
+	var maxPR float64
+	for _, c := range candidateMap {
+		if pr := pageranks[c.hashID]; pr > maxPR {
+			maxPR = pr
+		}
+	}
+
 	// Score and rank candidates
 	type scoredCandidate struct {
 		candidate
@@ -1436,12 +1456,16 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 	var scored []scoredCandidate
 	for _, c := range candidateMap {
 		pr := pageranks[c.hashID]
+		normalizedPR := 0.0
+		if maxPR > 0 {
+			normalizedPR = pr / maxPR
+		}
 		btwn := betweenness[c.hashID]
 		normalizedDeg := 0.0
 		if maxOutDegree > 0 {
 			normalizedDeg = float64(c.outDegree) / float64(maxOutDegree)
 		}
-		score := 0.4*pr + 0.3*btwn + 0.3*normalizedDeg
+		score := 0.4*normalizedPR + 0.3*btwn + 0.3*normalizedDeg
 		scored = append(scored, scoredCandidate{candidate: *c, score: score})
 	}
 
@@ -1455,7 +1479,7 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 
 	// Build inspectables
 	inspectables := make([]types.Inspectable, 0, len(scored))
-	for i, sc := range scored {
+	for _, sc := range scored {
 		node, err := deps.Store.GetNode(sc.hashID)
 		if err != nil {
 			continue
@@ -1473,7 +1497,7 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 		}
 
 		inspectables = append(inspectables, types.Inspectable{
-			Rank:       i + 1,
+			Rank:       len(inspectables) + 1,
 			TargetType: sc.targetType,
 			Name:       node.SymbolName,
 			FilePath:   node.FilePath,
@@ -1490,7 +1514,7 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 
 	return types.InspectableResponse{
 		Inspectables: inspectables,
-		Total:        len(candidateMap),
+		Total:        len(scored),
 		Summary:      summary,
 	}, nil
 }

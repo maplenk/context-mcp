@@ -223,7 +223,7 @@ func GenerateNodeID(filePath, symbolName string) string {
 type SearchResult struct {
 	Node      ASTNode        `json:"node"`
 	Score     float64        `json:"score"`
-	Breakdown ScoreBreakdown `json:"breakdown,omitempty"`
+	Breakdown *ScoreBreakdown `json:"breakdown,omitempty"`
 }
 
 // RiskLevel represents the severity of impact from a change

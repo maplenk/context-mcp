@@ -865,6 +865,9 @@ func TestHybridSearch_ScoreBreakdown(t *testing.T) {
 	}
 
 	r := results[0]
+	if r.Breakdown == nil {
+		t.Fatal("expected non-nil Breakdown on first result")
+	}
 	bd := r.Breakdown
 	hasNonZero := bd.PPR > 0 || bd.BM25 > 0 || bd.Betweenness > 0 || bd.InDegree > 0 || bd.Semantic > 0
 	if !hasNonZero {
