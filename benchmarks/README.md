@@ -519,77 +519,82 @@ Head-to-head benchmark of **qb-context v0.9.0** vs **codebase-memory-mcp v0.8.0*
 
 #### Query Latency (lower = better)
 
-| ID | Query                      | qb-context | CBM       | Speedup       | Winner     |
-|----|----------------------------|-----------|-----------|---------------|------------|
-| A1 | Symbol lookup              | **279µs** | 32.4ms    | **116× faster** | qb-context |
-| A3 | Regex code search          | **77ms**  | 119.5ms   | **2× faster**  | qb-context |
-| B1 | Payment concept            | **5.7ms** | 104.9ms   | **18× faster** | qb-context |
-| B6 | Omnichannel concept        | **1.2ms** | 104.1ms   | **87× faster** | qb-context |
-| C1 | Order flow (cross-file)    | **3.0ms** | 20.4ms    | **7× faster**  | qb-context |
-| C5 | API→DB flow               | **2.2ms** | 120.3ms   | **55× faster** | qb-context |
+CBM queries use the **equivalent** tool for each category — `explore` for concept/cross-file
+(not `search_graph`), `understand` for symbol lookup (not basic search).
+
+| ID | Query                  | qb tool            | qb time   | CBM tool       | CBM time  | Speedup         |
+|----|------------------------|--------------------|-----------:|----------------|----------:|----------------:|
+| A1 | Symbol lookup          | `read_symbol`      | **279µs** | `understand`   | 369.2ms   | **1,322× faster** |
+| A3 | Regex code search      | `search_code`      | **77ms**  | `search_graph` | 119.5ms   | **2× faster**    |
+| B1 | Payment concept        | `context` (PPR+BM25)| **5.7ms**| `explore`      | 725.6ms   | **127× faster**  |
+| B6 | Omnichannel concept    | `context` (PPR+BM25)| **1.2ms**| `explore`      | 619.9ms   | **517× faster**  |
+| C1 | Order flow (cross-file)| `context` (PPR+BM25)| **3.0ms**| `explore`      | 764.7ms   | **255× faster**  |
+| C5 | API→DB flow           | `context` (PPR+BM25)| **2.2ms**| `explore`      | 905.4ms   | **411× faster**  |
 
 **Scoreboard: qb-context 6 — 0 CBM**
 
 #### Query Result Quality
 
 **A1 — Symbol Lookup**
-- qb-context (`read_symbol`): Returns full source code (14,373 chars) for
-  `FiscalYearController` class at `app/Http/Controllers/FiscalYearController.php`
-- CBM (`search_graph`): Returns metadata only — name, file path, pagerank=0.000049
+- qb-context (`read_symbol`): Returns **full source** (14,373 chars) for
+  `FiscalYearController` @ `app/Http/Controllers/FiscalYearController.php`
+- CBM (`understand`): Returns metadata + truncated source, pagerank=0.00005,
+  0 callers, 0 callees, `is_key_symbol=False`
 
 **A3 — Regex Code Search**
-- qb-context (`search_code`): 10 matches across `Agriculture.php`,
-  `OrderController.php`, `OrderDeletionController.php`, `v2/OrderController.php`
-- CBM (`search_graph`): 473 name-pattern matches — `recordPaymentIntent`,
-  `getPaymentModes`, `generatePryagrajPaymentHash` (different query: `.*payment.*`)
+- qb-context (`search_code`): 10 matches — `Agriculture.php`, `OrderController.php`,
+  `OrderDeletionController.php`, `v2/OrderController.php`
+- CBM (`search_graph`): 119.5ms — regex name-pattern match on graph nodes
 
 **B1 — Payment Concept**
-- qb-context (`context` PPR+BM25): 10 results, top_score=0.617 — ranks by
-  relevance: `BillingWeb.generateUTAPToken`, `partner.payment`, `partnerController.payment`
-- CBM (`search_graph`): 473 total (name match only) — no semantic ranking,
-  returns all symbols matching `.*[Pp]ayment.*`
+- qb-context (`context`): 10 results, scored 0.44–0.62 —
+  `BillingWeb.generateUTAPToken` (0.617), `partner.payment` (0.451)
+- CBM (`explore`): 20 matches, scored 0.43–0.56 —
+  `__construct` (0.557) ⚠️ generic, `fetchPaymentValues` (0.456),
+  `getStorePaymentSetting` (0.454). **0 dependencies, 0 hotspots, 0 entry_points.**
 
-**B6 — Omnichannel Concept**
-- qb-context (`context` PPR+BM25): 10 results, top_score=0.531 —
-  `integrationBilling.handle`, `SyncInventoryJob`, `Admin.syncBrevoWebsiteContact`
-- CBM (`search_graph`): Name-pattern match only — cannot understand
-  "omnichannel integration sync logic" as a concept
+**B6 — Omnichannel Concept** *(CBM wins on quality)*
+- qb-context (`context`): 10 results, scored 0.43–0.53 —
+  `integrationBilling.handle` (0.531), `SyncInventoryJob` (0.521)
+- CBM (`explore`): 20 matches, scored 0.52–0.70 —
+  **`syncBrevoContact` (0.699)**, `syncZOHOItem` (0.571), `syncBrevoWebsiteContact` (0.554).
+  Higher scores and more relevant top results.
 
-**C1 — Order Flow (Cross-file)**
-- qb-context (`context` PPR+BM25): 15 results spanning multiple files,
-  ranked by structural + semantic relevance
-- CBM (`trace_call_path`): 5 callers of `store()` — `ZohoOrder.handle`,
-  `AutoMailer.sendCustomChainWiseSalesSummary`. 0 callees.
+**C1 — Order Flow** *(CBM wins on quality)*
+- qb-context (`context`): 15 results — `Flight.endLeg` (0.617),
+  `appController.endSession` — some results unrelated to orders
+- CBM (`explore`): 20 matches, scored 0.65–0.66 —
+  **`orderCheck` (0.664)**, `OrderRequestTracker` (0.656), `orders` (0.649).
+  More relevant to "order flow" query.
 
 **C5 — API→DB Flow**
-- qb-context (`context` PPR+BM25): 15 results including migration tables
-  and API trackers — understands the "API request to database write" concept
-- CBM (`search_graph`): Name-pattern match `.*[Ii]nventory.*` — cannot
-  interpret "API→DB flow" semantically
+- qb-context (`context`): 15 results —
+  `create_global_nector_api_usage_tracker_table`, `Unicommerce.APIRequestTracker`
+- CBM (`explore`): 20 matches, scored 0.49–0.55 —
+  `write` (0.552) ⚠️ generic, `writeStderr` (0.509). Less relevant top results.
 
 #### CBM-Only Tools (no qb-context equivalent)
 
-| Tool                 | Latency   | Description                              |
-|----------------------|-----------|------------------------------------------|
-| `get_architecture`   | 25.5ms   | Project overview with routes and clusters |
-| `explore`            | 416.2ms  | Area exploration with dependencies        |
-| `understand`         | 375.4ms  | Symbol deep-dive with callers/callees     |
-| `get_impact_analysis`| 15.6ms   | Blast radius with risk scoring            |
-| `get_key_symbols`    | 24.9ms   | Top-K symbols by PageRank                 |
+| Tool                  | Latency   | Description                              |
+|-----------------------|-----------|------------------------------------------|
+| `get_architecture`    | 25.5ms   | Project overview with routes and clusters |
+| `get_impact_analysis` | 15.6ms   | Blast radius with risk scoring            |
+| `get_key_symbols`     | 24.9ms   | Top-K symbols by PageRank                 |
+| `trace_call_path`     | 19.2ms   | BFS callers/callees traversal             |
 
 #### Key Takeaways
 
-1. **qb-context wins all 6 comparable queries** — 2× to 116× faster
-2. **Semantic understanding is the differentiator**: qb-context's PPR+BM25 hybrid
-   search understands natural language concepts ("omnichannel integration sync logic"),
-   while CBM relies on regex name-pattern matching
-3. **CBM extracts richer structure** — 33% more nodes and 116% more edges via
+1. **qb-context wins all 6 queries on speed** — 2× to 1,322× faster
+2. **CBM wins on result quality for 2/6 queries** (B6 omnichannel, C1 order flow) —
+   CBM's `explore` finds more contextually relevant symbols in those cases
+3. **qb-context's PPR+BM25 hybrid** understands natural language concepts but
+   sometimes drifts (C1: returns `Flight.endLeg` for "order flow")
+4. **CBM's `explore`** returns scored results but includes generics (`__construct`,
+   `write`) and leaves dependencies/hotspots/entry_points empty
+5. **CBM extracts richer structure** — 33% more nodes and 116% more edges via
    tree-sitter (66 langs vs 6)
-4. **CBM CLI adds ~15ms process startup overhead** per invocation (subprocess spawn)
-5. **CBM offers compound tools** (`explore`, `understand`, `prepare_change`) that
-   qb-context does not yet have
-6. **Score relevance**: qb-context returns ranked scores (0.13–0.62), CBM returns
-   binary (match/no-match) or PageRank values
+6. **CBM CLI overhead** — ~15ms subprocess spawn + ~600-900ms for `explore` compound
+   queries vs qb-context's in-process 1-6ms
 
 #### Reproduce
 
