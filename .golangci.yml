@@ -15,6 +15,10 @@ linters:
     - misspell
 
 linters-settings:
+  errcheck:
+    exclude-functions:
+      - (*database/sql.Tx).Rollback
+      - (*github.com/naman/qb-context/internal/watcher.Watcher).Stop
   gocritic:
     enabled-tags:
       - diagnostic
