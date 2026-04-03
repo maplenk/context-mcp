@@ -496,6 +496,33 @@ func indexRepo(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 		allEdges = append(allEdges, r.edges...)
 	}
 
+	// File document nodes: index config, Blade views, SQL schemas with full content.
+	// For files already parsed by tree-sitter (e.g., config/*.php, *.blade.php),
+	// the file doc node has the same ID as the tree-sitter file node and will
+	// overwrite it with richer content (file content instead of just the path).
+	// For files not handled by tree-sitter (e.g., *.sql), this is the only node.
+	fileDocFiles, fdErr := watcher.WalkAllFiles(cfg.RepoRoot, cfg.ExcludedDirs)
+	if fdErr != nil {
+		log.Printf("Warning: failed to walk for file doc candidates: %v", fdErr)
+	} else {
+		var fileDocCount int
+		for _, rel := range fileDocFiles {
+			if !parser.IsFileDocCandidate(rel) {
+				continue
+			}
+			absPath := filepath.Join(cfg.RepoRoot, rel)
+			node, err := parser.CreateFileDocNode(absPath, rel)
+			if err != nil {
+				continue
+			}
+			allNodes = append(allNodes, *node)
+			fileDocCount++
+		}
+		if fileDocCount > 0 {
+			log.Printf("Indexed %d file document nodes (config, Blade, SQL)", fileDocCount)
+		}
+	}
+
 	// --- Cross-file edge resolution ---
 	// Build symbol → nodeID index for class/struct/interface symbols
 	symbolIndex := make(map[string]string)
@@ -778,25 +805,46 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 			log.Printf("Failed to delete stale data for %s: %v", relPath, err)
 		}
 
-		// Re-parse the file
-		result, err := p.ParseFile(absPath, cfg.RepoRoot)
-		if err != nil {
-			log.Printf("Parse error %s: %v", relPath, err)
-			continue
+		// Re-parse: tree-sitter for supported files, file doc for candidates
+		var fileNodes []types.ASTNode
+		var fileEdges []types.ASTEdge
+
+		if parser.IsSupported(absPath) {
+			result, err := p.ParseFile(absPath, cfg.RepoRoot)
+			if err != nil {
+				log.Printf("Parse error %s: %v", relPath, err)
+				continue
+			}
+			fileNodes = result.Nodes
+			fileEdges = result.Edges
 		}
 
-		allNewNodes = append(allNewNodes, result.Nodes...)
-		allNewEdges = append(allNewEdges, result.Edges...)
+		// File doc candidates get a content-rich file node
+		if parser.IsFileDocCandidate(relPath) {
+			node, err := parser.CreateFileDocNode(absPath, relPath)
+			if err != nil {
+				log.Printf("File doc error %s: %v", relPath, err)
+			} else {
+				fileNodes = append(fileNodes, *node)
+			}
+		}
+
+		if len(fileNodes) == 0 {
+			continue // unsupported file type with no file doc match
+		}
+
+		allNewNodes = append(allNewNodes, fileNodes...)
+		allNewEdges = append(allNewEdges, fileEdges...)
 
 		// Store nodes first (needed for symbol index query below)
-		if len(result.Nodes) > 0 {
-			if err := store.UpsertNodes(result.Nodes); err != nil {
+		if len(fileNodes) > 0 {
+			if err := store.UpsertNodes(fileNodes); err != nil {
 				log.Printf("Failed to store nodes for %s: %v", relPath, err)
 			}
 		}
 
 		// Generate embeddings
-		for _, node := range result.Nodes {
+		for _, node := range fileNodes {
 			vec, err := embedder.Embed(node.ContentSum)
 			if err != nil {
 				log.Printf("Embedding error for %s: %v", node.SymbolName, err)
@@ -1044,42 +1092,64 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 			graphEngine.RemoveNode(nodeID)
 		}
 
-		// Re-parse the file
-		result, err := p.ParseFile(absPath, cfg.RepoRoot)
-		if err != nil {
-			log.Printf("Parse error %s: %v", event.Path, err)
-			return
+		// Re-parse the file: tree-sitter for supported files, file doc for candidates
+		var resultNodes []types.ASTNode
+		var resultEdges []types.ASTEdge
+
+		if parser.IsSupported(absPath) {
+			result, err := p.ParseFile(absPath, cfg.RepoRoot)
+			if err != nil {
+				log.Printf("Parse error %s: %v", event.Path, err)
+				return
+			}
+			resultNodes = result.Nodes
+			resultEdges = result.Edges
+		}
+
+		// File doc candidates get a content-rich file node (overwrites the
+		// sparse tree-sitter file node for files that are also IsSupported).
+		if parser.IsFileDocCandidate(event.Path) {
+			node, err := parser.CreateFileDocNode(absPath, event.Path)
+			if err != nil {
+				log.Printf("File doc error %s: %v", event.Path, err)
+			} else {
+				resultNodes = append(resultNodes, *node)
+			}
+		}
+
+		if len(resultNodes) == 0 {
+			return // unsupported file type with no file doc match
 		}
 
 		// Store new nodes first (needed before edge resolution)
-		if len(result.Nodes) > 0 {
-			if err := store.UpsertNodes(result.Nodes); err != nil {
+		if len(resultNodes) > 0 {
+			if err := store.UpsertNodes(resultNodes); err != nil {
 				log.Printf("Failed to store nodes: %v", err)
 			}
 		}
 
 		// Resolve cross-file edges using TargetSymbol (matches indexRepo behavior)
-		if len(result.Edges) > 0 {
+		if len(resultEdges) > 0 {
 			symbolIndex, siErr := store.GetSymbolIndex()
 			if siErr != nil {
 				log.Printf("Failed to get symbol index for cross-file resolution: %v", siErr)
 			} else {
-				nodeIDSet := make(map[string]bool, len(result.Nodes))
-				for _, n := range result.Nodes {
+				nodeIDSet := make(map[string]bool, len(resultNodes))
+				for _, n := range resultNodes {
 					nodeIDSet[n.ID] = true
 				}
-				for i, e := range result.Edges {
+				for i, e := range resultEdges {
 					if !nodeIDSet[e.TargetID] && e.TargetSymbol != "" {
 						if resolved, ok := symbolIndex[e.TargetSymbol]; ok {
-							result.Edges[i].TargetID = resolved
+							resultEdges[i].TargetID = resolved
 						}
 					}
 				}
 			}
 		}
 
-		if len(result.Edges) > 0 {
-			if err := store.UpsertEdges(result.Edges); err != nil {
+		if len(resultEdges) > 0 {
+			if err := store.UpsertEdges(resultEdges); err != nil {
 				log.Printf("Failed to store edges: %v", err)
 			}
 		}
@@ -1094,7 +1164,7 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 		}
 
 		// Generate embeddings for new/updated nodes
-		for _, node := range result.Nodes {
+		for _, node := range resultNodes {
 			text := node.ContentSum
 			if intentText != "" {
 				text = text + "\n[git-intent]\n" + intentText
@@ -1110,7 +1180,7 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 		// Add new edges to graph incrementally (nodes are created automatically
 		// by AddEdge via ensureNode; isolated nodes without edges don't affect
 		// graph signals like PPR/betweenness/in-degree)
-		for _, edge := range result.Edges {
+		for _, edge := range resultEdges {
 			graphEngine.AddEdge(edge)
 		}
 

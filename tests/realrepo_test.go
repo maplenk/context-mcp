@@ -166,6 +166,34 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 		return nil, err
 	}
 
+	// Second pass: index file document nodes for config, Blade views, SQL schemas.
+	// For files already parsed by tree-sitter (e.g., config/*.php, *.blade.php),
+	// the file doc node shares the same ID as the tree-sitter file node and will
+	// overwrite it with richer content during UpsertNodes (last-write wins).
+	err = filepath.Walk(realRepoPath, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(realRepoPath, path)
+		if shouldSkip(rel) {
+			return nil
+		}
+		if !parser.IsFileDocCandidate(rel) {
+			return nil
+		}
+
+		node, err := parser.CreateFileDocNode(path, rel)
+		if err != nil {
+			return nil // skip files with read errors
+		}
+		allNodes = append(allNodes, *node)
+		return nil
+	})
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+
 	// Store nodes
 	if err := store.UpsertNodes(allNodes); err != nil {
 		store.Close()
