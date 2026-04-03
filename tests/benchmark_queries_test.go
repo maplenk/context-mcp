@@ -103,7 +103,10 @@ func TestBenchmarkQueries(t *testing.T) {
 
 			// Try to decode as array of result objects
 			var results []map[string]interface{}
-			if json.Unmarshal(raw, &results) == nil && len(results) > 0 {
+			if json.Unmarshal(raw, &results) == nil {
+				if len(results) == 0 {
+					t.Error("expected non-empty results")
+				}
 				t.Logf("Results: %d items", len(results))
 				for i, r := range results {
 					symbolName, _ := r["symbol_name"].(string)
@@ -126,9 +129,6 @@ func TestBenchmarkQueries(t *testing.T) {
 					}
 					t.Logf("  [%d] symbol=%s type=%s file=%s score=%.4f",
 						i, symbolName, nodeType, filePath, score)
-				}
-				if len(results) == 0 {
-					t.Error("expected non-empty results")
 				}
 			} else {
 				// Single object result (e.g. read_symbol)

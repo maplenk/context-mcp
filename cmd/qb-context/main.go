@@ -173,11 +173,8 @@ func main() {
 			}
 		} else {
 			// C9: Validate path is within repo root (prevent path traversal)
-			absPath := path
-			if !filepath.IsAbs(absPath) {
-				absPath = filepath.Join(cfg.RepoRoot, absPath)
-			}
-			absPath, err := filepath.Abs(absPath)
+			// M20: Always join with RepoRoot before resolving, avoids CWD-dependent resolution
+			absPath, err := filepath.Abs(filepath.Join(cfg.RepoRoot, path))
 			if err != nil {
 				return fmt.Errorf("invalid path: %w", err)
 			}
@@ -188,8 +185,8 @@ func main() {
 			if !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) && absPath != absRoot {
 				return fmt.Errorf("path traversal detected: %s is outside repo root", path)
 			}
-			log.Printf("Targeted re-index triggered for: %s", path)
-			indexPath(cfg, store, p, embedder, graphEngine, path)
+			log.Printf("Targeted re-index triggered for: %s", absPath)
+			indexPath(cfg, store, p, embedder, graphEngine, absPath)
 		}
 		return nil
 	}
@@ -751,31 +748,13 @@ func indexPath(cfg *config.Config, store *storage.Store, p *parser.Parser, embed
 
 	var files []string
 	if info.IsDir() {
-		// H20: Walk the directory respecting excluded dirs and gitignore
-		filepath.Walk(absTarget, func(path string, fi os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			if fi.IsDir() {
-				base := filepath.Base(path)
-				for _, excl := range cfg.ExcludedDirs {
-					if base == excl {
-						return filepath.SkipDir
-					}
-				}
-				return nil
-			}
-			// Only index files with supported extensions
-			if !parser.IsSupported(path) {
-				return nil
-			}
-			relPath, err := filepath.Rel(cfg.RepoRoot, path)
-			if err != nil {
-				return nil
-			}
-			files = append(files, relPath)
-			return nil
-		})
+		// M8: Use symlink-aware walk with gitignore support (matches indexRepo)
+		walked, walkErr := watcher.WalkSourceFilesUnder(cfg.RepoRoot, absTarget, cfg.ExcludedDirs)
+		if walkErr != nil {
+			log.Printf("Failed to walk directory %s: %v", targetPath, walkErr)
+			return
+		}
+		files = walked
 	} else {
 		relPath, err := filepath.Rel(cfg.RepoRoot, absTarget)
 		if err != nil {

@@ -4,6 +4,7 @@ package tests
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,7 +219,11 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 	graphEngine.BuildFromEdges(storedEdges)
 
 	// Create embedder and search engine
-	embedder := embedding.NewTFIDFEmbedder(384)
+	embedder, err := embedding.NewTFIDFEmbedder(384)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("creating embedder: %w", err)
+	}
 	searchEng := search.New(store, embedder, graphEngine)
 
 	// Set up MCP server with tool handlers

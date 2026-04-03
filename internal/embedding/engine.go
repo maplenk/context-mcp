@@ -3,6 +3,7 @@ package embedding
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"strings"
@@ -44,7 +45,12 @@ type Embedder interface {
 // word and character n-gram features projected to 384 dimensions.
 // Falls back to HashEmbedder only if explicitly requested via NewHashEmbedder.
 func NewEmbedder() Embedder {
-	return NewTFIDFEmbedder(384)
+	// 384 is always valid; panic on error would indicate a programming bug.
+	e, err := NewTFIDFEmbedder(384)
+	if err != nil {
+		panic(fmt.Sprintf("NewEmbedder: %v", err))
+	}
+	return e
 }
 
 // ---------------------------------------------------------------------------
@@ -65,8 +71,13 @@ type TFIDFEmbedder struct {
 }
 
 // NewTFIDFEmbedder creates a new TF-IDF based embedder with the given dimension.
-func NewTFIDFEmbedder(dim int) *TFIDFEmbedder {
-	return &TFIDFEmbedder{dim: dim}
+// Returns an error if dim is not positive, since zero or negative dimensions
+// would cause a division-by-zero panic in projectToken.
+func NewTFIDFEmbedder(dim int) (*TFIDFEmbedder, error) {
+	if dim <= 0 {
+		return nil, fmt.Errorf("embedding dimension must be positive, got %d", dim)
+	}
+	return &TFIDFEmbedder{dim: dim}, nil
 }
 
 // Embed generates an embedding vector from text using TF-IDF n-gram features.

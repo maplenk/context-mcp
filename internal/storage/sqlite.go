@@ -700,12 +700,22 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	}
 
 	// Clamp LIMIT to 500 to prevent DoS via unbounded result sets.
-	// If user supplies LIMIT > 500, replace it. If no LIMIT, append one.
+	// Uses ReplaceAllStringFunc with per-match logic so that:
+	//   1. Only LIMIT values exceeding 500 are clamped (small LIMITs preserved).
+	//   2. LIMIT keywords inside string literals are handled gracefully because
+	//      we only clamp the *last* match (the outermost/actual query LIMIT).
 	limitRe := regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)\b`)
-	if matches := limitRe.FindStringSubmatch(query); len(matches) > 1 {
-		userLimit, _ := strconv.Atoi(matches[1])
-		if userLimit > 500 {
-			query = limitRe.ReplaceAllString(query, "LIMIT 500")
+	allMatches := limitRe.FindAllStringIndex(query, -1)
+	if len(allMatches) > 0 {
+		// Only process the last LIMIT match (the actual query LIMIT, not decoys in string literals).
+		lastMatch := allMatches[len(allMatches)-1]
+		matchedText := query[lastMatch[0]:lastMatch[1]]
+		sub := limitRe.FindStringSubmatch(matchedText)
+		if len(sub) > 1 {
+			userLimit, _ := strconv.Atoi(sub[1])
+			if userLimit > 500 {
+				query = query[:lastMatch[0]] + "LIMIT 500" + query[lastMatch[1]:]
+			}
 		}
 	} else {
 		query = query + " LIMIT 500"
@@ -1056,6 +1066,9 @@ func boolToInt(b bool) int {
 
 // UpsertRepoSnapshot stores or updates the repository git snapshot.
 func (s *Store) UpsertRepoSnapshot(snap gitmeta.RepoSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.Exec(`INSERT INTO repo_git_snapshot
 		(repo_root, head_ref, head_commit, is_detached, is_dirty, ahead_count, behind_count,
 		 staged_files, modified_files, untracked_files, snapshot_summary, updated_at)
@@ -1077,6 +1090,9 @@ func (s *Store) UpsertRepoSnapshot(snap gitmeta.RepoSnapshot) error {
 
 // GetRepoSnapshot returns the stored git snapshot for the given repo root.
 func (s *Store) GetRepoSnapshot(repoRoot string) (*gitmeta.RepoSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var snap gitmeta.RepoSnapshot
 	var isDetached, isDirty int
 	var updatedAt string
@@ -1091,12 +1107,19 @@ func (s *Store) GetRepoSnapshot(repoRoot string) (*gitmeta.RepoSnapshot, error) 
 	}
 	snap.IsDetached = isDetached != 0
 	snap.IsDirty = isDirty != 0
-	snap.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	parsedTime, parseErr := time.Parse(time.RFC3339, updatedAt)
+	if parseErr != nil {
+		log.Printf("Warning: malformed updated_at timestamp %q in repo_git_snapshot for %s: %v", updatedAt, repoRoot, parseErr)
+	}
+	snap.UpdatedAt = parsedTime
 	return &snap, nil
 }
 
 // UpsertGitCommits stores commit metadata in batch.
 func (s *Store) UpsertGitCommits(commits []gitmeta.CommitInfo) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if len(commits) == 0 {
 		return nil
 	}
@@ -1127,6 +1150,9 @@ func (s *Store) UpsertGitCommits(commits []gitmeta.CommitInfo) error {
 
 // UpsertFileHistory stores file-commit associations in batch.
 func (s *Store) UpsertFileHistory(changes []gitmeta.FileChange) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if len(changes) == 0 {
 		return nil
 	}
@@ -1157,6 +1183,9 @@ func (s *Store) UpsertFileHistory(changes []gitmeta.FileChange) error {
 
 // UpsertFileIntents stores compacted file intent summaries in batch.
 func (s *Store) UpsertFileIntents(intents []gitmeta.FileIntent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if len(intents) == 0 {
 		return nil
 	}
@@ -1190,6 +1219,9 @@ func (s *Store) UpsertFileIntents(intents []gitmeta.FileIntent) error {
 
 // GetFileIntent returns the stored intent summary for a file.
 func (s *Store) GetFileIntent(filePath string) (*gitmeta.FileIntent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var fi gitmeta.FileIntent
 	var lastUpdated string
 	err := s.db.QueryRow(`SELECT file_path, intent_text, source_hash, commit_count, last_commit_hash, last_updated_at
@@ -1198,12 +1230,19 @@ func (s *Store) GetFileIntent(filePath string) (*gitmeta.FileIntent, error) {
 	if err != nil {
 		return nil, err
 	}
-	fi.LastUpdatedAt, _ = time.Parse(time.RFC3339, lastUpdated)
+	parsedTime, parseErr := time.Parse(time.RFC3339, lastUpdated)
+	if parseErr != nil {
+		log.Printf("Warning: malformed last_updated_at timestamp %q in git_file_intent for %s: %v", lastUpdated, filePath, parseErr)
+	}
+	fi.LastUpdatedAt = parsedTime
 	return &fi, nil
 }
 
 // GetFileIntentsByPaths returns intent summaries for multiple files.
 func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileIntent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	if len(paths) == 0 {
 		return nil, nil
 	}
@@ -1240,7 +1279,11 @@ func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileI
 				rows.Close()
 				return nil, err
 			}
-			fi.LastUpdatedAt, _ = time.Parse(time.RFC3339, lastUpdated)
+			parsedTime, parseErr := time.Parse(time.RFC3339, lastUpdated)
+			if parseErr != nil {
+				log.Printf("Warning: malformed last_updated_at timestamp %q in git_file_intent for %s: %v", lastUpdated, fi.FilePath, parseErr)
+			}
+			fi.LastUpdatedAt = parsedTime
 			result[fi.FilePath] = &fi
 		}
 		rows.Close()
@@ -1254,7 +1297,12 @@ func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileI
 // GetLatestStoredCommitHash returns the most recent commit hash stored in git_commits.
 // Returns empty string if no commits stored.
 func (s *Store) GetLatestStoredCommitHash() (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var hash string
+	// NOTE: ORDER BY author_time DESC works correctly only because all stored
+	// author_time values are RFC3339 in UTC, which sorts lexicographically.
 	err := s.db.QueryRow(`SELECT commit_hash FROM git_commits ORDER BY author_time DESC LIMIT 1`).Scan(&hash)
 	if err == sql.ErrNoRows {
 		return "", nil

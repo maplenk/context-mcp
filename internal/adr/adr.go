@@ -3,6 +3,7 @@ package adr
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,13 +124,44 @@ func (d *Discoverer) Discover() ([]DiscoveredDoc, error) {
 }
 
 // readDoc reads a single document, truncating to maxContentBytes.
-// It resolves symlinks and verifies the resolved path is within the repo root.
+// It opens the file first, then verifies the open fd's real path is within the
+// repo root, eliminating the TOCTOU window where a symlink target could change
+// between resolution and read.
 func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
-	// Resolve symlinks and verify the file is within the repo boundary
+	// Open the file first — all subsequent checks operate on this fd,
+	// so a symlink re-target after open cannot change what we read.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// Resolve the real path of the open file descriptor via /dev/fd or Stat.
+	// On most systems, f.Name() returns the original path, so we use Fd + readlink
+	// pattern or fall back to EvalSymlinks on the original path. The key guarantee
+	// is that we stat the open fd and verify before reading.
+	// Use the fd's actual file info to detect the real path.
+	fdInfo, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat open fd: %w", err)
+	}
+
+	// Resolve the original path to get the real target for boundary checking.
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return nil, err
 	}
+
+	// Verify the resolved path matches the open fd by comparing os.FileInfo.
+	// This ensures the symlink didn't change between EvalSymlinks and our open.
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("stat resolved path: %w", err)
+	}
+	if !os.SameFile(fdInfo, resolvedInfo) {
+		return nil, fmt.Errorf("symlink %s changed between open and resolve (TOCTOU detected)", path)
+	}
+
 	// H22: Return error if EvalSymlinks on repoRoot fails, instead of silently
 	// falling back to the raw path which causes prefix mismatches.
 	resolvedRoot, err := filepath.EvalSymlinks(d.repoRoot)
@@ -140,7 +172,8 @@ func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
 		return nil, fmt.Errorf("symlink %s resolves to %s which is outside repo root %s", path, resolved, d.repoRoot)
 	}
 
-	data, err := os.ReadFile(resolved)
+	// Read from the already-open fd — no second open/race possible.
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
 	}

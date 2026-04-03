@@ -1,6 +1,7 @@
 package search
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -122,6 +123,11 @@ func New(store *storage.Store, embedder embedding.Embedder, graph *graph.GraphEn
 // Search performs multi-signal composite search.
 // maxPerFile controls how many results per unique file_path are returned (0 uses default of 3).
 func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []string, maxPerFile ...int) ([]types.SearchResult, error) {
+	// Empty/whitespace queries have nothing to search — return early
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+
 	if limit <= 0 {
 		limit = 10
 	}
@@ -136,6 +142,9 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		candidateLimit = 100
 	}
 
+	// M5: Track signal source failures to return an error when ALL sources fail
+	var ftsErr, semanticErr error
+
 	// Enhance query for FTS5
 	ftsQuery := buildFTSQuery(query)
 
@@ -149,6 +158,7 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		sanitizedFallback := sanitizeFTS(query)
 		lexicalResults, err = h.store.SearchLexicalRaw(sanitizedFallback, candidateLimit)
 		if err != nil {
+			ftsErr = err
 			lexicalResults = nil
 		}
 	}
@@ -160,14 +170,28 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		if err == nil {
 			semanticResults, err = h.store.SearchSemantic(queryVec, candidateLimit)
 			if err != nil {
+				semanticErr = err
 				semanticResults = nil
 			}
+		} else {
+			semanticErr = err
 		}
 	}
 
 	// Collect all candidate nodes
 	candidates := collectCandidates(lexicalResults, semanticResults)
 	if len(candidates) == 0 {
+		// M5: If no candidates and at least one source had an error, report it
+		var failures []string
+		if ftsErr != nil {
+			failures = append(failures, fmt.Sprintf("FTS: %v", ftsErr))
+		}
+		if semanticErr != nil {
+			failures = append(failures, fmt.Sprintf("semantic: %v", semanticErr))
+		}
+		if len(failures) > 0 {
+			return nil, fmt.Errorf("all signal sources failed: %s", strings.Join(failures, "; "))
+		}
 		return nil, nil
 	}
 

@@ -1159,8 +1159,8 @@ func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
 
 	// Slow path: snapshot under read lock, compute without lock, publish under write lock
 
-	// Step 1: Snapshot the graph data under read lock
-	undirected := g.snapshotUndirectedGraph()
+	// Step 1: Snapshot the graph data and reverseMap under read lock
+	undirected, snapshotReverseMap := g.snapshotUndirectedGraph()
 
 	// Step 2: Run Louvain on snapshot (no lock held — readers are not blocked)
 	if undirected.Nodes().Len() == 0 {
@@ -1195,12 +1195,13 @@ func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
 		return result, g.modularity
 	}
 
-	// Convert gonum IDs back to hash IDs and cache
+	// Convert gonum IDs back to hash IDs using the snapshotted reverseMap
+	// (not g.reverseMap, which may have changed if BuildFromEdges ran concurrently)
 	g.communities = make([][]string, len(communities))
 	for i, comm := range communities {
 		var nodeIDs []string
 		for _, node := range comm {
-			if hashID, ok := g.reverseMap[node.ID()]; ok {
+			if hashID, ok := snapshotReverseMap[node.ID()]; ok {
 				nodeIDs = append(nodeIDs, hashID)
 			}
 		}
@@ -1217,8 +1218,10 @@ func (g *GraphEngine) DetectCommunities() ([]types.Community, float64) {
 }
 
 // snapshotUndirectedGraph builds an undirected copy of the directed graph under a read lock.
-// The returned graph is independent and safe to use without holding any lock.
-func (g *GraphEngine) snapshotUndirectedGraph() *simple.UndirectedGraph {
+// It also snapshots the reverseMap so callers can convert gonum IDs back to hash IDs
+// using the same mapping that was in place when the graph was copied.
+// The returned graph and map are independent and safe to use without holding any lock.
+func (g *GraphEngine) snapshotUndirectedGraph() (*simple.UndirectedGraph, map[int64]string) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -1242,7 +1245,13 @@ func (g *GraphEngine) snapshotUndirectedGraph() *simple.UndirectedGraph {
 		}
 	}
 
-	return undirected
+	// Snapshot reverseMap so community detection uses consistent ID mappings
+	revMapCopy := make(map[int64]string, len(g.reverseMap))
+	for k, v := range g.reverseMap {
+		revMapCopy[k] = v
+	}
+
+	return undirected, revMapCopy
 }
 
 // detectCommunitiesLocked is the inner implementation used by GetConnectors.
@@ -1682,14 +1691,20 @@ func (g *GraphEngine) GetConnectors(betweenness map[string]float64, limit int) [
 		neighborComms := make(map[int]bool)
 		succs := g.dg.From(id)
 		for succs.Next() {
-			succHash := g.reverseMap[succs.Node().ID()]
+			succHash, ok := g.reverseMap[succs.Node().ID()]
+			if !ok {
+				continue
+			}
 			if c, ok := communityOf[succHash]; ok {
 				neighborComms[c] = true
 			}
 		}
 		preds := g.dg.To(id)
 		for preds.Next() {
-			predHash := g.reverseMap[preds.Node().ID()]
+			predHash, ok := g.reverseMap[preds.Node().ID()]
+			if !ok {
+				continue
+			}
 			if c, ok := communityOf[predHash]; ok {
 				neighborComms[c] = true
 			}

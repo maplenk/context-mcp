@@ -25,11 +25,12 @@ type deviceInode struct {
 // If walkFn returns filepath.SkipDir for a directory, that subtree is skipped.
 func symlinkWalk(root string, walkFn func(path string, info os.FileInfo, err error) error) error {
 	visited := make(map[deviceInode]bool)
-	return symlinkWalkImpl(root, visited, walkFn)
+	visitedPaths := make(map[string]bool)
+	return symlinkWalkImpl(root, visited, visitedPaths, walkFn)
 }
 
 // symlinkWalkImpl is the recursive implementation of symlinkWalk.
-func symlinkWalkImpl(dir string, visited map[deviceInode]bool, walkFn func(path string, info os.FileInfo, err error) error) error {
+func symlinkWalkImpl(dir string, visited map[deviceInode]bool, visitedPaths map[string]bool, walkFn func(path string, info os.FileInfo, err error) error) error {
 	// Resolve the directory itself to handle symlinked roots
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -41,14 +42,21 @@ func symlinkWalkImpl(dir string, visited map[deviceInode]bool, walkFn func(path 
 		return walkFn(dir, nil, err)
 	}
 
-	// Check for cycle using device+inode
-	di, err := getDeviceInode(info)
-	if err == nil {
+	// Check for cycle using device+inode (Unix) or resolved path (Windows fallback)
+	di, diErr := getDeviceInode(info)
+	if diErr == nil {
 		if visited[di] {
 			return nil // cycle detected, skip
 		}
 		visited[di] = true
 		defer func() { delete(visited, di) }()
+	} else {
+		// Fallback: use resolved path for cycle detection (e.g., Windows)
+		if visitedPaths[resolved] {
+			return nil // cycle detected, skip
+		}
+		visitedPaths[resolved] = true
+		defer func() { delete(visitedPaths, resolved) }()
 	}
 
 	// Call walkFn for the directory itself
@@ -80,7 +88,7 @@ func symlinkWalkImpl(dir string, visited map[deviceInode]bool, walkFn func(path 
 		}
 
 		if childInfo.IsDir() {
-			if err := symlinkWalkImpl(childPath, visited, walkFn); err != nil {
+			if err := symlinkWalkImpl(childPath, visited, visitedPaths, walkFn); err != nil {
 				return err
 			}
 		} else {
@@ -313,7 +321,7 @@ func (w *Watcher) handleRawEvent(event fsnotify.Event) {
 	// If a new directory is created (or a symlink to a directory), start watching
 	// it and all its subdirectories recursively. M15: use symlinkWalk for symlink support.
 	if event.Has(fsnotify.Create) {
-		if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			if !w.isExcluded(path) {
 				_ = symlinkWalk(path, func(p string, fi os.FileInfo, walkErr error) error {
 					if walkErr != nil {
@@ -635,4 +643,82 @@ func WalkSourceFiles(repoRoot string, excludedDirs []string) ([]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+// WalkSourceFilesUnder walks a specific directory (which must be inside repoRoot)
+// and returns relative paths (relative to repoRoot) of all watchable source files,
+// respecting excluded dirs and .gitignore rules.
+// Unlike WalkSourceFiles, this only walks the subtree rooted at walkDir.
+func WalkSourceFilesUnder(repoRoot string, walkDir string, excludedDirs []string) ([]string, error) {
+	excluded := make(map[string]bool)
+	for _, d := range excludedDirs {
+		excluded[d] = true
+	}
+
+	// Parse root .gitignore
+	var gitignores []gitignoreEntry
+	gitignorePath := filepath.Join(repoRoot, ".gitignore")
+	if _, err := os.Stat(gitignorePath); err == nil {
+		gi, err := ignore.CompileIgnoreFile(gitignorePath)
+		if err == nil {
+			gitignores = append(gitignores, gitignoreEntry{matcher: gi, baseDir: "."})
+		}
+	}
+
+	// Also parse .gitignore files between repoRoot and walkDir
+	rel, err := filepath.Rel(repoRoot, walkDir)
+	if err == nil && rel != "." {
+		parts := strings.Split(rel, string(filepath.Separator))
+		for i := range parts {
+			ancestor := filepath.Join(parts[:i+1]...)
+			nestedGI := filepath.Join(repoRoot, ancestor, ".gitignore")
+			if _, statErr := os.Stat(nestedGI); statErr == nil {
+				gi, parseErr := ignore.CompileIgnoreFile(nestedGI)
+				if parseErr == nil {
+					gitignores = append(gitignores, gitignoreEntry{matcher: gi, baseDir: ancestor})
+				}
+			}
+		}
+	}
+
+	isExcluded := func(path string) bool {
+		return checkExcluded(path, repoRoot, excluded, gitignores)
+	}
+
+	var files []string
+	walkErr := symlinkWalk(walkDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if isExcluded(path) {
+				return filepath.SkipDir
+			}
+			// Discover nested .gitignore files (only in non-excluded dirs)
+			nestedGI := filepath.Join(path, ".gitignore")
+			if _, statErr := os.Stat(nestedGI); statErr == nil {
+				dirRel, relErr := filepath.Rel(repoRoot, path)
+				if relErr == nil {
+					gi, parseErr := ignore.CompileIgnoreFile(nestedGI)
+					if parseErr == nil {
+						gitignores = append(gitignores, gitignoreEntry{matcher: gi, baseDir: dirRel})
+					}
+				}
+			}
+			return nil
+		}
+		if !isWatchableFile(path) {
+			return nil
+		}
+		if isExcluded(path) {
+			return nil
+		}
+		fileRel, relErr := filepath.Rel(repoRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		files = append(files, fileRel)
+		return nil
+	})
+	return files, walkErr
 }

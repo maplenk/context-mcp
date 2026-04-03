@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version.
 // Increment this when adding new migrations.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // migrationSet maps schema versions to their SQL statements.
 // Version 1 is the initial schema.
@@ -147,6 +147,12 @@ var migrationSet = map[int][]string{
 			last_commit_hash TEXT NOT NULL DEFAULT '',
 			last_updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+	},
+
+	// Migration v4: Index on git_commits(author_time) for efficient ORDER BY author_time DESC.
+	// author_time is stored as RFC3339 UTC text, which sorts lexicographically.
+	4: {
+		`CREATE INDEX IF NOT EXISTS idx_git_commits_author_time ON git_commits(author_time)`,
 	},
 }
 

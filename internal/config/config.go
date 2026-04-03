@@ -138,9 +138,10 @@ func ParseFlags() (*Config, error) {
 	// Resolve absolute paths
 	if !filepath.IsAbs(cfg.RepoRoot) {
 		abs, err := filepath.Abs(cfg.RepoRoot)
-		if err == nil {
-			cfg.RepoRoot = abs
+		if err != nil {
+			return nil, fmt.Errorf("resolving absolute path for repo root %q: %w", cfg.RepoRoot, err)
 		}
+		cfg.RepoRoot = abs
 	}
 
 	if !filepath.IsAbs(cfg.DBPath) {

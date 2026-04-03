@@ -80,7 +80,15 @@ type Extractor struct {
 
 // NewExtractor opens a git repository at the given path.
 // Returns nil, nil if the path is not a git repository (graceful degradation).
+// Returns an error if config values are invalid (HistoryDepth or MaxMessageBytes <= 0).
 func NewExtractor(repoRoot string, cfg Config) (*Extractor, error) {
+	if cfg.HistoryDepth <= 0 {
+		return nil, fmt.Errorf("gitmeta: HistoryDepth must be positive, got %d", cfg.HistoryDepth)
+	}
+	if cfg.MaxMessageBytes <= 0 {
+		return nil, fmt.Errorf("gitmeta: MaxMessageBytes must be positive, got %d", cfg.MaxMessageBytes)
+	}
+
 	repo, err := git.PlainOpenWithOptions(repoRoot, &git.PlainOpenOptions{
 		DetectDotGit:          true,
 		EnableDotGitCommonDir: true, // support linked worktrees

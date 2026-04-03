@@ -722,7 +722,12 @@ func indexHandler(indexFn IndexFunc, p IndexParams, repoRoot string) (interface{
 	}
 
 	if p.Path != "" {
-		absPath, err := filepath.Abs(p.Path)
+		// M7: Resolve relative paths against repoRoot, not CWD
+		pathToResolve := p.Path
+		if !filepath.IsAbs(pathToResolve) {
+			pathToResolve = filepath.Join(repoRoot, pathToResolve)
+		}
+		absPath, err := filepath.Abs(pathToResolve)
 		if err != nil {
 			return nil, fmt.Errorf("invalid path: %w", err)
 		}
@@ -1057,6 +1062,8 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 
 	var matches []codeMatch
 	var scanWarnings []string
+	filesScanned := 0
+	filesWithErrors := 0
 	for _, relPath := range filePaths {
 		// Apply file filter if specified (try full path first, fallback to basename)
 		if p.FileFilter != "" {
@@ -1084,12 +1091,18 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 			continue // path traversal attempt
 		}
 
+		filesScanned++
+
 		// M10: Per-file regex execution timeout to prevent hangs on
 		// pathological inputs (even though Go's RE2 is linear, large
 		// files can still be slow).
 		limitReached := func() bool {
 			f, err := os.Open(absPath)
 			if err != nil {
+				filesWithErrors++
+				warning := fmt.Sprintf("open error on %s: %v", relPath, err)
+				log.Printf("search_code: %s", warning)
+				scanWarnings = append(scanWarnings, warning)
 				return false
 			}
 			defer f.Close()
@@ -1118,6 +1131,7 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 			}
 			// Check for scanner errors (oversized tokens, I/O failures)
 			if err := scanner.Err(); err != nil {
+				filesWithErrors++
 				warning := fmt.Sprintf("scanner error on %s: %v (results may be incomplete)", relPath, err)
 				log.Printf("search_code: %s", warning)
 				scanWarnings = append(scanWarnings, warning)
@@ -1129,6 +1143,12 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 		}
 	}
 
+	// M1: If ALL scanned files had errors, return an error so isError is set in MCP response
+	if filesScanned > 0 && filesWithErrors == filesScanned {
+		return nil, fmt.Errorf("partial results due to I/O errors: all %d files failed to scan: %s",
+			filesScanned, strings.Join(scanWarnings, "; "))
+	}
+
 	result := map[string]interface{}{
 		"matches": matches,
 		"count":   len(matches),
@@ -1137,6 +1157,7 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 	if len(scanWarnings) > 0 {
 		result["warnings"] = scanWarnings
 		result["truncated"] = true
+		result["error"] = "partial results due to I/O errors"
 	}
 	return result, nil
 }
@@ -2047,6 +2068,24 @@ func toToolResponse(result interface{}) (*mcp_golang.ToolResponse, error) {
 			escapedBytes, _ := json.Marshal(partial)
 			// json.Marshal wraps in quotes; strip them for embedding.
 			escaped := string(escapedBytes[1 : len(escapedBytes)-1])
+			// M6: JSON escaping can expand the text beyond the budget.
+			// Re-check after escaping and truncate the escaped string if needed,
+			// being careful not to break a JSON escape sequence mid-way.
+			if len(escaped) > budget {
+				escaped = escaped[:budget]
+				// Walk back to avoid breaking a JSON escape sequence.
+				// JSON escape sequences start with '\' and are 2-6 chars
+				// (e.g., \n, \t, \uXXXX). Find the last safe boundary.
+				for len(escaped) > 0 && escaped[len(escaped)-1] == '\\' {
+					escaped = escaped[:len(escaped)-1]
+				}
+				// Also check for broken \uXXXX sequences: if the last
+				// backslash-u sequence doesn't have 4 hex digits after it,
+				// truncate to before that sequence.
+				if idx := strings.LastIndex(escaped, `\u`); idx >= 0 && idx+6 > len(escaped) {
+					escaped = escaped[:idx]
+				}
+			}
 			text = `{"truncated":true,"message":"Response exceeded 1MB size limit","partial_data":"` + escaped + `"}`
 		} else {
 			// Plain text: truncate at a valid UTF-8 boundary.
