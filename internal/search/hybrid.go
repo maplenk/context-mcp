@@ -287,6 +287,16 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		})
 	}
 
+	// --- Graph-neighborhood expansion ---
+	// Expand from top seeds to discover structurally connected nodes that
+	// didn't match lexically/semantically. This addresses cross-file flows
+	// where related nodes (controllers, routes, services) are linked by
+	// calls/handles/defines edges but don't share vocabulary.
+	if h.graph != nil && len(results) > 0 {
+		results = h.expandFromSeeds(results, candidates, bm25Scores, semanticScores,
+			pprScores, betweennessScores, inDegreeScores, limit)
+	}
+
 	// Sort by composite score descending
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score > results[j].Score
@@ -526,4 +536,121 @@ func isHelperFile(filePath string) bool {
 		}
 	}
 	return false
+}
+
+// expandFromSeeds takes the initial scored results, expands 1 hop from the
+// top seeds via graph edges, fetches newly discovered nodes from the store,
+// scores them, and merges them into the result set.
+func (h *HybridSearch) expandFromSeeds(
+	results []types.SearchResult,
+	existingCandidates map[string]types.ASTNode,
+	bm25Scores, semanticScores, pprScores, betweennessScores, inDegreeScores map[string]float64,
+	limit int,
+) []types.SearchResult {
+	// Take top-N seeds (pre-sort by score to get the best ones)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	seedCount := 10
+	if seedCount > len(results) {
+		seedCount = len(results)
+	}
+
+	// Collect neighbor IDs from top seeds (1 hop: callees + callers)
+	neighborSet := make(map[string]bool)
+	for i := 0; i < seedCount; i++ {
+		seedID := results[i].Node.ID
+		for _, callee := range h.graph.GetCallees(seedID) {
+			if _, exists := existingCandidates[callee]; !exists {
+				neighborSet[callee] = true
+			}
+		}
+		for _, caller := range h.graph.GetCallers(seedID) {
+			if _, exists := existingCandidates[caller]; !exists {
+				neighborSet[caller] = true
+			}
+		}
+	}
+
+	if len(neighborSet) == 0 {
+		return results
+	}
+
+	// Cap expansion to prevent result bloat
+	maxExpansion := 50
+	neighborIDs := make([]string, 0, len(neighborSet))
+	for id := range neighborSet {
+		neighborIDs = append(neighborIDs, id)
+		if len(neighborIDs) >= maxExpansion {
+			break
+		}
+	}
+
+	// Fetch neighbor nodes from store
+	for _, nID := range neighborIDs {
+		node, err := h.store.GetNode(nID)
+		if err != nil || node == nil {
+			continue
+		}
+
+		// Score the neighbor using whatever signals we have
+		bm25 := safeGet(bm25Scores, nID)
+		semantic := safeGet(semanticScores, nID)
+		ppr := safeGet(pprScores, nID)
+		betweenness := safeGet(betweennessScores, nID)
+		inDegree := safeGet(inDegreeScores, nID)
+
+		composite := weightPPR*ppr +
+			weightBM25*bm25 +
+			weightBetweenness*betweenness +
+			weightInDegree*inDegree +
+			weightSemantic*semantic
+
+		// Graph-expanded nodes get a connectivity bonus: they were reachable
+		// from high-scoring seeds, which means they're structurally relevant
+		// even if they scored low on lexical/semantic signals.
+		// Give them a minimum score based on the seed they expanded from.
+		if composite == 0 {
+			// Find the best seed score that connects to this neighbor
+			bestSeedScore := 0.0
+			for i := 0; i < seedCount; i++ {
+				seedID := results[i].Node.ID
+				// Check if this neighbor is connected to this seed
+				for _, callee := range h.graph.GetCallees(seedID) {
+					if callee == nID && results[i].Score > bestSeedScore {
+						bestSeedScore = results[i].Score
+					}
+				}
+				for _, caller := range h.graph.GetCallers(seedID) {
+					if caller == nID && results[i].Score > bestSeedScore {
+						bestSeedScore = results[i].Score
+					}
+				}
+			}
+			// Give neighbor a fraction of the seed's score
+			composite = bestSeedScore * 0.3
+		}
+
+		// Penalize auto-generated/helper files
+		if isHelperFile(node.FilePath) {
+			composite *= 0.3
+		}
+
+		if composite > 0 {
+			results = append(results, types.SearchResult{
+				Node:  *node,
+				Score: composite,
+				Breakdown: &types.ScoreBreakdown{
+					PPR:         ppr,
+					BM25:        bm25,
+					Betweenness: betweenness,
+					InDegree:    inDegree,
+					Semantic:    semantic,
+				},
+			})
+		}
+	}
+
+	return results
 }
