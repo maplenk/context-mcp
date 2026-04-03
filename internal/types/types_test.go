@@ -94,6 +94,7 @@ func TestNodeTypeString(t *testing.T) {
 		{NodeTypeMethod, "method"},
 		{NodeTypeInterface, "interface"},
 		{NodeTypeFile, "file"},
+		{NodeTypeRoute, "route"},
 		{NodeType(0), "unknown"},
 		{NodeType(255), "unknown"},
 	}
@@ -120,6 +121,7 @@ func TestEdgeTypeString(t *testing.T) {
 		{EdgeTypeDefines, "defines"},
 		{EdgeTypeDefinesMethod, "defines_method"},
 		{EdgeTypeInherits, "inherits"},
+		{EdgeTypeHandles, "handles"},
 		{EdgeType(0), "unknown"},
 		{EdgeType(255), "unknown"},
 	}
@@ -135,7 +137,7 @@ func TestEdgeTypeString(t *testing.T) {
 // ---- Enum distinctness and non-zero tests ----
 
 func TestNodeTypeDistinctAndNonZero(t *testing.T) {
-	values := []NodeType{NodeTypeFunction, NodeTypeClass, NodeTypeStruct, NodeTypeMethod, NodeTypeInterface, NodeTypeFile}
+	values := []NodeType{NodeTypeFunction, NodeTypeClass, NodeTypeStruct, NodeTypeMethod, NodeTypeInterface, NodeTypeFile, NodeTypeRoute}
 	seen := make(map[NodeType]bool)
 	for _, v := range values {
 		if v == 0 {
@@ -149,7 +151,7 @@ func TestNodeTypeDistinctAndNonZero(t *testing.T) {
 }
 
 func TestEdgeTypeDistinctAndNonZero(t *testing.T) {
-	values := []EdgeType{EdgeTypeCalls, EdgeTypeImports, EdgeTypeImplements, EdgeTypeInstantiates, EdgeTypeDefines, EdgeTypeDefinesMethod, EdgeTypeInherits}
+	values := []EdgeType{EdgeTypeCalls, EdgeTypeImports, EdgeTypeImplements, EdgeTypeInstantiates, EdgeTypeDefines, EdgeTypeDefinesMethod, EdgeTypeInherits, EdgeTypeHandles}
 	seen := make(map[EdgeType]bool)
 	for _, v := range values {
 		if v == 0 {
