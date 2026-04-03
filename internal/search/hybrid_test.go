@@ -835,6 +835,89 @@ func TestBuildFTSQuery_AllStopWords(t *testing.T) {
 	}
 }
 
+// ---- Query alias expansion ----
+
+func TestBuildFTSQuery_AliasExpansion(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		wantTerms []string // terms that should appear in the FTS query
+	}{
+		{
+			"omnichannel expands to code names",
+			"omnichannel order sync",
+			[]string{"easyecom", "unicommerce", "onlineorder", "order", "sync"},
+		},
+		{
+			"auth expands to auth terms",
+			"auth session management",
+			[]string{"oauth", "login", "token", "auth"},
+		},
+		{
+			"webhook expands to callback",
+			"webhook dispatch",
+			[]string{"callback", "hook", "dispatchwebhook", "webhook", "dispatch"},
+		},
+		{
+			"inventory expands to stock terms",
+			"inventory flow",
+			[]string{"stock", "stocktransaction", "stockledger", "warehouse", "inventory", "flow"},
+		},
+		{
+			"payment expands to billing terms",
+			"payment processing",
+			[]string{"razorpay", "billing", "invoice", "payment", "processing"},
+		},
+		{
+			"no alias for regular terms",
+			"controller method",
+			[]string{"controller", "method"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildFTSQuery(tt.query)
+			lower := strings.ToLower(result)
+			for _, want := range tt.wantTerms {
+				if !strings.Contains(lower, want) {
+					t.Errorf("buildFTSQuery(%q) = %q, expected to contain %q", tt.query, result, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildFTSQuery_AliasExactMatchOnly(t *testing.T) {
+	// "authentication" is not the exact key "auth", so no aliases should be added
+	t.Run("authentication does not trigger auth alias", func(t *testing.T) {
+		result := buildFTSQuery("authentication session")
+		lower := strings.ToLower(result)
+		if strings.Contains(lower, "oauth") {
+			t.Errorf("buildFTSQuery(\"authentication session\") should not expand 'auth' alias, got: %s", result)
+		}
+		if strings.Contains(lower, "login") {
+			t.Errorf("buildFTSQuery(\"authentication session\") should not contain 'login' from auth alias, got: %s", result)
+		}
+		// But the original terms should still be present
+		if !strings.Contains(lower, "authentication") {
+			t.Errorf("expected 'authentication' in result, got: %s", result)
+		}
+		if !strings.Contains(lower, "session") {
+			t.Errorf("expected 'session' in result, got: %s", result)
+		}
+	})
+
+	// "payments" (plural) should not trigger "payment" alias
+	t.Run("payments does not trigger payment alias", func(t *testing.T) {
+		result := buildFTSQuery("payments flow")
+		lower := strings.ToLower(result)
+		if strings.Contains(lower, "razorpay") {
+			t.Errorf("buildFTSQuery(\"payments flow\") should not expand 'payment' alias, got: %s", result)
+		}
+	})
+}
+
 // TestHybridSearch_ScoreBreakdown verifies that search results contain populated ScoreBreakdown fields.
 func TestHybridSearch_ScoreBreakdown(t *testing.T) {
 	s := newTestStore(t)
