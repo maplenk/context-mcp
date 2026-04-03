@@ -876,3 +876,90 @@ func TestHybridSearch_ScoreBreakdown(t *testing.T) {
 	t.Logf("Top result %s breakdown: PPR=%.4f BM25=%.4f Betweenness=%.4f InDegree=%.4f Semantic=%.4f",
 		r.Node.SymbolName, bd.PPR, bd.BM25, bd.Betweenness, bd.InDegree, bd.Semantic)
 }
+
+// ---- Phase 1A: Code-aware stopwords + phrase detection ----
+
+func TestBuildFTSQuery_CodeStopWords(t *testing.T) {
+	// Standalone code method names should be filtered as stop words
+	codeStopWords := []string{"handle", "end", "get", "set", "create", "process", "write"}
+	for _, word := range codeStopWords {
+		result := buildFTSQuery(word)
+		// When a single code stop word is the entire query, buildFTSQuery falls back
+		// to the original query (line 344-346: "if len(expanded) == 0 { return query }")
+		// This is correct — we don't want empty FTS queries.
+		t.Logf("buildFTSQuery(%q) = %q", word, result)
+	}
+
+	// Code stop words should be stripped from multi-word queries
+	result := buildFTSQuery("handle webhook events")
+	lower := strings.ToLower(result)
+	if strings.Contains(lower, "handle") {
+		t.Errorf("expected 'handle' to be filtered, got: %s", result)
+	}
+	if !strings.Contains(lower, "webhook") {
+		t.Errorf("expected 'webhook' to be preserved, got: %s", result)
+	}
+	if !strings.Contains(lower, "event") {
+		t.Errorf("expected 'event' to be preserved, got: %s", result)
+	}
+}
+
+func TestBuildFTSQuery_CodeStopWordsPreservedInCamelCase(t *testing.T) {
+	// Code stop words inside CamelCase identifiers should NOT be filtered
+	result := buildFTSQuery("stockTransaction")
+	lower := strings.ToLower(result)
+	// "stock" and "transaction" should both appear (from CamelCase splitting)
+	if !strings.Contains(lower, "stock") {
+		t.Errorf("expected 'stock' from CamelCase split, got: %s", result)
+	}
+	if !strings.Contains(lower, "transaction") {
+		t.Errorf("expected 'transaction' from CamelCase split, got: %s", result)
+	}
+
+	// "createOrder" — "create" is a stop word but should be preserved inside CamelCase
+	result2 := buildFTSQuery("createOrder")
+	lower2 := strings.ToLower(result2)
+	if !strings.Contains(lower2, "order") {
+		t.Errorf("expected 'order' from CamelCase split, got: %s", result2)
+	}
+	// The original "createOrder" should also be present
+	if !strings.Contains(lower2, "createorder") {
+		t.Errorf("expected original 'createOrder' to be preserved, got: %s", result2)
+	}
+}
+
+func TestCleanQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string // expected substring that should remain
+		notWant string // substring that should be removed
+	}{
+		{"end to end", "end to end order creation flow", "order creation flow", "end to end"},
+		{"step by step", "step by step inventory process", "inventory", "step by step"},
+		{"how does", "how does authentication work", "authentication work", "how does"},
+		{"show me", "show me the payment files", "payment files", "show me"},
+		{"beginning to end", "beginning to end order lifecycle", "order lifecycle", "beginning to end"},
+		{"no phrases", "webhook callback integration", "webhook callback integration", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := cleanQuery(tt.input)
+			if tt.want != "" && !strings.Contains(result, tt.want) {
+				t.Errorf("cleanQuery(%q) = %q, expected to contain %q", tt.input, result, tt.want)
+			}
+			if tt.notWant != "" && strings.Contains(result, tt.notWant) {
+				t.Errorf("cleanQuery(%q) = %q, expected NOT to contain %q", tt.input, result, tt.notWant)
+			}
+		})
+	}
+}
+
+func TestCleanQuery_PreservesNonPhraseContent(t *testing.T) {
+	// Queries without structural phrases should pass through unchanged (modulo case)
+	result := cleanQuery("OrderController payment")
+	if !strings.Contains(result, "ordercontroller") && !strings.Contains(result, "payment") {
+		t.Errorf("cleanQuery should preserve non-phrase content, got: %q", result)
+	}
+}

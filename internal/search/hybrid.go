@@ -55,6 +55,17 @@ var stopWords = map[string]bool{
 	"who": true, "whom": true, "why": true,
 	// Domain stop words: query-structure noise that doesn't help code search
 	"entire": true, "whole": true,
+	// Code method-name stop words: too generic as standalone query terms.
+	// Preserved inside CamelCase identifiers (e.g. "stockTransaction") by the
+	// isCamelCase guard in buildFTSQuery.
+	"handle": true, "end": true, "get": true, "set": true, "run": true,
+	"start": true, "stop": true, "create": true, "new": true, "make": true,
+	"init": true, "close": true, "open": true, "read": true, "write": true,
+	"process": true, "execute": true, "call": true, "invoke": true,
+	"begin": true, "finish": true, "complete": true, "update": true,
+	"delete": true, "remove": true, "add": true, "find": true, "search": true,
+	"check": true, "test": true, "build": true, "load": true, "save": true,
+	"send": true, "receive": true,
 }
 
 // stopWordsMu protects concurrent access to the stopWords map.
@@ -145,8 +156,11 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// M5: Track signal source failures to return an error when ALL sources fail
 	var ftsErr, semanticErr error
 
+	// Clean structural phrases before FTS processing
+	cleanedQuery := cleanQuery(query)
+
 	// Enhance query for FTS5
-	ftsQuery := buildFTSQuery(query)
+	ftsQuery := buildFTSQuery(cleanedQuery)
 
 	// Path 1: Lexical search via FTS5 BM25
 	// Use SearchLexicalRaw because buildFTSQuery already sanitizes via sanitizeFTS
@@ -301,6 +315,42 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	}
 
 	return results, nil
+}
+
+// structuralPhrases are multi-word phrases that appear in natural-language queries
+// but carry no code-search value. They are stripped before FTS query construction
+// to prevent their individual tokens from polluting results.
+var structuralPhrases = []string{
+	"end to end",
+	"start to finish",
+	"step by step",
+	"front to back",
+	"beginning to end",
+	"how does",
+	"how do",
+	"how is",
+	"how are",
+	"what is",
+	"what are",
+	"where is",
+	"where are",
+	"show me",
+	"find me",
+	"look for",
+	"looking for",
+}
+
+// cleanQuery strips structural/conversational phrases from a query before
+// FTS processing. This prevents phrase fragments (e.g., "end" from "end to end")
+// from polluting search results with unrelated code symbols.
+func cleanQuery(query string) string {
+	lower := strings.ToLower(query)
+	for _, phrase := range structuralPhrases {
+		lower = strings.ReplaceAll(lower, phrase, " ")
+	}
+	// Collapse multiple spaces
+	parts := strings.Fields(lower)
+	return strings.Join(parts, " ")
 }
 
 // buildFTSQuery enhances a query for FTS5 with CamelCase splitting, prefix matching, and stop word filtering
