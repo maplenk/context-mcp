@@ -76,8 +76,22 @@ The benchmark suite measures three dimensions of qb-context quality:
 | **Search Quality**   | Relevance of results for domain keyword search | `TestRealRepo_SearchQuality`     |
 | **Graph Performance**| PageRank, blast radius, betweenness centrality | `BenchmarkPageRank`, etc.        |
 
-**Target codebase**: [QBApps/qbapi](../tests/realrepo_test.go) — a Laravel multi-tenant
-retail/POS backend with ~780 PHP files, ~12.6K nodes, and ~16.3K edges after indexing.
+**Canonical benchmark target**: **QBApps/qbapi** — `/Users/naman/Documents/QBApps/qbapi`
+
+All benchmarks MUST be run against this repo. It is a Laravel multi-tenant retail/POS
+backend (~780 PHP files, staging branch) that produces ~12.6K nodes and ~16.3K edges
+after indexing. This codebase was chosen because it exercises all query categories
+(exact symbol lookup, semantic concept search, cross-file tracing) and has stable,
+representative characteristics for regression detection.
+
+> **Do not change the benchmark target.** Results are only comparable when run against
+> the same codebase. The path is hardcoded in [`tests/realrepo_test.go`](../tests/realrepo_test.go) line 21.
+
+For **cross-engine comparison** (e.g. codebase-memory-mcp), always use the same qbapi
+target. The codebase-memory-mcp project name for CLI is:
+```
+project: "Users-naman-Documents-QBApps-qbapi"
+```
 
 ---
 
@@ -94,7 +108,8 @@ benchmarks/
     ├── baseline-v0.6.0-qbapi.json          Baseline (earliest benchmarked release)
     ├── v0.7.0-c608668-qbapi.json           Search quality release
     ├── v0.8.0-fab5104-qbapi.json           Cross-file + DA hardening
-    └── v0.9.0-e1a93bc-qbapi.json           Cold Start release (current)
+    ├── v0.9.0-e1a93bc-qbapi.json           Cold Start release (current)
+    └── cbm-v0.8.0-qbapi.json              codebase-memory-mcp cross-engine comparison
 ```
 
 ---

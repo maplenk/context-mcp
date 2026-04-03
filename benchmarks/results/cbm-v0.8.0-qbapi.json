@@ -1,0 +1,45 @@
+{
+  "engine": "codebase-memory-mcp",
+  "engine_version": "0.8.0",
+  "label": "cbm-v0.8.0",
+  "timestamp": "20260403T031623",
+  "target_repo": "/Users/naman/Documents/QBApps/qbapi",
+  "target_repo_description": "Laravel multi-tenant retail/POS backend",
+  "index_stats": {
+    "total_nodes": 16806,
+    "total_edges": 35189,
+    "notes": "tree-sitter AST — 66 language support, LSP-style hybrid type resolution"
+  },
+  "cli_invocation": "codebase-memory-mcp cli <tool> '{\"project\":\"Users-naman-Documents-QBApps-qbapi\", ...}'",
+  "query_latencies": {
+    "A1_search_graph_exact_class": "32.365ms",
+    "A2_search_graph_regex_function": "21.423ms",
+    "A3_search_graph_regex_broad": "119.502ms",
+    "B1_search_graph_payment": "104.895ms",
+    "B2_search_graph_billing": "104.101ms",
+    "B3_search_graph_inventory": "120.267ms",
+    "C1_trace_call_path_store": "20.407ms",
+    "C2_trace_call_path_processPayment": "18.191ms",
+    "C3_get_architecture": "25.523ms",
+    "D1_explore_payment": "416.204ms",
+    "D2_understand_controller": "375.408ms",
+    "D3_get_impact_analysis": "15.636ms",
+    "D4_get_key_symbols": "24.895ms"
+  },
+  "query_results": {
+    "A1": {"status": "pass", "results": 1},
+    "A2": {"status": "pass", "results": 4},
+    "A3": {"status": "pass", "results": 10},
+    "B1": {"status": "pass", "results": 10},
+    "B2": {"status": "pass", "results": 10},
+    "B3": {"status": "pass", "results": 10},
+    "C1": {"status": "pass", "results": 5},
+    "C2": {"status": "fail", "error": "function not found"},
+    "C3": {"status": "pass"},
+    "D1": {"status": "pass", "results": 20},
+    "D2": {"status": "pass", "results": 0},
+    "D3": {"status": "pass"},
+    "D4": {"status": "pass", "results": 10}
+  },
+  "notes": "CLI mode adds process startup overhead (~15ms). CBM uses tree-sitter for parsing (66 langs) vs qb-context regex-based parser (6 langs). CBM indexes 16.8K nodes vs qb-context 12.7K for same repo. Correct CLI param is 'project' not 'repo_path' or 'project_name'."
+}
