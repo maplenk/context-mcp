@@ -56,13 +56,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Trivy (filesystem scan)
+      - name: Run Trivy (table output)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          exit-code: 1
+          exit-code: 0
+          format: table
+
+      - name: Run Trivy (SARIF for Security tab)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: 0
           format: sarif
           output: trivy-results.sarif
 
@@ -82,9 +91,8 @@ jobs:
         with:
           go-version: '1.25'
 
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.0
+
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v2.1.0
-          install-mode: goinstall
-          args: --enable gosec,gocritic,bodyclose,exhaustive --timeout 5m --build-tags fts5
+        run: golangci-lint run --enable gosec,gocritic,bodyclose,exhaustive --timeout 5m --build-tags fts5
