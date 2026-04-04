@@ -40,9 +40,9 @@ type SearchConfig struct {
 func DefaultConfig() SearchConfig {
 	return SearchConfig{
 		WeightPPR:         0.35,
-		WeightBM25:        0.25,
-		WeightBetweenness: 0.15,
-		WeightInDegree:    0.10,
+		WeightBM25:        0.30,
+		WeightBetweenness: 0.20,
+		WeightInDegree:    0.00,
 		WeightSemantic:    0.15,
 
 		RouteBoost:       2.5,
@@ -57,14 +57,14 @@ func DefaultConfig() SearchConfig {
 		PenaltyExample:   0.6,
 		PenaltyConfig:    0.8,
 
-		ExpansionSeedCount:       5,
+		ExpansionSeedCount:       10,
 		ExpansionMaxNeighbors:    20,
 		ExpansionMaxAddedDivisor: 4,
 		ExpansionBonus:           0.10,
 
-		BM25ScoreFloor:      0.05,
+		BM25ScoreFloor:      0.00,
 		CandidateMultiplier: 5,
 		CandidateMinimum:    100,
-		MaxPerFile:          3,
+		MaxPerFile:          1,
 	}
 }
