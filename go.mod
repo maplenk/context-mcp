@@ -1,4 +1,4 @@
-module github.com/naman/qb-context
+module github.com/maplenk/context-mcp
 
 go 1.25
 

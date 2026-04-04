@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/naman/qb-context/internal/embedding"
-	"github.com/naman/qb-context/internal/graph"
-	"github.com/naman/qb-context/internal/parser"
-	"github.com/naman/qb-context/internal/search"
-	"github.com/naman/qb-context/internal/storage"
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/embedding"
+	"github.com/maplenk/context-mcp/internal/graph"
+	"github.com/maplenk/context-mcp/internal/parser"
+	"github.com/maplenk/context-mcp/internal/search"
+	"github.com/maplenk/context-mcp/internal/storage"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // testPipeline holds all components needed for incremental update tests.

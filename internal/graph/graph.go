@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/network"
 	"gonum.org/v1/gonum/graph/simple"

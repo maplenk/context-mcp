@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // TestNew_EmptyGraph verifies that New() creates a graph with no nodes or edges.

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // writeFile creates a temporary file with the given content and returns its path.

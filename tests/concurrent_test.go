@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // setupConcurrentEnv creates a test pipeline pre-loaded with several Go files.

@@ -14,7 +14,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/javascript"
 	"github.com/smacker/go-tree-sitter/php"

@@ -56,7 +56,7 @@ go build -tags "fts5" -o qb-context ./cmd/qb-context
 ### Build from Source
 
 ```bash
-git clone https://github.com/naman/qb-context.git
+git clone https://github.com/maplenk/context-mcp.git
 cd qb-context
 go build -tags "fts5" -o qb-context ./cmd/qb-context
 ```

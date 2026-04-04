@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"unicode"
 
-	"github.com/naman/qb-context/internal/tokenutil"
+	"github.com/maplenk/context-mcp/internal/tokenutil"
 )
 
 // embeddingDim stores the embedding dimension atomically for thread safety (H11).

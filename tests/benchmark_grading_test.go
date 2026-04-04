@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naman/qb-context/internal/search"
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/search"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // benchmarkQueries maps query IDs to the search queries used for grading.

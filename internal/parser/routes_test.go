@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 func TestExtractRoutes_BasicRoute(t *testing.T) {

@@ -16,10 +16,10 @@ import (
 
 	mcp_golang "github.com/metoro-io/mcp-golang"
 
-	"github.com/naman/qb-context/internal/graph"
-	"github.com/naman/qb-context/internal/search"
-	"github.com/naman/qb-context/internal/storage"
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/graph"
+	"github.com/maplenk/context-mcp/internal/search"
+	"github.com/maplenk/context-mcp/internal/storage"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // Version is the package-level version string, referenced by server.go.

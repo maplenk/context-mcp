@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naman/qb-context/internal/gitmeta"
+	"github.com/maplenk/context-mcp/internal/gitmeta"
 )
 
 // testStore creates a Store backed by a temp-dir SQLite database for git storage tests.

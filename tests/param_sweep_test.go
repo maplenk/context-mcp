@@ -8,7 +8,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/naman/qb-context/internal/search"
+	"github.com/maplenk/context-mcp/internal/search"
 )
 
 // TestParameterSweep runs the benchmark with many different search configurations

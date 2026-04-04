@@ -17,9 +17,9 @@ import (
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/naman/qb-context/internal/gitmeta"
-	"github.com/naman/qb-context/internal/tokenutil"
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/gitmeta"
+	"github.com/maplenk/context-mcp/internal/tokenutil"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // DefaultEmbeddingDim is the default embedding dimension (TFIDF fallback).

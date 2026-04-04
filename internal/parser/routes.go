@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // routeMethodRe matches Route::method('path', ...) calls.

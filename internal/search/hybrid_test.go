@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naman/qb-context/internal/embedding"
-	"github.com/naman/qb-context/internal/graph"
-	"github.com/naman/qb-context/internal/storage"
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/embedding"
+	"github.com/maplenk/context-mcp/internal/graph"
+	"github.com/maplenk/context-mcp/internal/storage"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // newTestStore creates a temporary SQLite store for testing.

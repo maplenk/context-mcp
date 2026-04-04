@@ -8,11 +8,11 @@ import (
 	"sync"
 	"unicode"
 
-	"github.com/naman/qb-context/internal/embedding"
-	"github.com/naman/qb-context/internal/graph"
-	"github.com/naman/qb-context/internal/storage"
-	"github.com/naman/qb-context/internal/tokenutil"
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/embedding"
+	"github.com/maplenk/context-mcp/internal/graph"
+	"github.com/maplenk/context-mcp/internal/storage"
+	"github.com/maplenk/context-mcp/internal/tokenutil"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // Search Fusion Algorithm: Weighted Linear Combination

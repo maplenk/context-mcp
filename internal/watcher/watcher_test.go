@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // helper that drains exactly one event from the watcher within a timeout,

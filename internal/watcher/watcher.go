@@ -10,7 +10,7 @@ import (
 
 	"github.com/crackcomm/go-gitignore"
 	"github.com/fsnotify/fsnotify"
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // deviceInode uniquely identifies a file/directory across the filesystem,

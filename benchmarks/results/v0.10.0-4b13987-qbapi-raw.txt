@@ -66,4 +66,4 @@
     --- PASS: TestBenchmarkQueries/C1_Cross-file_context (0.00s)
     --- PASS: TestBenchmarkQueries/C5_Cross-file_context (0.00s)
 PASS
-ok  	github.com/naman/qb-context/tests	34.829s
+ok  	github.com/maplenk/context-mcp/tests	34.829s

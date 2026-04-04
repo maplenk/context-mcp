@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naman/qb-context/internal/types"
+	"github.com/maplenk/context-mcp/internal/types"
 )
 
 // newTestStore creates a Store backed by a temp-dir SQLite database.
