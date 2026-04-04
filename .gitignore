@@ -40,3 +40,8 @@ Thumbs.db
 
 # Word documents
 *.docx
+
+# Internal development docs (kept locally, not in public repo)
+CLAUDE.md
+AGENTS.md
+docs/
