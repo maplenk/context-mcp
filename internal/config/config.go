@@ -59,6 +59,11 @@ type Config struct {
 
 	// GitMaxIntentBytes is the maximum bytes for compacted file intent text
 	GitMaxIntentBytes int
+
+	// Profile selects which tools are registered for MCP SDK mode.
+	// Valid values: "core" (6 tools), "extended" (10 tools), "full" (all 13).
+	// CLI mode always registers all 13 tools regardless of profile.
+	Profile string
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -77,6 +82,7 @@ func DefaultConfig() *Config {
 		GitPerFileCommitCap: 20,
 		GitMaxMessageBytes:  2000,
 		GitMaxIntentBytes:   1500,
+		Profile:             "core",
 	}
 }
 
@@ -102,6 +108,7 @@ func ParseFlags() (*Config, error) {
 	fs.IntVar(&cfg.GitPerFileCommitCap, "git-per-file-cap", cfg.GitPerFileCommitCap, "Maximum commits per file")
 	fs.IntVar(&cfg.GitMaxMessageBytes, "git-max-message", cfg.GitMaxMessageBytes, "Maximum bytes per commit message")
 	fs.IntVar(&cfg.GitMaxIntentBytes, "git-max-intent", cfg.GitMaxIntentBytes, "Maximum bytes per file intent summary")
+	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (6 tools), extended (10 tools), or full (all 13)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, fmt.Errorf("parsing flags: %w", err)
 	}
@@ -133,6 +140,14 @@ func ParseFlags() (*Config, error) {
 	}
 	if cfg.GitMaxIntentBytes < 100 {
 		cfg.GitMaxIntentBytes = 1500
+	}
+
+	// Validate profile
+	switch cfg.Profile {
+	case "core", "extended", "full":
+		// valid
+	default:
+		return nil, fmt.Errorf("invalid profile %q: must be core, extended, or full", cfg.Profile)
 	}
 
 	// Resolve absolute paths
