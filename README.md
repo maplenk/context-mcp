@@ -60,6 +60,24 @@ The `-tags "fts5"` flag is **required** -- it enables SQLite full-text search.
 ./context-mcp cli --list
 ```
 
+### Optional: ONNX Neural Embeddings
+
+By default, context-mcp uses TF-IDF for embeddings. For higher-quality semantic search, you can use an ONNX code embedding model (Qwen2-based, ~500MB):
+
+```bash
+# Install optimum-cli
+pip install optimum[onnxruntime]
+
+# Export and quantize the model
+optimum-cli export onnx --model jinaai/jina-embeddings-v2-base-code onnx_model/
+optimum-cli onnxruntime quantize --onnx_model onnx_model --arm64 -o quantized_model/
+
+# Run with ONNX embeddings
+./context-mcp -repo /path/to/project -onnx-model ./quantized_model -onnx-lib /path/to/libonnxruntime.dylib
+```
+
+Supported Matryoshka dimensions: 64, 128, 256, 512, 896 (set via `-embedding-dim`).
+
 ## MCP Integration
 
 ### Claude Desktop
