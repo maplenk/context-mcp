@@ -381,9 +381,11 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 
 	// impactNode is a minimal node descriptor for the response
 	type impactNode struct {
-		ID         string `json:"id"`
-		SymbolName string `json:"symbol_name"`
-		FilePath   string `json:"file_path"`
+		ID         string            `json:"id"`
+		SymbolName string            `json:"symbol_name"`
+		FilePath   string            `json:"file_path"`
+		NextTool   string            `json:"next_tool"`
+		NextArgs   map[string]string `json:"next_args,omitempty"`
 	}
 
 	// Group affected nodes by risk level based on hop depth
@@ -398,36 +400,85 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 		if err != nil {
 			continue
 		}
-		n := impactNode{
+
+		// Identify test nodes
+		testNode := impactNode{
 			ID:         node.ID,
 			SymbolName: node.SymbolName,
 			FilePath:   node.FilePath,
+			NextTool:   "read_symbol",
+			NextArgs:   map[string]string{"symbol_id": node.ID},
 		}
-
-		// Identify test nodes
 		if strings.Contains(node.SymbolName, "test") || strings.Contains(node.SymbolName, "Test") {
-			affectedTests = append(affectedTests, n)
+			affectedTests = append(affectedTests, testNode)
 		}
 
 		// Group by risk level
 		switch depth {
-		case 0:
-			direct = append(direct, n) // Source node itself
-		case 1:
+		case 0, 1:
+			// Direct dependents get trace_call_path as next tool
+			n := impactNode{
+				ID:         node.ID,
+				SymbolName: node.SymbolName,
+				FilePath:   node.FilePath,
+				NextTool:   "trace_call_path",
+				NextArgs:   map[string]string{"from": p.SymbolID, "to": node.SymbolName},
+			}
 			direct = append(direct, n)
 		case 2:
+			n := impactNode{
+				ID:         node.ID,
+				SymbolName: node.SymbolName,
+				FilePath:   node.FilePath,
+				NextTool:   "read_symbol",
+				NextArgs:   map[string]string{"symbol_id": node.ID},
+			}
 			highRisk = append(highRisk, n)
 		case 3:
+			n := impactNode{
+				ID:         node.ID,
+				SymbolName: node.SymbolName,
+				FilePath:   node.FilePath,
+				NextTool:   "read_symbol",
+				NextArgs:   map[string]string{"symbol_id": node.ID},
+			}
 			mediumRisk = append(mediumRisk, n)
 		default:
+			n := impactNode{
+				ID:         node.ID,
+				SymbolName: node.SymbolName,
+				FilePath:   node.FilePath,
+				NextTool:   "read_symbol",
+				NextArgs:   map[string]string{"symbol_id": node.ID},
+			}
 			lowRisk = append(lowRisk, n)
 		}
 	}
 
+	// Record original counts before capping
+	totalDirect := len(direct)
+	totalHighRisk := len(highRisk)
+	totalMediumRisk := len(mediumRisk)
+	totalLowRisk := len(lowRisk)
+
+	// Cap each risk tier at 5 entries
+	if len(direct) > 5 {
+		direct = direct[:5]
+	}
+	if len(highRisk) > 5 {
+		highRisk = highRisk[:5]
+	}
+	if len(mediumRisk) > 5 {
+		mediumRisk = mediumRisk[:5]
+	}
+	if len(lowRisk) > 5 {
+		lowRisk = lowRisk[:5]
+	}
+
 	totalAffected := len(affectedWithDepth)
 	summary := fmt.Sprintf(
-		"Symbol has betweenness %.2f — %d direct dependents, %d total affected, %d tests impacted",
-		riskScore, len(direct), totalAffected, len(affectedTests),
+		"Symbol has betweenness %.2f — %d direct (showing %d), %d high-risk (showing %d), %d medium (showing %d), %d low (showing %d), %d tests impacted",
+		riskScore, totalDirect, len(direct), totalHighRisk, len(highRisk), totalMediumRisk, len(mediumRisk), totalLowRisk, len(lowRisk), len(affectedTests),
 	)
 
 	return map[string]interface{}{
@@ -445,7 +496,7 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 }
 
 func registerImpactTool(s *Server, deps ToolDeps) {
-	desc := "Analyzes the blast radius of a code symbol by tracing all downstream dependents via BFS graph traversal."
+	desc := "Blast radius: finds all downstream dependents of a symbol, grouped by risk level (CRITICAL/HIGH/MEDIUM/LOW). Use before making changes to assess risk."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -570,6 +621,16 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 		response["warning"] = "file may have changed since indexing"
 	}
 
+	// Add chaining hints
+	symbolRef := node.ID
+	if symbolRef == "" {
+		symbolRef = node.SymbolName
+	}
+	response["next_tools"] = []map[string]string{
+		{"tool": "understand", "args_hint": `{"symbol": "` + symbolRef + `"}`},
+		{"tool": "impact", "args_hint": `{"symbol_id": "` + symbolRef + `"}`},
+	}
+
 	return response, nil
 }
 
@@ -583,7 +644,7 @@ func symbolBaseName(symbolName string) string {
 }
 
 func registerReadSymbolTool(s *Server, deps ToolDeps) {
-	desc := "Retrieves the exact source code of a symbol by reading only the specific byte range from disk."
+	desc := "Read exact source code of a symbol by name or ID. Returns the precise byte range from disk. Use after context or explore to inspect a specific result."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -821,17 +882,28 @@ func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, er
 
 	paths := deps.Graph.TraceCallPath(fromHash, toHash, p.MaxDepth)
 
+	// pathNode represents a node in the resolved call path with chaining hints
+	type pathNode struct {
+		SymbolName     string            `json:"symbol_name"`
+		FilePath       string            `json:"file_path,omitempty"`
+		ReadSymbolArgs map[string]string `json:"read_symbol_args,omitempty"`
+	}
+
 	// Resolve hash IDs to symbol names for readability
-	var resolvedPaths [][]string
+	var resolvedPaths [][]pathNode
 	var edgeTypes [][]string
 	for _, path := range paths {
-		var resolved []string
+		var resolved []pathNode
 		var edges []string
 		for i, hashID := range path {
 			if node, err := deps.Store.GetNode(hashID); err == nil {
-				resolved = append(resolved, node.SymbolName)
+				resolved = append(resolved, pathNode{
+					SymbolName:     node.SymbolName,
+					FilePath:       node.FilePath,
+					ReadSymbolArgs: map[string]string{"symbol_id": node.ID},
+				})
 			} else {
-				resolved = append(resolved, hashID)
+				resolved = append(resolved, pathNode{SymbolName: hashID})
 			}
 			if i > 0 {
 				// Try to determine edge type
@@ -862,7 +934,7 @@ func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, er
 }
 
 func registerTraceCallPathTool(s *Server, deps ToolDeps) {
-	desc := "Finds call paths between two symbols using bidirectional BFS graph traversal. Useful for understanding how two parts of the codebase are connected."
+	desc := "Finds the call chain between two symbols using bidirectional graph traversal. Use to understand how control flows from A to B."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -2053,25 +2125,35 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 		// Community membership (with early exit)
 		communities, _ := deps.Graph.DetectCommunities()
 		for _, c := range communities {
-			found := false
+			communityFound := false
 			for _, nodeID := range c.NodeIDs {
 				if nodeID == resolvedID {
 					result["community"] = c.ID
-					found = true
+					communityFound = true
 					break
 				}
 			}
-			if found {
+			if communityFound {
 				break
 			}
 		}
+	}
+
+	// Add chaining hints
+	symbolRef := found.ID
+	if symbolRef == "" {
+		symbolRef = found.Name
+	}
+	result["next_tools"] = []map[string]string{
+		{"tool": "impact", "args_hint": `{"symbol_id": "` + symbolRef + `"}`},
+		{"tool": "trace_call_path", "args_hint": `{"from": "` + symbolRef + `"}`},
 	}
 
 	return result, nil
 }
 
 func registerUnderstandTool(s *Server, deps ToolDeps) {
-	desc := "Deep symbol understanding with 3-tier resolution (exact match, fuzzy match, file-scoped search) plus callers, callees, PageRank, and community membership."
+	desc := "Deep analysis of a symbol: callers, callees, PageRank importance, community membership, and recent file changes. Use to understand what a symbol does and why it matters."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {

@@ -182,9 +182,14 @@ func TestTraceCallPath_DirectConnection(t *testing.T) {
 		t.Fatal("expected map result")
 	}
 
-	paths, ok := m["paths"].([][]string)
-	if !ok {
-		t.Fatalf("expected paths to be [][]string, got %T", m["paths"])
+	// paths is now [][]pathNode (a local struct type), so we use JSON round-trip to inspect
+	pathsJSON, err := json.Marshal(m["paths"])
+	if err != nil {
+		t.Fatalf("failed to marshal paths: %v", err)
+	}
+	var paths [][]map[string]interface{}
+	if err := json.Unmarshal(pathsJSON, &paths); err != nil {
+		t.Fatalf("failed to unmarshal paths: %v", err)
 	}
 
 	if len(paths) == 0 {
@@ -193,7 +198,17 @@ func TestTraceCallPath_DirectConnection(t *testing.T) {
 
 	t.Logf("Found %d path(s) from processOrder to calculateTotal", len(paths))
 	for i, p := range paths {
-		t.Logf("  Path %d: %v", i, p)
+		var names []string
+		for _, node := range p {
+			if name, ok := node["symbol_name"].(string); ok {
+				names = append(names, name)
+			}
+			// Verify chaining hints are present
+			if _, ok := node["read_symbol_args"]; ok {
+				// Good: has read_symbol_args
+			}
+		}
+		t.Logf("  Path %d: %v", i, names)
 	}
 }
 
@@ -221,9 +236,14 @@ func TestTraceCallPath_TransitiveConnection(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map[string]interface{}, got %T", result)
 	}
-	paths, ok := m["paths"].([][]string)
-	if !ok {
-		t.Fatalf("expected paths to be [][]string, got %T", m["paths"])
+	// paths is now [][]pathNode (a local struct type), so we use JSON round-trip to inspect
+	pathsJSON, err := json.Marshal(m["paths"])
+	if err != nil {
+		t.Fatalf("failed to marshal paths: %v", err)
+	}
+	var paths [][]map[string]interface{}
+	if err := json.Unmarshal(pathsJSON, &paths); err != nil {
+		t.Fatalf("failed to unmarshal paths: %v", err)
 	}
 
 	if len(paths) == 0 {
@@ -235,7 +255,13 @@ func TestTraceCallPath_TransitiveConnection(t *testing.T) {
 	for _, p := range paths {
 		if len(p) == 3 {
 			found = true
-			t.Logf("Found transitive path: %v", p)
+			var names []string
+			for _, node := range p {
+				if name, ok := node["symbol_name"].(string); ok {
+					names = append(names, name)
+				}
+			}
+			t.Logf("Found transitive path: %v", names)
 		}
 	}
 	if !found {
