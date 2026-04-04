@@ -630,7 +630,7 @@ All options are set via CLI flags:
 1. **File discovery** — Walks the repo, respecting `.gitignore` and excluded dirs (`.git`, `.qb-context`)
 2. **AST parsing** — Extracts functions, classes, structs, and methods. Builds call/import/implements edges
 3. **Storage** — Upserts nodes and edges into SQLite with FTS5 full-text index
-4. **Embeddings** — Generates vector embeddings for each symbol (hash-based fallback; ONNX support planned)
+4. **Embeddings** — Generates vector embeddings for each symbol (TF-IDF default; optional ONNX via `--onnx-model`)
 5. **Graph build** — Constructs a directed dependency graph in memory using gonum
 6. **Centrality** — Computes betweenness centrality (Brandes' algorithm) and stores scores
 7. **ADR discovery** — Finds and stores architecture documents (ARCHITECTURE.md, ADR.md, DESIGN.md, adr/ directories)
@@ -642,9 +642,8 @@ Queries are ranked using a multi-signal composite score:
 
 ```
 score = 0.35 * PersonalizedPageRank
-      + 0.25 * BM25 (FTS5)
-      + 0.15 * Betweenness Centrality
-      + 0.10 * InDegree Authority
+      + 0.30 * BM25 (FTS5)
+      + 0.20 * Betweenness Centrality
       + 0.15 * Semantic Similarity
 ```
 
