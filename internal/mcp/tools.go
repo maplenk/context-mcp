@@ -220,7 +220,13 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		if symbolRef == "" {
 			symbolRef = r.Node.SymbolName
 		}
-		nextArgs := map[string]string{"symbol_id": symbolRef}
+		// Use correct key for each tool: explore uses "symbol", others use "symbol_id"
+		var nextArgs map[string]string
+		if nextTool == "explore" {
+			nextArgs = map[string]string{"symbol": symbolRef}
+		} else {
+			nextArgs = map[string]string{"symbol_id": symbolRef}
+		}
 
 		item := types.Inspectable{
 			Rank:       i + 1,
@@ -1321,11 +1327,61 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		}
 	}
 
+	// Build inspectables with chaining hints for all symbol changes
+	rank := 0
+	var inspectables []types.Inspectable
+	for _, sc := range changedSymbols {
+		rank++
+		nextTool := "read_symbol"
+		nextArgs := map[string]string{"symbol_id": sc.ID}
+		if sc.ID == "" {
+			nextTool = "explore"
+			nextArgs = map[string]string{"symbol": sc.FilePath}
+		}
+		inspectables = append(inspectables, types.Inspectable{
+			Rank:       rank,
+			TargetType: sc.Status,
+			Name:       sc.Name,
+			FilePath:   sc.FilePath,
+			ID:         sc.ID,
+			NextTool:   nextTool,
+			NextArgs:   nextArgs,
+		})
+	}
+	for _, sc := range newSymbols {
+		rank++
+		inspectables = append(inspectables, types.Inspectable{
+			Rank:       rank,
+			TargetType: sc.Status,
+			Name:       sc.Name,
+			FilePath:   sc.FilePath,
+			NextTool:   "explore",
+			NextArgs:   map[string]string{"symbol": sc.FilePath},
+		})
+	}
+	for _, sc := range deletedSymbols {
+		rank++
+		nextArgs := map[string]string{"symbol_id": sc.ID}
+		if sc.ID == "" {
+			nextArgs = map[string]string{"symbol": sc.Name}
+		}
+		inspectables = append(inspectables, types.Inspectable{
+			Rank:       rank,
+			TargetType: sc.Status,
+			Name:       sc.Name,
+			FilePath:   sc.FilePath,
+			ID:         sc.ID,
+			NextTool:   "impact",
+			NextArgs:   nextArgs,
+		})
+	}
+
 	response := map[string]interface{}{
 		"changed_files":   changedFiles,
 		"changed_symbols": changedSymbols,
 		"new_symbols":     newSymbols,
 		"deleted_symbols": deletedSymbols,
+		"inspectables":    inspectables,
 		"note":            "Symbols in modified files are listed as 'file_modified'. Re-index to detect precise symbol-level changes.",
 		"summary": fmt.Sprintf("%d files changed, %d symbols in modified files, %d new files, %d deleted symbols",
 			len(changedFiles), len(changedSymbols), len(newSymbols), len(deletedSymbols)),
