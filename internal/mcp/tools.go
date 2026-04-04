@@ -1027,7 +1027,7 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 
 func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, error) {
 	if p.Limit == 0 {
-		p.Limit = 20
+		p.Limit = 5
 	}
 	if deps.Graph == nil {
 		return nil, fmt.Errorf("graph engine not initialized")
@@ -1046,9 +1046,10 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 		pageranks = deps.Graph.PageRank()
 	}
 	if len(pageranks) == 0 {
-		return map[string]interface{}{
-			"symbols": []interface{}{},
-			"count":   0,
+		return types.InspectableResponse{
+			Inspectables: []types.Inspectable{},
+			Total:        0,
+			Summary:      "No symbols found with PageRank scores",
 		}, nil
 	}
 
@@ -1059,6 +1060,7 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 		PageRank  float64 `json:"pagerank"`
 		InDegree  int     `json:"in_degree"`
 		OutDegree int     `json:"out_degree"`
+		ID        string  `json:"id"`
 	}
 
 	var symbols []symbolInfo
@@ -1080,6 +1082,7 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 			PageRank:  pr,
 			InDegree:  deps.Graph.GetInDegree(hashID),
 			OutDegree: deps.Graph.GetOutDegree(hashID),
+			ID:        hashID,
 		})
 	}
 
@@ -1088,18 +1091,42 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 		return symbols[i].PageRank > symbols[j].PageRank
 	})
 
+	totalBeforeCap := len(symbols)
 	if len(symbols) > p.Limit {
 		symbols = symbols[:p.Limit]
 	}
 
-	return map[string]interface{}{
-		"symbols": symbols,
-		"count":   len(symbols),
+	var inspectables []types.Inspectable
+	for i, sym := range symbols {
+		reason := fmt.Sprintf("PageRank %.4f, %d callers, %d callees", sym.PageRank, sym.InDegree, sym.OutDegree)
+
+		nextTool := "read_symbol"
+		if sym.NodeType == "struct" || sym.NodeType == "class" || sym.NodeType == "interface" {
+			nextTool = "understand"
+		}
+
+		inspectables = append(inspectables, types.Inspectable{
+			Rank:       i + 1,
+			TargetType: "symbol",
+			Name:       sym.Name,
+			FilePath:   sym.FilePath,
+			ID:         sym.ID,
+			Score:      sym.PageRank,
+			Reason:     reason,
+			NextTool:   nextTool,
+			NextArgs:   map[string]string{"symbol_id": sym.ID},
+		})
+	}
+
+	return types.InspectableResponse{
+		Inspectables: inspectables,
+		Total:        totalBeforeCap,
+		Summary:      fmt.Sprintf("Top %d symbols by PageRank out of %d total", len(inspectables), totalBeforeCap),
 	}, nil
 }
 
 func registerGetKeySymbolsTool(s *Server, deps ToolDeps) {
-	desc := "Returns the most important symbols in the codebase ranked by PageRank centrality and degree statistics."
+	desc := "Top symbols ranked by graph centrality (PageRank, betweenness). Use to find the most structurally important code in a directory or the whole codebase."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -1118,8 +1145,8 @@ func registerGetKeySymbolsTool(s *Server, deps ToolDeps) {
 			"properties": map[string]interface{}{
 				"limit": map[string]interface{}{
 					"type":        "integer",
-					"description": "Maximum number of symbols to return (default: 20)",
-					"default":     20,
+					"description": "Maximum number of symbols to return (default: 5)",
+					"default":     5,
 				},
 				"file_filter": map[string]interface{}{
 					"type":        "string",
@@ -1915,9 +1942,37 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 		}
 	}
 
+	// Convert matches to Inspectable items
+	var inspectables []types.Inspectable
+	for i, m := range matches {
+		nextTool := "read_symbol"
+		if m.NodeType == "struct" || m.NodeType == "class" || m.NodeType == "interface" {
+			nextTool = "understand"
+		}
+
+		inspectables = append(inspectables, types.Inspectable{
+			Rank:       i + 1,
+			TargetType: "symbol",
+			Name:       m.Name,
+			FilePath:   m.FilePath,
+			ID:         m.ID,
+			Score:      0,
+			Reason:     fmt.Sprintf("Matched symbol (%s)", m.NodeType),
+			NextTool:   nextTool,
+			NextArgs:   map[string]string{"symbol_id": m.ID},
+		})
+	}
+
+	totalMatches := len(matches)
+	if len(inspectables) > 10 {
+		inspectables = inspectables[:10]
+	}
+
 	result := map[string]interface{}{
-		"matches": matches,
-		"count":   len(matches),
+		"inspectables": inspectables,
+		"total":        totalMatches,
+		"query":        p.Symbol,
+		"summary":      fmt.Sprintf("Found %d matches for '%s'", totalMatches, p.Symbol),
 	}
 
 	// Collect dependencies if requested
@@ -1990,7 +2045,7 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 }
 
 func registerExploreTool(s *Server, deps ToolDeps) {
-	desc := "Explores the codebase by searching for a symbol and optionally collecting its dependencies, dependents, and hotspots."
+	desc := "Search for symbols by name with optional dependency traversal and hotspot detection. Use for targeted symbol lookup when you know a partial name."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {

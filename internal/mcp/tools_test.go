@@ -321,19 +321,29 @@ func TestGetKeySymbols_Basic(t *testing.T) {
 		t.Fatalf("get_key_symbols error: %v", err)
 	}
 
-	m, ok := result.(map[string]interface{})
+	resp, ok := result.(types.InspectableResponse)
 	if !ok {
-		t.Fatalf("expected map[string]interface{}, got %T", result)
+		t.Fatalf("expected types.InspectableResponse, got %T", result)
 	}
-	count, ok := m["count"].(int)
-	if !ok {
-		t.Fatalf("expected count to be int, got %T", m["count"])
-	}
-	if count == 0 {
+	if resp.Total == 0 {
 		t.Fatal("expected at least one key symbol")
 	}
+	if len(resp.Inspectables) == 0 {
+		t.Fatal("expected at least one inspectable")
+	}
+	// Verify inspectable fields
+	first := resp.Inspectables[0]
+	if first.Rank != 1 {
+		t.Errorf("expected first rank to be 1, got %d", first.Rank)
+	}
+	if first.TargetType != "symbol" {
+		t.Errorf("expected target_type 'symbol', got %q", first.TargetType)
+	}
+	if first.NextTool == "" {
+		t.Error("expected non-empty next_tool")
+	}
 
-	t.Logf("Found %d key symbols", count)
+	t.Logf("Found %d key symbols (total %d)", len(resp.Inspectables), resp.Total)
 }
 
 func TestGetKeySymbols_WithFileFilter(t *testing.T) {
@@ -355,17 +365,13 @@ func TestGetKeySymbols_WithFileFilter(t *testing.T) {
 		t.Fatalf("get_key_symbols error: %v", err)
 	}
 
-	m, ok := result.(map[string]interface{})
+	resp, ok := result.(types.InspectableResponse)
 	if !ok {
-		t.Fatalf("expected map[string]interface{}, got %T", result)
-	}
-	count, ok := m["count"].(int)
-	if !ok {
-		t.Fatalf("expected count to be int, got %T", m["count"])
+		t.Fatalf("expected types.InspectableResponse, got %T", result)
 	}
 	// Only helperFunc in util.go should match
-	if count != 1 {
-		t.Errorf("expected 1 symbol with file_filter='util', got %d", count)
+	if resp.Total != 1 {
+		t.Errorf("expected 1 symbol with file_filter='util', got %d", resp.Total)
 	}
 }
 
@@ -534,15 +540,30 @@ func TestExplore_BasicSearch(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map[string]interface{}, got %T", result)
 	}
-	count, ok := m["count"].(int)
+	total, ok := m["total"].(int)
 	if !ok {
-		t.Fatalf("expected count to be int, got %T", m["count"])
+		t.Fatalf("expected total to be int, got %T", m["total"])
 	}
-	if count == 0 {
+	if total == 0 {
 		t.Fatal("expected at least one match for 'processOrder'")
 	}
+	// Verify inspectables are present
+	inspectables, ok := m["inspectables"].([]types.Inspectable)
+	if !ok {
+		t.Fatalf("expected inspectables to be []types.Inspectable, got %T", m["inspectables"])
+	}
+	if len(inspectables) == 0 {
+		t.Fatal("expected at least one inspectable")
+	}
+	first := inspectables[0]
+	if first.Rank != 1 {
+		t.Errorf("expected first rank to be 1, got %d", first.Rank)
+	}
+	if first.TargetType != "symbol" {
+		t.Errorf("expected target_type 'symbol', got %q", first.TargetType)
+	}
 
-	t.Logf("Found %d matches for 'processOrder'", count)
+	t.Logf("Found %d matches for 'processOrder'", total)
 }
 
 func TestExplore_WithDeps(t *testing.T) {
@@ -580,7 +601,7 @@ func TestExplore_WithDeps(t *testing.T) {
 		t.Error("expected 'dependents' in result when include_deps=true")
 	}
 
-	t.Logf("Explore with deps: matches=%v", m["count"])
+	t.Logf("Explore with deps: total=%v", m["total"])
 }
 
 func TestUnderstand_ExactMatch(t *testing.T) {
