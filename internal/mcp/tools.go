@@ -249,7 +249,13 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 		if symbolRef == "" {
 			symbolRef = r.Node.SymbolName
 		}
-		nextArgs := map[string]string{"symbol_id": symbolRef}
+		// Use correct key for each tool: explore uses "symbol", others use "symbol_id"
+		var nextArgs map[string]string
+		if nextTool == "explore" {
+			nextArgs = map[string]string{"symbol": symbolRef}
+		} else {
+			nextArgs = map[string]string{"symbol_id": symbolRef}
+		}
 
 		item := types.Inspectable{
 			Rank:       i + 1,
@@ -1601,10 +1607,13 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 			nextTool = "impact"
 		}
 
-		// Build next args
+		// Build next args — new files have no ID, fall back to explore by file path
 		nextArgs := map[string]string{}
 		if sc.ID != "" {
 			nextArgs["symbol_id"] = sc.ID
+		} else if sc.FilePath != "" {
+			nextTool = "explore"
+			nextArgs["symbol"] = sc.FilePath
 		}
 
 		// WhyNow from file intent
