@@ -616,12 +616,54 @@ All options are set via CLI flags:
 | `-onnx-model` | (empty) | Path to ONNX model directory (enables neural embeddings) |
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
 | `-embedding-dim` | `384` | Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896) |
+| `-ollama-endpoint` | (empty) | Ollama API endpoint (e.g., `http://localhost:11434`) |
+| `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |
+| `-llamacpp-endpoint` | (empty) | llama.cpp server endpoint (e.g., `http://localhost:8080`) |
 
 **Example with custom settings:**
 
 ```bash
 ./qb-context -repo ~/projects/my-app -workers 8 -debounce 1s
 ```
+
+### Local Embedding Models
+
+qb-context supports three embedding backends beyond the built-in TF-IDF fallback. Priority order: ONNX > Ollama > llama.cpp > TF-IDF.
+
+**Option 1: Pre-quantized ONNX model (recommended for best quality)**
+
+Download the pre-quantized Jina Code model (~488MB) with the provided script:
+
+```bash
+./scripts/download-model.sh                        # downloads to models/jina-code-int8/
+./qb-context -onnx-model models/jina-code-int8 -onnx-lib /path/to/libonnxruntime.dylib
+```
+
+Or export manually via `optimum-cli` (see the ONNX model export documentation).
+
+**Option 2: Ollama (easiest setup, no compilation needed)**
+
+Install [Ollama](https://ollama.com), pull an embedding model, and point qb-context at it:
+
+```bash
+ollama pull nomic-embed-code
+./qb-context -ollama-endpoint http://localhost:11434 -ollama-model nomic-embed-code -embedding-dim 768
+```
+
+Supported models include `nomic-embed-code` (768d, code-optimized), `nomic-embed-text` (768d), `mxbai-embed-large` (1024d), and `all-minilm` (384d).
+
+**Option 3: llama.cpp server (GGUF models, native batching)**
+
+Start `llama-server` with an embedding model, then point qb-context at it:
+
+```bash
+llama-server -m nomic-embed-code-q8_0.gguf --embedding --port 8080
+./qb-context -llamacpp-endpoint http://localhost:8080 -embedding-dim 768
+```
+
+llama.cpp supports native batch embedding and GGUF quantized models (smaller than ONNX).
+
+**Important:** The `-embedding-dim` flag must match the model's output dimension. Changing dimensions requires re-indexing.
 
 ---
 

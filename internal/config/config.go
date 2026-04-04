@@ -64,6 +64,17 @@ type Config struct {
 	// Valid values: "core" (6 tools), "extended" (10 tools), "full" (all 13).
 	// CLI mode always registers all 13 tools regardless of profile.
 	Profile string
+
+	// OllamaEndpoint is the Ollama API endpoint (e.g., http://localhost:11434).
+	// Empty string disables the Ollama backend.
+	OllamaEndpoint string
+
+	// OllamaModel is the Ollama model name for embeddings (e.g., nomic-embed-code).
+	OllamaModel string
+
+	// LlamaCppEndpoint is the llama.cpp server endpoint (e.g., http://localhost:8080).
+	// Empty string disables the llama.cpp backend.
+	LlamaCppEndpoint string
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -83,6 +94,7 @@ func DefaultConfig() *Config {
 		GitMaxMessageBytes:  2000,
 		GitMaxIntentBytes:   1500,
 		Profile:             "core",
+		OllamaModel:         "nomic-embed-code",
 	}
 }
 
@@ -109,6 +121,9 @@ func ParseFlags() (*Config, error) {
 	fs.IntVar(&cfg.GitMaxMessageBytes, "git-max-message", cfg.GitMaxMessageBytes, "Maximum bytes per commit message")
 	fs.IntVar(&cfg.GitMaxIntentBytes, "git-max-intent", cfg.GitMaxIntentBytes, "Maximum bytes per file intent summary")
 	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (6 tools), extended (10 tools), or full (all 13)")
+	fs.StringVar(&cfg.OllamaEndpoint, "ollama-endpoint", cfg.OllamaEndpoint, "Ollama API endpoint (e.g., http://localhost:11434)")
+	fs.StringVar(&cfg.OllamaModel, "ollama-model", cfg.OllamaModel, "Ollama embedding model name")
+	fs.StringVar(&cfg.LlamaCppEndpoint, "llamacpp-endpoint", cfg.LlamaCppEndpoint, "llama.cpp server endpoint (e.g., http://localhost:8080)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, fmt.Errorf("parsing flags: %w", err)
 	}

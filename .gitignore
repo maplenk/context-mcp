@@ -48,3 +48,7 @@ Thumbs.db
 CLAUDE.md
 AGENTS.md
 docs/
+
+# Downloaded models
+models/
+*.tar.gz
