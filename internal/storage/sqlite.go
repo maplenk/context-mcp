@@ -721,6 +721,19 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("only SELECT/WITH queries are allowed, got: %s", strings.SplitN(trimmed, " ", 2)[0])
 	}
 
+	// Defense-in-depth for WITH (CTE) queries: reject mutation keywords that
+	// could appear after the CTE block (e.g., "WITH x AS (...) DELETE FROM ...").
+	// PRAGMA query_only is the primary guard; this is an additional layer.
+	if strings.HasPrefix(trimmed, "WITH") {
+		mutationKeywords := []string{"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"}
+		for _, kw := range mutationKeywords {
+			re := regexp.MustCompile(`(?i)\)\s*` + kw + `\b`)
+			if re.MatchString(query) {
+				return nil, fmt.Errorf("CTE query contains forbidden mutation keyword: %s", kw)
+			}
+		}
+	}
+
 	// Reject multi-statement queries (semicolons outside string literals).
 	// Note: this may reject queries with semicolons in string literals.
 	// Use parameterized values to avoid this limitation.
@@ -785,7 +798,12 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		}
 	}()
 
-	rows, err := conn.QueryContext(context.Background(), query)
+	// Enforce a 30-second timeout to prevent long-running queries from
+	// holding the RLock indefinitely and blocking all write operations.
+	queryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rows, err := conn.QueryContext(queryCtx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -973,7 +991,8 @@ func (s *Store) SearchNodesByName(pattern string) ([]types.ASTNode, error) {
 
 	rows, err := s.db.Query(`
 		SELECT id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum
-		FROM nodes WHERE symbol_name LIKE ? ESCAPE '\' COLLATE NOCASE`, "%"+escapeLIKE(pattern)+"%")
+		FROM nodes WHERE symbol_name LIKE ? ESCAPE '\' COLLATE NOCASE
+		LIMIT 100`, "%"+escapeLIKE(pattern)+"%")
 	if err != nil {
 		return nil, err
 	}

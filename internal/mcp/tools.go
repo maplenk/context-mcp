@@ -173,6 +173,9 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 	if p.Limit == 0 {
 		p.Limit = 5
 	}
+	if p.Limit > 100 {
+		p.Limit = 100
+	}
 	// Architecture mode: return community detection results (backward compat, undocumented)
 	if p.Mode == "architecture" {
 		if deps.Graph == nil {
@@ -392,6 +395,9 @@ func registerContextTool(s *Server, deps ToolDeps) {
 func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 	if p.Depth == 0 {
 		p.Depth = 5
+	}
+	if p.Depth > 20 {
+		p.Depth = 20
 	}
 	if deps.Graph == nil {
 		return nil, fmt.Errorf("graph engine not initialized")
@@ -913,6 +919,9 @@ func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, er
 	if p.MaxDepth == 0 {
 		p.MaxDepth = 10
 	}
+	if p.MaxDepth > 20 {
+		p.MaxDepth = 20
+	}
 	if deps.Graph == nil {
 		return nil, fmt.Errorf("graph engine not initialized")
 	}
@@ -1035,6 +1044,9 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, error) {
 	if p.Limit == 0 {
 		p.Limit = 5
+	}
+	if p.Limit > 50 {
+		p.Limit = 50
 	}
 	if deps.Graph == nil {
 		return nil, fmt.Errorf("graph engine not initialized")
@@ -1183,8 +1195,14 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 	if p.Pattern == "" {
 		return nil, fmt.Errorf("'pattern' is required")
 	}
+	if len(p.Pattern) > 10000 {
+		return nil, fmt.Errorf("pattern too long: %d characters (max 10000)", len(p.Pattern))
+	}
 	if p.Limit == 0 {
 		p.Limit = 20
+	}
+	if p.Limit > 200 {
+		p.Limit = 200
 	}
 
 	// Compile regex
@@ -1893,6 +1911,9 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 	}
 	if p.Depth == 0 {
 		p.Depth = 2
+	}
+	if p.Depth > 10 {
+		p.Depth = 10
 	}
 
 	type matchInfo struct {
