@@ -67,7 +67,7 @@ type ContextParams struct {
 	Query       string   `json:"query" jsonschema:"description=Natural language or keyword query to search for relevant code"`
 	Limit       int      `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return (default: 5)"`
 	Mode        string   `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
-	MaxPerFile  int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 3)"`
+	MaxPerFile  int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 1)"`
 	ActiveFiles []string `json:"active_files,omitempty" jsonschema:"description=File paths the developer is currently editing for PPR personalization"`
 }
 
