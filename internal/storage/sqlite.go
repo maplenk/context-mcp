@@ -746,6 +746,16 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("query contains forbidden pattern: WITH RECURSIVE")
 	}
 
+	// Reject CTE-based mutation bypass: WITH ... DELETE/INSERT/UPDATE/DROP
+	if strings.HasPrefix(trimmed, "WITH") {
+		for _, kw := range []string{"DELETE", "INSERT", "UPDATE", "DROP", "ALTER", "CREATE"} {
+			re := regexp.MustCompile(`(?i)\b` + kw + `\b`)
+			if re.MatchString(query) {
+				return nil, fmt.Errorf("query contains forbidden mutation keyword in CTE: %s", kw)
+			}
+		}
+	}
+
 	// Reject queries containing dangerous SQLite functions/patterns.
 	// Uses word-boundary regex to avoid false positives (e.g., "attachment", "credited").
 	// See package-level dangerousPatterns for the canonical blocklist.

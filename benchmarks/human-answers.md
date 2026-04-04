@@ -1,13 +1,13 @@
 A1
 ```
-/Users/naman/Documents/QBApps/qbapi/app/Http/Controllers/FiscalYearController.php
+app/Http/Controllers/FiscalYearController.php
 ```
 
 A2
 ```
-/Users/naman/Documents/QBApps/qbapi/app/Http/Controllers/OrderController.php
-/Users/naman/Documents/QBApps/qbapi/app/Http/Controllers/v2/OrderController.php
-/Users/naman/Documents/QBApps/qbapi/app/Http/Controllers/v3/OrderController.php
+app/Http/Controllers/OrderController.php
+app/Http/Controllers/v2/OrderController.php
+app/Http/Controllers/v3/OrderController.php
 ```
 
 A3
@@ -133,9 +133,9 @@ C1
 /v1/merchant/{storeID}/order
 /v3/merchant/{storeID}/order
 /v2/merchant/{storeID}/order
-/Users/naman/Documents/QBApps/qbapi/app/Http/Controllers/OrderController.php
-/Users/naman/Documents/QBApps/qbapi/app/Http/Controllers/v2/OrderController.php
-/Users/naman/Documents/QBApps/qbapi/app/Http/Controllers/v3/OrderController.php
+app/Http/Controllers/OrderController.php
+app/Http/Controllers/v2/OrderController.php
+app/Http/Controllers/v3/OrderController.php
 app/Order.php
 app/v3/Order.php
 app/Services/OrderPaymentsService.php

@@ -2,7 +2,7 @@
   "commit": "c608668",
   "label": "v0.7.0",
   "timestamp": "20260402T141527",
-  "target_repo": "/Users/naman/Documents/QBApps/qbapi",
+  "target_repo": "/path/to/qbapi",
   "index_stats": {
     "total_nodes": 33607,
     "total_edges": 5635,

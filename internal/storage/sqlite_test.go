@@ -784,6 +784,47 @@ func TestRawQuery_RejectsWrites(t *testing.T) {
 	}
 }
 
+func TestRawQuery_BlocksCTEMutation(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a test node so we have data to potentially mutate.
+	node := sampleNode(types.GenerateNodeID("cte.go", "CTEFunc"), "cte.go", "CTEFunc", types.NodeTypeFunction)
+	if err := s.UpsertNode(node); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	// CTE + DELETE should be rejected
+	_, err := s.RawQuery("WITH x AS (SELECT 1) DELETE FROM nodes")
+	if err == nil {
+		t.Fatal("expected CTE mutation query to be rejected")
+	}
+	if !strings.Contains(err.Error(), "forbidden mutation keyword") {
+		t.Fatalf("expected forbidden mutation error, got: %v", err)
+	}
+
+	// Also test other mutation keywords
+	mutations := []string{
+		"WITH x AS (SELECT 1) INSERT INTO nodes VALUES ('a','b','c',1,0,0,'')",
+		"WITH x AS (SELECT 1) UPDATE nodes SET symbol_name = 'hacked'",
+		"WITH x AS (SELECT 1) DROP TABLE nodes",
+	}
+	for _, q := range mutations {
+		_, err := s.RawQuery(q)
+		if err == nil {
+			t.Fatalf("expected query to be rejected: %s", q)
+		}
+	}
+
+	// Verify the node is still intact (no mutation occurred)
+	got, err := s.GetNode(node.ID)
+	if err != nil {
+		t.Fatalf("GetNode after CTE mutation attempts: %v", err)
+	}
+	if got.SymbolName != "CTEFunc" {
+		t.Errorf("node was mutated: got %q, want %q", got.SymbolName, "CTEFunc")
+	}
+}
+
 func TestRawQuery_BlocksDangerousFunctions(t *testing.T) {
 	s := newTestStore(t)
 

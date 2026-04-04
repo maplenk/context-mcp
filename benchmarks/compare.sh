@@ -14,7 +14,7 @@
 #
 # Options:
 #   --baseline <ref>     Compare against this commit (runs both, prints diff table)
-#   --repo <path>        Target repo to index (default: /Users/naman/Documents/QBApps/qbapi)
+#   --repo <path>        Target repo to index (default: $QB_TEST_REPO or /path/to/test/repo)
 #   --skip-graph         Skip Go graph micro-benchmarks
 #   --skip-quality       Skip search quality tests
 #   --json               Output machine-readable JSON summary
@@ -26,7 +26,7 @@ set -euo pipefail
 # ─── Defaults ───────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TARGET_REPO="/Users/naman/Documents/QBApps/qbapi"
+TARGET_REPO="${QB_TEST_REPO:-/path/to/test/repo}"
 RESULTS_DIR="$SCRIPT_DIR/results"
 COMMIT=""
 BASELINE=""

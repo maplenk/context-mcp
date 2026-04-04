@@ -7,15 +7,21 @@ import (
 )
 
 func getModelDir() string {
+	if p := os.Getenv("QB_ONNX_MODEL"); p != "" {
+		return p
+	}
 	if p := os.Getenv("ONNX_MODEL_DIR"); p != "" {
 		return p
 	}
-	return "/Users/naman/Documents/coindex/quantized_model"
+	return ""
 }
 
 var testModelDir = getModelDir()
 
 func hasTestModel() bool {
+	if testModelDir == "" {
+		return false
+	}
 	_, err := os.Stat(filepath.Join(testModelDir, "tokenizer.json"))
 	return err == nil
 }

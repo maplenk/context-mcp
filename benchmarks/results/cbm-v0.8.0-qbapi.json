@@ -3,14 +3,14 @@
   "engine_version": "0.8.0",
   "label": "cbm-v0.8.0",
   "timestamp": "20260403T031623",
-  "target_repo": "/Users/naman/Documents/QBApps/qbapi",
+  "target_repo": "/path/to/qbapi",
   "target_repo_description": "Laravel multi-tenant retail/POS backend",
   "index_stats": {
     "total_nodes": 16806,
     "total_edges": 35189,
     "notes": "tree-sitter AST — 66 language support, LSP-style hybrid type resolution"
   },
-  "cli_invocation": "codebase-memory-mcp cli <tool> '{\"project\":\"Users-naman-Documents-QBApps-qbapi\", ...}'",
+  "cli_invocation": "codebase-memory-mcp cli <tool> '{\"project\":\"<project-slug>\", ...}'",
   "query_latencies": {
     "A1_understand": "369.164ms",
     "A1_search_graph_exact_class": "32.365ms",

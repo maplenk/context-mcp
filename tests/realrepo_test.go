@@ -19,7 +19,12 @@ import (
 	"github.com/maplenk/context-mcp/internal/types"
 )
 
-const realRepoPath = "/Users/naman/Documents/QBApps/qbapi"
+var realRepoPath = func() string {
+	if p := os.Getenv("QB_TEST_REPO"); p != "" {
+		return p
+	}
+	return ""
+}()
 
 // skipDirs are directories that should be skipped during indexing.
 var skipDirs = []string{
@@ -82,7 +87,11 @@ var sharedEnv *realRepoEnv
 // sync.Once + global atomic pattern (M21) and uses a managed temp dir that is
 // cleaned up deterministically (M24).
 func TestMain(m *testing.M) {
-	// Check if real repo exists before doing heavy work
+	// Check if real repo is configured and exists
+	if realRepoPath == "" {
+		fmt.Println("QB_TEST_REPO not set, skipping real-repo tests")
+		os.Exit(0)
+	}
 	if _, err := os.Stat(realRepoPath); os.IsNotExist(err) {
 		// Run tests anyway — individual tests will skip via getSharedEnv
 		os.Exit(m.Run())

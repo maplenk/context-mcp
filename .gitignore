@@ -24,6 +24,9 @@ go.work.sum
 .DS_Store
 Thumbs.db
 
+# Environment (contains local paths)
+.env
+
 # Project index database
 .qb-context/
 

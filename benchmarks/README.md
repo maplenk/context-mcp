@@ -76,7 +76,7 @@ The benchmark suite measures three dimensions of qb-context quality:
 | **Search Quality**   | Relevance of results for domain keyword search | `TestRealRepo_SearchQuality`     |
 | **Graph Performance**| PageRank, blast radius, betweenness centrality | `BenchmarkPageRank`, etc.        |
 
-**Canonical benchmark target**: **QBApps/qbapi** — `/Users/naman/Documents/QBApps/qbapi`
+**Canonical benchmark target**: **QBApps/qbapi** (set via `QB_TEST_REPO` env var)
 
 All benchmarks MUST be run against this repo. It is a Laravel multi-tenant retail/POS
 backend (~780 PHP files, staging branch) that produces ~12.6K nodes and ~16.3K edges
