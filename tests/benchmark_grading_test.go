@@ -273,9 +273,9 @@ func queryTier(id string) string {
 func queryLimit(tier string) int {
 	switch tier {
 	case "A":
-		return 10
-	default: // B, C
 		return 20
+	default: // B, C
+		return 40
 	}
 }
 

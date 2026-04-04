@@ -336,11 +336,12 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		})
 	}
 
-	// NOTE: Graph-neighborhood expansion is implemented (expandFromSeeds) but
-	// disabled — it regresses the benchmark by pushing structurally-connected
-	// but query-irrelevant nodes into top-N, displacing real results.
-	// TODO: Re-enable with query-relevance filtering (check expanded nodes
-	// against query terms before including them).
+	// Graph-neighborhood expansion: expand 1-hop from top seeds, filtered
+	// by query relevance to avoid flooding results with irrelevant neighbors.
+	if h.graph != nil {
+		results = h.expandFromSeeds(results, candidates, bm25Scores, semanticScores,
+			pprScores, betweennessScores, inDegreeScores, limit, cleanedQuery)
+	}
 
 	// Sort by composite score descending
 	sort.Slice(results, func(i, j int) bool {
@@ -781,11 +782,13 @@ func pathPenalty(filePath string) float64 {
 // expandFromSeeds takes the initial scored results, expands 1 hop from the
 // top seeds via graph edges, fetches newly discovered nodes from the store,
 // scores them, and merges them into the result set.
+// queryTerms is used to filter expanded neighbors for query relevance.
 func (h *HybridSearch) expandFromSeeds(
 	results []types.SearchResult,
 	existingCandidates map[string]types.ASTNode,
 	bm25Scores, semanticScores, pprScores, betweennessScores, inDegreeScores map[string]float64,
 	limit int,
+	queryTerms string,
 ) []types.SearchResult {
 	// Take top-N seeds (pre-sort by score to get the best ones)
 	sort.Slice(results, func(i, j int) bool {
@@ -798,29 +801,36 @@ func (h *HybridSearch) expandFromSeeds(
 	}
 
 	// Collect neighbor IDs from top seeds (1 hop: callees + callers)
-	neighborSet := make(map[string]bool)
+	// Track how many distinct seeds connect to each neighbor for multi-seed signal.
+	neighborSeedCount := make(map[string]int)
 	for i := 0; i < seedCount; i++ {
 		seedID := results[i].Node.ID
+		seen := make(map[string]bool) // avoid double-counting same seed
 		for _, callee := range h.graph.GetCallees(seedID) {
-			if _, exists := existingCandidates[callee]; !exists {
-				neighborSet[callee] = true
+			if _, exists := existingCandidates[callee]; !exists && !seen[callee] {
+				neighborSeedCount[callee]++
+				seen[callee] = true
 			}
 		}
 		for _, caller := range h.graph.GetCallers(seedID) {
-			if _, exists := existingCandidates[caller]; !exists {
-				neighborSet[caller] = true
+			if _, exists := existingCandidates[caller]; !exists && !seen[caller] {
+				neighborSeedCount[caller]++
+				seen[caller] = true
 			}
 		}
 	}
 
-	if len(neighborSet) == 0 {
+	if len(neighborSeedCount) == 0 {
 		return results
 	}
 
+	// Parse query terms for relevance filtering
+	terms := strings.Fields(strings.ToLower(queryTerms))
+
 	// Cap expansion to prevent result bloat
 	maxExpansion := 20
-	neighborIDs := make([]string, 0, len(neighborSet))
-	for id := range neighborSet {
+	neighborIDs := make([]string, 0, len(neighborSeedCount))
+	for id := range neighborSeedCount {
 		neighborIDs = append(neighborIDs, id)
 		if len(neighborIDs) >= maxExpansion {
 			break
@@ -840,6 +850,28 @@ func (h *HybridSearch) expandFromSeeds(
 		node, err := h.store.GetNode(nID)
 		if err != nil || node == nil {
 			continue
+		}
+
+		// Query-relevance filter: only include neighbors that contain a query
+		// term in their symbol name, file path, or content summary.
+		// Exception: neighbors connected to 2+ seeds are included regardless
+		// (strong structural signal).
+		if neighborSeedCount[nID] < 2 && len(terms) > 0 {
+			relevant := false
+			lowerSymbol := strings.ToLower(node.SymbolName)
+			lowerPath := strings.ToLower(node.FilePath)
+			lowerContent := strings.ToLower(node.ContentSum)
+			for _, term := range terms {
+				if strings.Contains(lowerSymbol, term) ||
+					strings.Contains(lowerPath, term) ||
+					strings.Contains(lowerContent, term) {
+					relevant = true
+					break
+				}
+			}
+			if !relevant {
+				continue
+			}
 		}
 
 		// Score the neighbor using whatever signals we have
@@ -878,7 +910,7 @@ func (h *HybridSearch) expandFromSeeds(
 			}
 			// Give neighbor a modest fraction of the seed's score —
 			// low enough to not displace direct lexical/semantic hits
-			composite = bestSeedScore * 0.15
+			composite = bestSeedScore * 0.10
 		}
 
 		// Apply path-based penalty to expanded nodes
