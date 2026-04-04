@@ -91,6 +91,7 @@ type SearchCodeParams struct {
 type DetectChangesParams struct {
 	Since string `json:"since" jsonschema:"required,description=Git ref to compare against (e.g. HEAD~5 or main or a commit hash)"`
 	Path  string `json:"path,omitempty" jsonschema:"description=Optional path filter for changed files"`
+	Limit int    `json:"limit,omitempty" jsonschema:"description=Maximum number of ranked changes to return (default: 5)"`
 }
 
 // ArchitectureSummaryParams are the parameters for the get_architecture_summary tool
@@ -1216,6 +1217,9 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 	if p.Since == "" {
 		return nil, fmt.Errorf("'since' is required")
 	}
+	if p.Limit == 0 {
+		p.Limit = 5
+	}
 
 	// Validate the git ref to prevent command injection
 	// M25: Allow alphanumeric, ~, ^, ., -, / for branch names (e.g. feature/my-branch, origin/main)
@@ -1269,15 +1273,14 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 
 	// For each changed file, categorize: deleted, new, or modified
 	type symbolChange struct {
-		Name     string `json:"name"`
-		FilePath string `json:"file_path"`
-		ID       string `json:"id"`
-		Status   string `json:"status"` // "file_modified", "deleted", "new_file"
+		Name     string
+		FilePath string
+		ID       string
+		Status   string // "file_modified", "deleted", "new_file"
 	}
 
-	var changedSymbols []symbolChange
-	var newSymbols []symbolChange
-	var deletedSymbols []symbolChange
+	var allCandidates []symbolChange
+	var newFileCount, deletedCount, modifiedCount int
 
 	for _, filePath := range changedFiles {
 		// Get stored symbols for this file
@@ -1291,63 +1294,203 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		if _, err := os.Stat(absPath); os.IsNotExist(err) {
 			// File deleted — all its symbols are deleted
 			for _, n := range storedNodes {
-				deletedSymbols = append(deletedSymbols, symbolChange{
+				allCandidates = append(allCandidates, symbolChange{
 					Name:     n.SymbolName,
 					FilePath: n.FilePath,
 					ID:       n.ID,
 					Status:   "deleted",
 				})
+				deletedCount++
 			}
 			continue
 		}
 
-		// File exists but changed — symbols are potentially modified (needs re-index to confirm)
+		// File exists but changed — symbols are potentially modified
 		for _, n := range storedNodes {
-			changedSymbols = append(changedSymbols, symbolChange{
+			allCandidates = append(allCandidates, symbolChange{
 				Name:     n.SymbolName,
 				FilePath: n.FilePath,
 				ID:       n.ID,
 				Status:   "file_modified",
 			})
+			modifiedCount++
 		}
 
 		// If no stored nodes exist, file might be new
 		if len(storedNodes) == 0 {
-			newSymbols = append(newSymbols, symbolChange{
+			allCandidates = append(allCandidates, symbolChange{
 				Name:     "(new file)",
 				FilePath: filePath,
 				Status:   "new_file",
 			})
+			newFileCount++
 		}
 	}
 
-	response := map[string]interface{}{
-		"changed_files":   changedFiles,
-		"changed_symbols": changedSymbols,
-		"new_symbols":     newSymbols,
-		"deleted_symbols": deletedSymbols,
-		"note":            "Symbols in modified files are listed as 'file_modified'. Re-index to detect precise symbol-level changes.",
-		"summary": fmt.Sprintf("%d files changed, %d symbols in modified files, %d new files, %d deleted symbols",
-			len(changedFiles), len(changedSymbols), len(newSymbols), len(deletedSymbols)),
-	}
+	totalCandidates := len(allCandidates)
 
-	// Cold Start: add file intents for changed files
+	// Fetch file intents for all changed files (used in WhyNow)
+	fileIntents := make(map[string]string)
 	if len(changedFiles) > 0 {
 		intents, intentErr := deps.Store.GetFileIntentsByPaths(changedFiles)
 		if intentErr == nil && len(intents) > 0 {
-			fileIntents := make(map[string]string)
 			for path, fi := range intents {
 				fileIntents[path] = fi.IntentText
 			}
-			response["file_intents"] = fileIntents
 		}
 	}
 
-	return response, nil
+	// Score each candidate
+	type scoredCandidate struct {
+		symbolChange
+		betweenness    float64
+		dependentCount int
+		changeSeverity float64
+		composite      float64
+	}
+
+	useFastPath := totalCandidates > 100 // skip BlastRadiusWithDepth for large pools
+
+	scored := make([]scoredCandidate, 0, totalCandidates)
+	maxDependents := 0
+
+	// First pass: collect betweenness and dependent counts
+	for _, c := range allCandidates {
+		sc := scoredCandidate{symbolChange: c}
+
+		// Change severity
+		switch c.Status {
+		case "deleted":
+			sc.changeSeverity = 1.0
+		case "new_file":
+			sc.changeSeverity = 0.7
+		default:
+			sc.changeSeverity = 0.5
+		}
+
+		// Betweenness from stored node scores
+		if c.ID != "" {
+			nodeScore, err := deps.Store.GetNodeScore(c.ID)
+			if err == nil && nodeScore != nil {
+				sc.betweenness = nodeScore.Betweenness
+			}
+		}
+
+		// Dependent count via blast radius (depth 1), unless fast path
+		if !useFastPath && c.ID != "" && deps.Graph != nil {
+			depMap := deps.Graph.BlastRadiusWithDepth(c.ID, 1)
+			// depMap includes the node itself, so subtract 1
+			sc.dependentCount = len(depMap)
+			if sc.dependentCount > 0 {
+				sc.dependentCount-- // exclude the node itself
+			}
+		}
+
+		if sc.dependentCount > maxDependents {
+			maxDependents = sc.dependentCount
+		}
+
+		scored = append(scored, sc)
+	}
+
+	// Second pass: compute composite scores
+	for i := range scored {
+		if useFastPath {
+			// Betweenness-only ranking for large pools
+			scored[i].composite = 0.8*scored[i].betweenness + 0.2*scored[i].changeSeverity
+		} else {
+			normalizedDeps := 0.0
+			if maxDependents > 0 {
+				normalizedDeps = float64(scored[i].dependentCount) / float64(maxDependents)
+			}
+			scored[i].composite = 0.5*scored[i].betweenness + 0.3*normalizedDeps + 0.2*scored[i].changeSeverity
+		}
+	}
+
+	// Sort by composite score descending
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].composite > scored[j].composite
+	})
+
+	// Cap to limit
+	topN := scored
+	if len(topN) > p.Limit {
+		topN = topN[:p.Limit]
+	}
+
+	// Count high-risk changes (betweenness > 0.1)
+	highRiskCount := 0
+	for _, sc := range scored {
+		if sc.betweenness > 0.1 {
+			highRiskCount++
+		}
+	}
+
+	// Build InspectableResponse
+	inspectables := make([]types.Inspectable, 0, len(topN))
+	for i, sc := range topN {
+		// Build reason string
+		var reasonParts []string
+		if sc.betweenness > 0 {
+			reasonParts = append(reasonParts, fmt.Sprintf("betweenness %.2f", sc.betweenness))
+		}
+		if sc.dependentCount > 0 {
+			reasonParts = append(reasonParts, fmt.Sprintf("%d direct dependents", sc.dependentCount))
+		}
+		switch sc.Status {
+		case "deleted":
+			reasonParts = append(reasonParts, "deleted symbol")
+		case "new_file":
+			reasonParts = append(reasonParts, "new file")
+		case "file_modified":
+			reasonParts = append(reasonParts, "file modified")
+		}
+		reason := strings.Join(reasonParts, ", ")
+		if reason == "" {
+			reason = "Changed symbol"
+		}
+
+		// Determine next tool
+		nextTool := "read_symbol"
+		if sc.betweenness > 0.05 {
+			nextTool = "impact"
+		}
+
+		// Build next args
+		nextArgs := map[string]string{}
+		if sc.ID != "" {
+			nextArgs["symbol_id"] = sc.ID
+		}
+
+		// WhyNow from file intent
+		whyNow := fileIntents[sc.FilePath]
+
+		inspectables = append(inspectables, types.Inspectable{
+			Rank:       i + 1,
+			TargetType: "symbol",
+			Name:       sc.Name,
+			FilePath:   sc.FilePath,
+			ID:         sc.ID,
+			Score:      sc.composite,
+			Reason:     reason,
+			WhyNow:     whyNow,
+			NextTool:   nextTool,
+			NextArgs:   nextArgs,
+		})
+	}
+
+	summary := fmt.Sprintf("%d high-risk changes (betweenness > 0.1), %d total modified symbols, %d new files, %d deleted",
+		highRiskCount, modifiedCount, newFileCount, deletedCount)
+
+	return types.InspectableResponse{
+		Inspectables: inspectables,
+		Total:        totalCandidates,
+		Summary:      summary,
+	}, nil
 }
 
 func registerDetectChangesTool(s *Server, deps ToolDeps) {
-	desc := "Detects changed files and symbols since a given git ref. Compares current file state with the indexed symbol database."
+	desc := "What changed and what matters most? Returns the top 5 highest-risk symbol changes since a git ref, ranked by centrality and blast radius."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -1371,6 +1514,10 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 				"path": map[string]interface{}{
 					"type":        "string",
 					"description": "Optional path filter for changed files",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of ranked changes to return (default: 5)",
 				},
 			},
 			"required": []string{"since"},
