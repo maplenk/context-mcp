@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/naman/qb-context/internal/search"
 )
 
 // benchmarkQueries maps query IDs to the search queries used for grading.
@@ -391,22 +393,36 @@ func matchSymbol(item expectedItem, results []searchResultInfo) bool {
 	return false
 }
 
-// TestAutomatedGrading runs all 15 benchmark queries against the indexed real repo
-// and scores results against the human-provided answer key.
-func TestAutomatedGrading(t *testing.T) {
-	env := getSharedEnv(t)
+// queryResult holds per-query scoring data for reuse across tests.
+type queryResult struct {
+	ID    string
+	Query string
+	Hits  int
+	Total int
+}
 
-	// Parse the answer key
-	answerKey := parseAnswerKey(t)
+// benchmarkResult holds aggregate benchmark scoring for a search engine configuration.
+type benchmarkResult struct {
+	BCHits  int
+	BCTotal int
+	BCRate  float64
+	AHits   int
+	ATotal  int
+	Queries []queryResult
+}
 
-	// Ordered query IDs for deterministic output
-	orderedIDs := []string{
-		"A1", "A2", "A3", "A4",
-		"B1", "B2", "B3", "B4", "B5", "B6",
-		"C1", "C2", "C3", "C4", "C5",
-	}
+// orderedQueryIDs returns the benchmark query IDs in deterministic order.
+var orderedQueryIDs = []string{
+	"A1", "A2", "A3", "A4",
+	"B1", "B2", "B3", "B4", "B5", "B6",
+	"C1", "C2", "C3", "C4", "C5",
+}
 
-	// Track scores per tier
+// runBenchmarkWith runs all benchmark queries using the given search engine
+// and returns aggregate scores. It reuses the existing answer key parsing
+// and matching logic. The limits map controls per-tier result limits
+// (e.g., {"A": 20, "B": 40, "C": 40}).
+func runBenchmarkWith(eng *search.HybridSearch, answerKey map[string][]expectedItem, limits map[string]int) benchmarkResult {
 	type tierScore struct {
 		hits  int
 		total int
@@ -415,7 +431,91 @@ func TestAutomatedGrading(t *testing.T) {
 		"A": {}, "B": {}, "C": {},
 	}
 
-	for _, id := range orderedIDs {
+	var queries []queryResult
+
+	for _, id := range orderedQueryIDs {
+		query, ok := benchmarkQueries[id]
+		if !ok {
+			continue
+		}
+
+		expected, hasAnswers := answerKey[id]
+		if !hasAnswers || len(expected) == 0 {
+			continue
+		}
+
+		tier := queryTier(id)
+		limit := limits[tier]
+		if limit == 0 {
+			limit = queryLimit(tier)
+		}
+
+		results, err := eng.Search(query, limit, nil)
+		if err != nil {
+			queries = append(queries, queryResult{ID: id, Query: query, Hits: 0, Total: len(expected)})
+			ts := tierScores[tier]
+			ts.total += len(expected)
+			continue
+		}
+
+		// Convert to our matching format
+		resultInfos := make([]searchResultInfo, len(results))
+		for i, r := range results {
+			resultInfos[i] = searchResultInfo{
+				filePath:   r.Node.FilePath,
+				symbolName: r.Node.SymbolName,
+				contentSum: r.Node.ContentSum,
+			}
+		}
+
+		// Score each expected item
+		hits := 0
+		for _, item := range expected {
+			if matchItem(item, resultInfos) {
+				hits++
+			}
+		}
+
+		total := len(expected)
+		ts := tierScores[tier]
+		ts.hits += hits
+		ts.total += total
+
+		queries = append(queries, queryResult{ID: id, Query: query, Hits: hits, Total: total})
+	}
+
+	bcHits := tierScores["B"].hits + tierScores["C"].hits
+	bcTotal := tierScores["B"].total + tierScores["C"].total
+	bcRate := float64(0)
+	if bcTotal > 0 {
+		bcRate = float64(bcHits) / float64(bcTotal) * 100
+	}
+
+	return benchmarkResult{
+		BCHits:  bcHits,
+		BCTotal: bcTotal,
+		BCRate:  bcRate,
+		AHits:   tierScores["A"].hits,
+		ATotal:  tierScores["A"].total,
+		Queries: queries,
+	}
+}
+
+// TestAutomatedGrading runs all 15 benchmark queries against the indexed real repo
+// and scores results against the human-provided answer key.
+func TestAutomatedGrading(t *testing.T) {
+	env := getSharedEnv(t)
+
+	// Parse the answer key
+	answerKey := parseAnswerKey(t)
+
+	limits := map[string]int{"A": 20, "B": 40, "C": 40}
+
+	// Run the benchmark using the shared search engine
+	result := runBenchmarkWith(env.searchEng, answerKey, limits)
+
+	// Detailed per-query logging (preserved from original test)
+	for _, id := range orderedQueryIDs {
 		query, ok := benchmarkQueries[id]
 		if !ok {
 			t.Errorf("missing query for ID %s", id)
@@ -429,7 +529,7 @@ func TestAutomatedGrading(t *testing.T) {
 		}
 
 		tier := queryTier(id)
-		limit := queryLimit(tier)
+		limit := limits[tier]
 
 		results, err := env.searchEng.Search(query, limit, nil)
 		if err != nil {
@@ -461,9 +561,6 @@ func TestAutomatedGrading(t *testing.T) {
 		}
 
 		total := len(expected)
-		ts := tierScores[tier]
-		ts.hits += hits
-		ts.total += total
 
 		// Log per-query details
 		t.Logf("[%s] %q — %d/%d hits (%d results returned)", id, query, hits, total, len(results))
@@ -488,27 +585,18 @@ func TestAutomatedGrading(t *testing.T) {
 
 	// Aggregate scoring
 	t.Logf("\n=== TIER SUMMARY ===")
-	for _, tier := range []string{"A", "B", "C"} {
-		ts := tierScores[tier]
-		pct := float64(0)
-		if ts.total > 0 {
-			pct = float64(ts.hits) / float64(ts.total) * 100
-		}
-		t.Logf("Tier %s: %d/%d hits (%.1f%%)", tier, ts.hits, ts.total, pct)
+	aTotal := result.ATotal
+	aHits := result.AHits
+	aPct := float64(0)
+	if aTotal > 0 {
+		aPct = float64(aHits) / float64(aTotal) * 100
 	}
-
-	// B+C combined score (primary metric)
-	bcHits := tierScores["B"].hits + tierScores["C"].hits
-	bcTotal := tierScores["B"].total + tierScores["C"].total
-	bcPct := float64(0)
-	if bcTotal > 0 {
-		bcPct = float64(bcHits) / float64(bcTotal) * 100
-	}
-	t.Logf("B+C combined: %d/%d hits (%.1f%%)", bcHits, bcTotal, bcPct)
+	t.Logf("Tier A: %d/%d hits (%.1f%%)", aHits, aTotal, aPct)
+	t.Logf("Tier B+C: %d/%d hits (%.1f%%)", result.BCHits, result.BCTotal, result.BCRate)
 
 	// Overall score
-	allHits := tierScores["A"].hits + bcHits
-	allTotal := tierScores["A"].total + bcTotal
+	allHits := aHits + result.BCHits
+	allTotal := aTotal + result.BCTotal
 	allPct := float64(0)
 	if allTotal > 0 {
 		allPct = float64(allHits) / float64(allTotal) * 100
@@ -518,7 +606,7 @@ func TestAutomatedGrading(t *testing.T) {
 	// Regression guard: fail if B+C hit rate drops below threshold.
 	// Starting at 5% — raise this threshold as search quality improves.
 	const bcThreshold = 5.0
-	if bcPct < bcThreshold {
-		t.Errorf("REGRESSION: B+C hit rate %.1f%% is below threshold %.1f%%", bcPct, bcThreshold)
+	if result.BCRate < bcThreshold {
+		t.Errorf("REGRESSION: B+C hit rate %.1f%% is below threshold %.1f%%", result.BCRate, bcThreshold)
 	}
 }
