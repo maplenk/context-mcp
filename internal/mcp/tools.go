@@ -31,6 +31,34 @@ type ToolDeps struct {
 	Graph    *graph.GraphEngine
 	Search   *search.HybridSearch
 	RepoRoot string
+	Profile  string
+}
+
+// isToolInProfile returns true if a tool should be registered for the MCP SDK
+// based on the given profile. CLI tools are always registered regardless.
+func isToolInProfile(toolName, profile string) bool {
+	coreTools := map[string]bool{
+		"context":         true,
+		"read_symbol":     true,
+		"understand":      true,
+		"impact":          true,
+		"detect_changes":  true,
+		"trace_call_path": true,
+	}
+	extendedTools := map[string]bool{
+		"get_architecture_summary": true,
+		"get_key_symbols":          true,
+		"explore":                  true,
+		"search_code":              true,
+	}
+	switch profile {
+	case "full":
+		return true
+	case "extended":
+		return coreTools[toolName] || extendedTools[toolName]
+	default: // "core"
+		return coreTools[toolName]
+	}
 }
 
 // ContextParams are the parameters for the context tool.
@@ -113,9 +141,9 @@ type UnderstandParams struct {
 // IndexFunc is the callback for triggering a re-index
 type IndexFunc func(path string) error
 
-// RegisterTools registers all 13 tools for both CLI mode and MCP SDK mode.
-// CLI tools: all 13 available via GetHandler/GetTools.
-// SDK tools (MCP protocol): all 13 registered via RegisterSDKTool.
+// RegisterTools registers all 13 tools for CLI mode and profile-gated tools for MCP SDK mode.
+// CLI tools: all 13 available via GetHandler/GetTools (always).
+// SDK tools (MCP protocol): gated by deps.Profile — "core" (6), "extended" (10), or "full" (13).
 func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerContextTool(s, deps)
 	registerImpactTool(s, deps)
@@ -338,15 +366,17 @@ func registerContextTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler (typed struct)
-	if err := s.RegisterSDKTool("context", desc, func(p ContextParams) (*mcp_golang.ToolResponse, error) {
-		result, err := contextHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler (typed struct) — gated by profile
+	if isToolInProfile("context", deps.Profile) {
+		if err := s.RegisterSDKTool("context", desc, func(p ContextParams) (*mcp_golang.ToolResponse, error) {
+			result, err := contextHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'context': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'context': %v", err)
 	}
 }
 
@@ -475,15 +505,17 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("impact", desc, func(p ImpactParams) (*mcp_golang.ToolResponse, error) {
-		result, err := impactHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("impact", deps.Profile) {
+		if err := s.RegisterSDKTool("impact", desc, func(p ImpactParams) (*mcp_golang.ToolResponse, error) {
+			result, err := impactHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'impact': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'impact': %v", err)
 	}
 }
 
@@ -608,15 +640,17 @@ func registerReadSymbolTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("read_symbol", desc, func(p ReadSymbolParams) (*mcp_golang.ToolResponse, error) {
-		result, err := readSymbolHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("read_symbol", deps.Profile) {
+		if err := s.RegisterSDKTool("read_symbol", desc, func(p ReadSymbolParams) (*mcp_golang.ToolResponse, error) {
+			result, err := readSymbolHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'read_symbol': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'read_symbol': %v", err)
 	}
 }
 
@@ -631,7 +665,7 @@ func queryHandler(deps ToolDeps, p QueryParams) (interface{}, error) {
 }
 
 func registerQueryTool(s *Server, deps ToolDeps) {
-	desc := "Executes a read-only SQL query against the structural database."
+	desc := "Execute a read-only SQL query against the code graph database. Advanced: for custom analysis not covered by other tools."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -657,15 +691,17 @@ func registerQueryTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("query", desc, func(p QueryParams) (*mcp_golang.ToolResponse, error) {
-		result, err := queryHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("query", deps.Profile) {
+		if err := s.RegisterSDKTool("query", desc, func(p QueryParams) (*mcp_golang.ToolResponse, error) {
+			result, err := queryHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'query': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'query': %v", err)
 	}
 }
 
@@ -686,7 +722,7 @@ func healthHandler(deps ToolDeps) (interface{}, error) {
 }
 
 func registerHealthTool(s *Server, deps ToolDeps) {
-	desc := "Returns daemon health status and metrics."
+	desc := "System health: node count, edge count, index status, version."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -702,15 +738,17 @@ func registerHealthTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("health", desc, func(p HealthParams) (*mcp_golang.ToolResponse, error) {
-		result, err := healthHandler(deps)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("health", deps.Profile) {
+		if err := s.RegisterSDKTool("health", desc, func(p HealthParams) (*mcp_golang.ToolResponse, error) {
+			result, err := healthHandler(deps)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'health': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'health': %v", err)
 	}
 }
 
@@ -758,7 +796,7 @@ func indexHandler(indexFn IndexFunc, p IndexParams, repoRoot string) (interface{
 }
 
 func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
-	desc := "Triggers a full re-index of the repository."
+	desc := "Trigger re-indexing of the codebase or a specific file path. Use after bulk file changes."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -783,15 +821,17 @@ func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("index", desc, func(p IndexParams) (*mcp_golang.ToolResponse, error) {
-		result, err := indexHandler(indexFn, p, deps.RepoRoot)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("index", deps.Profile) {
+		if err := s.RegisterSDKTool("index", desc, func(p IndexParams) (*mcp_golang.ToolResponse, error) {
+			result, err := indexHandler(indexFn, p, deps.RepoRoot)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'index': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'index': %v", err)
 	}
 }
 
@@ -896,15 +936,17 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("trace_call_path", desc, func(p TraceCallPathParams) (*mcp_golang.ToolResponse, error) {
-		result, err := traceCallPathHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("trace_call_path", deps.Profile) {
+		if err := s.RegisterSDKTool("trace_call_path", desc, func(p TraceCallPathParams) (*mcp_golang.ToolResponse, error) {
+			result, err := traceCallPathHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'trace_call_path': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'trace_call_path': %v", err)
 	}
 }
 
@@ -1014,15 +1056,17 @@ func registerGetKeySymbolsTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("get_key_symbols", desc, func(p GetKeySymbolsParams) (*mcp_golang.ToolResponse, error) {
-		result, err := getKeySymbolsHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("get_key_symbols", deps.Profile) {
+		if err := s.RegisterSDKTool("get_key_symbols", desc, func(p GetKeySymbolsParams) (*mcp_golang.ToolResponse, error) {
+			result, err := getKeySymbolsHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'get_key_symbols': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'get_key_symbols': %v", err)
 	}
 }
 
@@ -1163,7 +1207,7 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 }
 
 func registerSearchCodeTool(s *Server, deps ToolDeps) {
-	desc := "Searches for a regex pattern across indexed source files. Only files that have been indexed (with supported extensions) are searched. Returns matching lines with file paths and line numbers."
+	desc := "Literal regex search across source files. Fallback for exact text/pattern matching when context does not find what you need."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -1198,15 +1242,17 @@ func registerSearchCodeTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("search_code", desc, func(p SearchCodeParams) (*mcp_golang.ToolResponse, error) {
-		result, err := searchCodeHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("search_code", deps.Profile) {
+		if err := s.RegisterSDKTool("search_code", desc, func(p SearchCodeParams) (*mcp_golang.ToolResponse, error) {
+			result, err := searchCodeHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'search_code': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'search_code': %v", err)
 	}
 }
 
@@ -1377,15 +1423,17 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("detect_changes", desc, func(p DetectChangesParams) (*mcp_golang.ToolResponse, error) {
-		result, err := detectChangesHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("detect_changes", deps.Profile) {
+		if err := s.RegisterSDKTool("detect_changes", desc, func(p DetectChangesParams) (*mcp_golang.ToolResponse, error) {
+			result, err := detectChangesHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'detect_changes': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'detect_changes': %v", err)
 	}
 }
 
@@ -1567,15 +1615,17 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("get_architecture_summary", desc, func(p ArchitectureSummaryParams) (*mcp_golang.ToolResponse, error) {
-		result, err := architectureSummaryHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("get_architecture_summary", deps.Profile) {
+		if err := s.RegisterSDKTool("get_architecture_summary", desc, func(p ArchitectureSummaryParams) (*mcp_golang.ToolResponse, error) {
+			result, err := architectureSummaryHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'get_architecture_summary': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'get_architecture_summary': %v", err)
 	}
 }
 
@@ -1757,15 +1807,17 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("explore", desc, func(p ExploreParams) (*mcp_golang.ToolResponse, error) {
-		result, err := exploreHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("explore", deps.Profile) {
+		if err := s.RegisterSDKTool("explore", desc, func(p ExploreParams) (*mcp_golang.ToolResponse, error) {
+			result, err := exploreHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'explore': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'explore': %v", err)
 	}
 }
 
@@ -1950,15 +2002,17 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 		},
 	}, cliHandler)
 
-	// SDK handler
-	if err := s.RegisterSDKTool("understand", desc, func(p UnderstandParams) (*mcp_golang.ToolResponse, error) {
-		result, err := understandHandler(deps, p)
-		if err != nil {
-			return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+	// SDK handler — gated by profile
+	if isToolInProfile("understand", deps.Profile) {
+		if err := s.RegisterSDKTool("understand", desc, func(p UnderstandParams) (*mcp_golang.ToolResponse, error) {
+			result, err := understandHandler(deps, p)
+			if err != nil {
+				return mcp_golang.NewToolResponse(mcp_golang.NewTextContent("Error: "+err.Error())), nil
+			}
+			return toToolResponse(result)
+		}); err != nil {
+			log.Printf("Warning: failed to register SDK tool 'understand': %v", err)
 		}
-		return toToolResponse(result)
-	}); err != nil {
-		log.Printf("Warning: failed to register SDK tool 'understand': %v", err)
 	}
 }
 

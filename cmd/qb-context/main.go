@@ -195,6 +195,7 @@ func main() {
 		Graph:    graphEngine,
 		Search:   hybridSearch,
 		RepoRoot: cfg.RepoRoot,
+		Profile:  cfg.Profile,
 	}, indexFn)
 	log.Printf("MCP server ready on stdio")
 
