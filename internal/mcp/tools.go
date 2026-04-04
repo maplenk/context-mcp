@@ -658,9 +658,10 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 	if symbolRef == "" {
 		symbolRef = node.SymbolName
 	}
+	symbolRefJSON, _ := json.Marshal(symbolRef)
 	response["next_tools"] = []map[string]string{
-		{"tool": "understand", "args_hint": `{"symbol": "` + symbolRef + `"}`},
-		{"tool": "impact", "args_hint": `{"symbol_id": "` + symbolRef + `"}`},
+		{"tool": "understand", "args_hint": `{"symbol": ` + string(symbolRefJSON) + `}`},
+		{"tool": "impact", "args_hint": `{"symbol_id": ` + string(symbolRefJSON) + `}`},
 	}
 
 	return response, nil
@@ -2251,9 +2252,10 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 	if symbolRef == "" {
 		symbolRef = found.Name
 	}
+	symbolRefJSON, _ := json.Marshal(symbolRef)
 	result["next_tools"] = []map[string]string{
-		{"tool": "impact", "args_hint": `{"symbol_id": "` + symbolRef + `"}`},
-		{"tool": "trace_call_path", "args_hint": `{"from": "` + symbolRef + `"}`},
+		{"tool": "impact", "args_hint": `{"symbol_id": ` + string(symbolRefJSON) + `}`},
+		{"tool": "trace_call_path", "args_hint": `{"from": ` + string(symbolRefJSON) + `}`},
 	}
 
 	return result, nil

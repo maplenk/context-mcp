@@ -1350,3 +1350,44 @@ func TestStore_GetNodesByFile(t *testing.T) {
 		t.Errorf("expected 2 nodes for 'a.go', got %d", len(results))
 	}
 }
+
+func TestIsToolInProfile(t *testing.T) {
+	// Core tools should be in all profiles
+	for _, tool := range []string{"context", "read_symbol", "understand", "impact", "detect_changes", "trace_call_path"} {
+		if !isToolInProfile(tool, "core") {
+			t.Errorf("%s should be in core profile", tool)
+		}
+		if !isToolInProfile(tool, "extended") {
+			t.Errorf("%s should be in extended profile", tool)
+		}
+		if !isToolInProfile(tool, "full") {
+			t.Errorf("%s should be in full profile", tool)
+		}
+	}
+
+	// Extended tools should be in extended and full, not core
+	for _, tool := range []string{"get_architecture_summary", "get_key_symbols", "explore", "search_code"} {
+		if isToolInProfile(tool, "core") {
+			t.Errorf("%s should NOT be in core profile", tool)
+		}
+		if !isToolInProfile(tool, "extended") {
+			t.Errorf("%s should be in extended profile", tool)
+		}
+		if !isToolInProfile(tool, "full") {
+			t.Errorf("%s should be in full profile", tool)
+		}
+	}
+
+	// Full-only tools should only be in full
+	for _, tool := range []string{"query", "index", "health"} {
+		if isToolInProfile(tool, "core") {
+			t.Errorf("%s should NOT be in core profile", tool)
+		}
+		if isToolInProfile(tool, "extended") {
+			t.Errorf("%s should NOT be in extended profile", tool)
+		}
+		if !isToolInProfile(tool, "full") {
+			t.Errorf("%s should be in full profile", tool)
+		}
+	}
+}
