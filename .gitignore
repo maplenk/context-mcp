@@ -1,2 +1,42 @@
-.claude/worktrees/
-.githooks/*.log
+# Binaries
+qb-context
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+*.prof
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project index database
+.qb-context/
+
+# Agent tool configs and worktrees
+.claude/
+.claire/
+.codex/
+
+# Logs
+*.log
+
+# ONNX model files (large binaries)
+*.onnx
+
+# Word documents
+*.docx
