@@ -26,16 +26,11 @@ import (
 // rank-based and discards score magnitude; weighted composition preserves relative
 // signal strength and enables per-signal tuning that RRF cannot express.
 
-// Composite scoring weights
-const (
-	weightPPR         = 0.35
-	weightBM25        = 0.25
-	weightBetweenness = 0.15
-	weightInDegree    = 0.10
-	weightSemantic    = 0.15
+// defaultConfig is a package-level default used by backward-compatible free functions.
+var defaultConfig = DefaultConfig()
 
-	defaultMaxPerFile = 3 // default max results per unique file_path
-)
+// defaultMaxPerFile is a backward-compatible package-level variable for tests.
+var defaultMaxPerFile = defaultConfig.MaxPerFile
 
 // stopWords are common English words filtered from search queries.
 // Override via SetStopWords() to customize for other languages or domains.
@@ -139,14 +134,21 @@ type HybridSearch struct {
 	store    *storage.Store
 	embedder embedding.Embedder
 	graph    *graph.GraphEngine
+	config   SearchConfig
 }
 
-// New creates a new HybridSearch engine
+// New creates a new HybridSearch engine with default configuration.
 func New(store *storage.Store, embedder embedding.Embedder, graph *graph.GraphEngine) *HybridSearch {
+	return NewWithConfig(store, embedder, graph, DefaultConfig())
+}
+
+// NewWithConfig creates a new HybridSearch engine with a custom configuration.
+func NewWithConfig(store *storage.Store, embedder embedding.Embedder, graph *graph.GraphEngine, config SearchConfig) *HybridSearch {
 	return &HybridSearch{
 		store:    store,
 		embedder: embedder,
 		graph:    graph,
+		config:   config,
 	}
 }
 
@@ -162,14 +164,14 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		limit = 10
 	}
 
-	perFileCap := defaultMaxPerFile
+	perFileCap := h.config.MaxPerFile
 	if len(maxPerFile) > 0 && maxPerFile[0] > 0 {
 		perFileCap = maxPerFile[0]
 	}
 
-	candidateLimit := limit * 5
-	if candidateLimit < 100 {
-		candidateLimit = 100
+	candidateLimit := limit * h.config.CandidateMultiplier
+	if candidateLimit < h.config.CandidateMinimum {
+		candidateLimit = h.config.CandidateMinimum
 	}
 
 	// M5: Track signal source failures to return an error when ALL sources fail
@@ -237,8 +239,8 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// composite scoring.
 	for _, r := range lexicalResults {
 		if r.Score > 0 {
-			if norm, ok := bm25Scores[r.Node.ID]; ok && norm < 0.05 {
-				bm25Scores[r.Node.ID] = 0.05
+			if norm, ok := bm25Scores[r.Node.ID]; ok && norm < h.config.BM25ScoreFloor {
+				bm25Scores[r.Node.ID] = h.config.BM25ScoreFloor
 			}
 		}
 	}
@@ -311,17 +313,17 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		betweenness := safeGet(betweennessScores, nodeID)
 		inDegree := safeGet(inDegreeScores, nodeID)
 
-		composite := weightPPR*ppr +
-			weightBM25*bm25 +
-			weightBetweenness*betweenness +
-			weightInDegree*inDegree +
-			weightSemantic*semantic
+		composite := h.config.WeightPPR*ppr +
+			h.config.WeightBM25*bm25 +
+			h.config.WeightBetweenness*betweenness +
+			h.config.WeightInDegree*inDegree +
+			h.config.WeightSemantic*semantic
 
 		// Apply path-based penalty: migrations, tests, vendor, etc. score lower
-		composite *= pathPenalty(node.FilePath)
+		composite *= h.pathPenalty(node.FilePath)
 
 		// Apply node-type boost based on detected query intent
-		composite *= nodeTypeBoost(kind, node.NodeType)
+		composite *= h.nodeTypeBoost(kind, node.NodeType)
 
 		results = append(results, types.SearchResult{
 			Node:  node,
@@ -349,7 +351,7 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	})
 
 	// Apply per-file cap
-	results = applyPerFileCap(results, perFileCap)
+	results = h.applyPerFileCap(results, perFileCap)
 
 	// Trim to limit
 	if len(results) > limit {
@@ -463,29 +465,36 @@ func isAllUpper(s string) bool {
 }
 
 // nodeTypeBoost returns a scoring multiplier based on the query kind and node type.
-// Route queries boost route nodes (2.5x) and methods (1.3x); class queries boost
-// class/interface nodes (1.5x); function queries boost function nodes (1.2x).
-func nodeTypeBoost(kind queryKind, nodeType types.NodeType) float64 {
+// Route queries boost route nodes and methods; class queries boost class/interface
+// nodes; function queries boost function nodes. Uses h.config for boost values.
+func (h *HybridSearch) nodeTypeBoost(kind queryKind, nodeType types.NodeType) float64 {
 	switch kind {
 	case queryKindRoute:
 		switch nodeType {
 		case types.NodeTypeRoute:
-			return 2.5
+			return h.config.RouteBoost
 		case types.NodeTypeMethod:
-			return 1.3
+			return h.config.RouteMethodBoost
 		}
 	case queryKindClass:
 		switch nodeType {
 		case types.NodeTypeClass, types.NodeTypeInterface:
-			return 1.5
+			return h.config.ClassBoost
 		}
 	case queryKindFunction:
 		switch nodeType {
 		case types.NodeTypeFunction:
-			return 1.2
+			return h.config.FunctionBoost
 		}
 	}
 	return 1.0
+}
+
+// nodeTypeBoostDefault is a backward-compatible free function that uses DefaultConfig.
+// Kept for tests that call nodeTypeBoost() as a package-level function.
+func nodeTypeBoost(kind queryKind, nodeType types.NodeType) float64 {
+	hs := &HybridSearch{config: defaultConfig}
+	return hs.nodeTypeBoost(kind, nodeType)
 }
 
 // buildFTSQuery enhances a query for FTS5 with CamelCase splitting, prefix matching, and stop word filtering
@@ -689,15 +698,15 @@ func safeGet(m map[string]float64, key string) float64 {
 }
 
 // applyPerFileCap limits results to maxPerFile entries per unique file_path.
-// Files with pathPenalty <= 0.3 (generated, vendor, IDE helpers, tests, migrations) are capped at 1
-// to prevent large auto-generated files from dominating results.
-func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
+// Files with pathPenalty <= PenaltyTest (generated, vendor, IDE helpers, tests, migrations)
+// are capped at 1 to prevent large auto-generated files from dominating results.
+func (h *HybridSearch) applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
 	fileCounts := make(map[string]int)
 	var capped []types.SearchResult
 
 	for _, r := range results {
 		cap := maxPerFile
-		if pathPenalty(r.Node.FilePath) <= 0.3 {
+		if h.pathPenalty(r.Node.FilePath) <= h.config.PenaltyTest {
 			cap = 1 // generated/vendor/IDE helpers: 1 result max
 		}
 		count := fileCounts[r.Node.FilePath]
@@ -710,41 +719,49 @@ func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.Searc
 	return capped
 }
 
+// applyPerFileCap (free function) is a backward-compatible wrapper that uses DefaultConfig.
+// Kept for tests that call applyPerFileCap() as a package-level function.
+func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
+	hs := &HybridSearch{config: defaultConfig}
+	return hs.applyPerFileCap(results, maxPerFile)
+}
+
 // pathPenalty returns a scoring multiplier for a file path.
 // Core source files return 1.0; non-core paths return lower values
 // so they don't dominate results over the actual implementation files.
-func pathPenalty(filePath string) float64 {
+// Uses h.config for penalty values.
+func (h *HybridSearch) pathPenalty(filePath string) float64 {
 	lower := strings.ToLower(filePath)
 
 	// Auto-generated / IDE helpers — strongest penalty
 	if strings.Contains(lower, "_ide_helper") || strings.HasSuffix(lower, ".d.ts") {
-		return 0.3
+		return h.config.PenaltyGenerated
 	}
 	for _, part := range strings.Split(lower, "/") {
 		if part == "generated" || strings.HasPrefix(part, "generated.") ||
 			strings.HasPrefix(part, "generated_") {
-			return 0.3
+			return h.config.PenaltyGenerated
 		}
 	}
 
 	// Vendor / third-party dependencies
 	for _, part := range strings.Split(lower, "/") {
 		if part == "vendor" || part == "node_modules" || part == "lib" {
-			return 0.3
+			return h.config.PenaltyVendor
 		}
 	}
 
 	// Database migrations — schema changes, not business logic
 	for _, part := range strings.Split(lower, "/") {
 		if part == "migrations" || part == "migration" {
-			return 0.2
+			return h.config.PenaltyMigration
 		}
 	}
 
 	// Test files
 	for _, part := range strings.Split(lower, "/") {
 		if part == "tests" || part == "test" || part == "__tests__" || part == "spec" {
-			return 0.3
+			return h.config.PenaltyTest
 		}
 	}
 	// File-name patterns for tests
@@ -755,28 +772,35 @@ func pathPenalty(filePath string) float64 {
 	if strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.js") ||
 		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".spec.js") ||
 		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, "test.php") {
-		return 0.3
+		return h.config.PenaltyTest
 	}
 	// CamelCase test convention (e.g., OrderControllerTest.php, FooTest.java)
 	if strings.Contains(base, "test.") || strings.Contains(base, "Test.") {
-		return 0.3
+		return h.config.PenaltyTest
 	}
 
 	// Examples
 	for _, part := range strings.Split(lower, "/") {
 		if part == "examples" || part == "example" {
-			return 0.6
+			return h.config.PenaltyExample
 		}
 	}
 
 	// Config directories — useful but not primary business logic
 	for _, part := range strings.Split(lower, "/") {
 		if part == "config" {
-			return 0.8
+			return h.config.PenaltyConfig
 		}
 	}
 
 	return 1.0
+}
+
+// pathPenalty (free function) is a backward-compatible wrapper that uses DefaultConfig.
+// Kept for tests that call pathPenalty() as a package-level function.
+func pathPenalty(filePath string) float64 {
+	hs := &HybridSearch{config: defaultConfig}
+	return hs.pathPenalty(filePath)
 }
 
 // expandFromSeeds takes the initial scored results, expands 1 hop from the
@@ -795,7 +819,7 @@ func (h *HybridSearch) expandFromSeeds(
 		return results[i].Score > results[j].Score
 	})
 
-	seedCount := 5
+	seedCount := h.config.ExpansionSeedCount
 	if seedCount > len(results) {
 		seedCount = len(results)
 	}
@@ -828,7 +852,7 @@ func (h *HybridSearch) expandFromSeeds(
 	terms := strings.Fields(strings.ToLower(queryTerms))
 
 	// Cap expansion to prevent result bloat
-	maxExpansion := 20
+	maxExpansion := h.config.ExpansionMaxNeighbors
 	neighborIDs := make([]string, 0, len(neighborSeedCount))
 	for id := range neighborSeedCount {
 		neighborIDs = append(neighborIDs, id)
@@ -838,7 +862,7 @@ func (h *HybridSearch) expandFromSeeds(
 	}
 
 	// Fetch neighbor nodes from store — limit additions to avoid flooding results
-	maxAdded := limit / 4
+	maxAdded := limit / h.config.ExpansionMaxAddedDivisor
 	if maxAdded < 3 {
 		maxAdded = 3
 	}
@@ -881,11 +905,11 @@ func (h *HybridSearch) expandFromSeeds(
 		betweenness := safeGet(betweennessScores, nID)
 		inDegree := safeGet(inDegreeScores, nID)
 
-		composite := weightPPR*ppr +
-			weightBM25*bm25 +
-			weightBetweenness*betweenness +
-			weightInDegree*inDegree +
-			weightSemantic*semantic
+		composite := h.config.WeightPPR*ppr +
+			h.config.WeightBM25*bm25 +
+			h.config.WeightBetweenness*betweenness +
+			h.config.WeightInDegree*inDegree +
+			h.config.WeightSemantic*semantic
 
 		// Graph-expanded nodes get a connectivity bonus: they were reachable
 		// from high-scoring seeds, which means they're structurally relevant
@@ -910,11 +934,11 @@ func (h *HybridSearch) expandFromSeeds(
 			}
 			// Give neighbor a modest fraction of the seed's score —
 			// low enough to not displace direct lexical/semantic hits
-			composite = bestSeedScore * 0.10
+			composite = bestSeedScore * h.config.ExpansionBonus
 		}
 
 		// Apply path-based penalty to expanded nodes
-		composite *= pathPenalty(node.FilePath)
+		composite *= h.pathPenalty(node.FilePath)
 
 		if composite > 0 {
 			added++
