@@ -55,9 +55,16 @@ var stopWords = map[string]bool{
 	"who": true, "whom": true, "why": true,
 	// Domain stop words: query-structure noise that doesn't help code search
 	"entire": true, "whole": true,
+	// Natural-language noise words that don't help code search
+	// (management, complete, lifecycle removed per review — too aggressive)
+	"flow": true, "happens": true, "places": true,
+	"every": true, "there": true, "also": true,
+	"each": true, "them": true, "they": true, "up": true, "than": true,
+	"handling": true,
 	// Targeted code method-name stop words: these specific terms generate
 	// excessive noise when used as standalone query terms (e.g. "handle" matches
-	// every middleware .handle() method, "end" matches every .end() call).
+	// every middleware .handle() method, "end" matches every .end() call,
+	// "handling" with Porter stemming becomes "handl" matching middleware noise).
 	// Preserved inside CamelCase identifiers by the isCamelCase guard in buildFTSQuery.
 	"handle": true, "end": true,
 }
@@ -93,13 +100,17 @@ func GetStopWords() []string {
 // with OR, broadening lexical search to cover vocabulary gaps.
 var queryAliases = map[string][]string{
 	"omnichannel": {"easyecom", "unicommerce", "onlineorder"},
-	"auth":        {"oauth", "login", "token", "session", "authenticate"},
+	"auth":        {"oauth", "login", "token", "session", "authenticate", "middleware"},
 	"webhook":     {"callback", "hook", "dispatchwebhook"},
 	"payment":     {"razorpay", "billing", "invoice"},
 	"inventory":   {"stock", "stocktransaction", "stockledger", "warehouse"},
 	"schema":      {"migration", "updateschema"},
 	"logging":     {"sentry", "log", "errortracker"},
 	"error":       {"exception", "handler", "sentry"},
+	"loyalty":     {"loyaltypoint", "mobiquest", "easyrewardz"},
+	"session":     {"sessionhandler", "cookie"},
+	"sync":        {"listener", "event", "dispatch"},
+	"database":    {"migration", "schema", "table"},
 }
 
 // camelCaseRe splits CamelCase identifiers into words.
@@ -220,6 +231,18 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// Normalize BM25 scores to [0,1]
 	bm25Scores := normalizeScores(lexicalResults)
 
+	// BM25 score floor: prevent low-frequency node types from collapsing to 0
+	// after min-max normalization. If a node had a positive raw BM25 score but
+	// normalized to < 0.05, give it a minimum floor so it participates in
+	// composite scoring.
+	for _, r := range lexicalResults {
+		if r.Score > 0 {
+			if norm, ok := bm25Scores[r.Node.ID]; ok && norm < 0.05 {
+				bm25Scores[r.Node.ID] = 0.05
+			}
+		}
+	}
+
 	// Normalize semantic scores to [0,1]
 	semanticScores := normalizeScores(semanticResults)
 
@@ -276,6 +299,9 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// Load betweenness scores (already [0,1] from index time)
 	betweennessScores, _ := h.store.GetAllBetweenness()
 
+	// Detect query kind once for node-type boosting (uses original query, not cleanedQuery)
+	kind := detectQueryKind(query)
+
 	// Compute composite scores
 	var results []types.SearchResult
 	for nodeID, node := range candidates {
@@ -293,6 +319,9 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 
 		// Apply path-based penalty: migrations, tests, vendor, etc. score lower
 		composite *= pathPenalty(node.FilePath)
+
+		// Apply node-type boost based on detected query intent
+		composite *= nodeTypeBoost(kind, node.NodeType)
 
 		results = append(results, types.SearchResult{
 			Node:  node,
@@ -365,6 +394,99 @@ func cleanQuery(query string) string {
 	return strings.Join(parts, " ")
 }
 
+// queryKind classifies user intent to enable node-type boosting.
+// Credit: query kind detection heuristic adapted from code-review-graph
+// (github.com/tirth8205/code-review-graph).
+type queryKind int
+
+const (
+	queryKindNatural  queryKind = iota
+	queryKindRoute
+	queryKindClass
+	queryKindFunction
+)
+
+// detectQueryKind analyzes a search query to determine intent (route, class,
+// function, or natural language). Uses the ORIGINAL query (not cleanedQuery)
+// so route terms like "api" and "endpoint" are preserved.
+func detectQueryKind(query string) queryKind {
+	lower := strings.ToLower(query)
+	words := strings.Fields(lower)
+
+	// Route intent: HTTP verbs, path patterns, OR route-related terms
+	routeTerms := map[string]bool{"api": true, "endpoint": true, "endpoints": true, "route": true, "routes": true, "url": true, "login": true}
+	if strings.Contains(lower, "/v") || strings.Contains(lower, "post ") || strings.Contains(lower, "get ") || strings.Contains(lower, "put ") || strings.Contains(lower, "delete ") || strings.Contains(lower, "patch ") {
+		return queryKindRoute
+	}
+	for _, w := range words {
+		if routeTerms[w] {
+			return queryKindRoute
+		}
+	}
+
+	// Class intent: any word is PascalCase (starts uppercase, has lowercase)
+	for _, w := range strings.Fields(query) { // use original case
+		if len(w) >= 2 && unicode.IsUpper(rune(w[0])) && containsLower(w) && !isAllUpper(w) {
+			return queryKindClass
+		}
+	}
+
+	// Function intent: any word has underscore (snake_case)
+	for _, w := range words {
+		if strings.Contains(w, "_") {
+			return queryKindFunction
+		}
+	}
+
+	return queryKindNatural
+}
+
+// containsLower returns true if s contains at least one lowercase letter.
+func containsLower(s string) bool {
+	for _, r := range s {
+		if unicode.IsLower(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAllUpper returns true if every letter in s is uppercase.
+func isAllUpper(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) && !unicode.IsUpper(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// nodeTypeBoost returns a scoring multiplier based on the query kind and node type.
+// Route queries boost route nodes (2.5x) and methods (1.3x); class queries boost
+// class/interface nodes (1.5x); function queries boost function nodes (1.2x).
+func nodeTypeBoost(kind queryKind, nodeType types.NodeType) float64 {
+	switch kind {
+	case queryKindRoute:
+		switch nodeType {
+		case types.NodeTypeRoute:
+			return 2.5
+		case types.NodeTypeMethod:
+			return 1.3
+		}
+	case queryKindClass:
+		switch nodeType {
+		case types.NodeTypeClass, types.NodeTypeInterface:
+			return 1.5
+		}
+	case queryKindFunction:
+		switch nodeType {
+		case types.NodeTypeFunction:
+			return 1.2
+		}
+	}
+	return 1.0
+}
+
 // buildFTSQuery enhances a query for FTS5 with CamelCase splitting, prefix matching, and stop word filtering
 func buildFTSQuery(query string) string {
 	// Sanitize FTS5 special characters to prevent query injection
@@ -407,13 +529,17 @@ func buildFTSQuery(query string) string {
 		return query // fallback to original if everything was filtered
 	}
 
-	// Apply query alias expansion — broaden vocabulary coverage
+	// Apply query alias expansion — prefix-based matching broadens vocabulary coverage.
+	// For each query term, if any alias key (min 3 chars) is a prefix of the term,
+	// the alias values are appended. E.g. "authentication" has prefix "auth" → expands.
 	var withAliases []string
 	for _, term := range expanded {
 		withAliases = append(withAliases, term)
 		lower := strings.ToLower(term)
-		if aliases, ok := queryAliases[lower]; ok {
-			withAliases = append(withAliases, aliases...)
+		for aliasKey, aliases := range queryAliases {
+			if len(aliasKey) >= 3 && strings.HasPrefix(lower, aliasKey) {
+				withAliases = append(withAliases, aliases...)
+			}
 		}
 	}
 	expanded = withAliases
@@ -562,7 +688,7 @@ func safeGet(m map[string]float64, key string) float64 {
 }
 
 // applyPerFileCap limits results to maxPerFile entries per unique file_path.
-// Files with pathPenalty <= 0.3 (generated, vendor, IDE helpers) are capped at 1
+// Files with pathPenalty <= 0.3 (generated, vendor, IDE helpers, tests, migrations) are capped at 1
 // to prevent large auto-generated files from dominating results.
 func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
 	fileCounts := make(map[string]int)
@@ -610,14 +736,14 @@ func pathPenalty(filePath string) float64 {
 	// Database migrations — schema changes, not business logic
 	for _, part := range strings.Split(lower, "/") {
 		if part == "migrations" || part == "migration" {
-			return 0.4
+			return 0.2
 		}
 	}
 
 	// Test files
 	for _, part := range strings.Split(lower, "/") {
 		if part == "tests" || part == "test" || part == "__tests__" || part == "spec" {
-			return 0.5
+			return 0.3
 		}
 	}
 	// File-name patterns for tests
@@ -628,17 +754,24 @@ func pathPenalty(filePath string) float64 {
 	if strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.js") ||
 		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".spec.js") ||
 		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, "test.php") {
-		return 0.5
+		return 0.3
 	}
 	// CamelCase test convention (e.g., OrderControllerTest.php, FooTest.java)
 	if strings.Contains(base, "test.") || strings.Contains(base, "Test.") {
-		return 0.5
+		return 0.3
 	}
 
 	// Examples
 	for _, part := range strings.Split(lower, "/") {
 		if part == "examples" || part == "example" {
 			return 0.6
+		}
+	}
+
+	// Config directories — useful but not primary business logic
+	for _, part := range strings.Split(lower, "/") {
+		if part == "config" {
+			return 0.8
 		}
 	}
 

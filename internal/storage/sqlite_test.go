@@ -1258,3 +1258,63 @@ func TestEscapeLIKE(t *testing.T) {
 		}
 	}
 }
+
+// ---- BuildSearchTerms ----
+
+func TestBuildSearchTerms(t *testing.T) {
+	tests := []struct {
+		name       string
+		symbolName string
+		filePath   string
+		wantTokens []string // each must appear in the result
+	}{
+		{
+			name:       "CamelCase with file basename",
+			symbolName: "PaymentMappingService",
+			filePath:   "app/Services/PaymentMappingService.php",
+			wantTokens: []string{"payment", "mapping", "service"},
+		},
+		{
+			name:       "camelCase with different file",
+			symbolName: "stockTransaction",
+			filePath:   "app/Inventory.php",
+			wantTokens: []string{"stock", "transaction", "inventory"},
+		},
+		{
+			name:       "acronym handling",
+			symbolName: "HTTPClient",
+			filePath:   "internal/http/client.go",
+			wantTokens: []string{"http", "client"},
+		},
+		{
+			name:       "simple name with directory-based file",
+			symbolName: "main",
+			filePath:   "cmd/main.go",
+			wantTokens: []string{"main"},
+		},
+		{
+			name:       "underscore-separated file",
+			symbolName: "Foo",
+			filePath:   "lib/my_helper_utils.rb",
+			wantTokens: []string{"foo", "my", "helper", "utils"},
+		},
+		{
+			name:       "empty inputs",
+			symbolName: "",
+			filePath:   "",
+			wantTokens: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildSearchTerms(tt.symbolName, tt.filePath)
+			for _, tok := range tt.wantTokens {
+				if !strings.Contains(" "+got+" ", " "+tok+" ") {
+					t.Errorf("BuildSearchTerms(%q, %q) = %q, missing token %q",
+						tt.symbolName, tt.filePath, got, tok)
+				}
+			}
+		})
+	}
+}

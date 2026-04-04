@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version.
 // Increment this when adding new migrations.
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // migrationSet maps schema versions to their SQL statements.
 // Version 1 is the initial schema.
@@ -154,6 +154,89 @@ var migrationSet = map[int][]string{
 	4: {
 		`CREATE INDEX IF NOT EXISTS idx_git_commits_author_time ON git_commits(author_time)`,
 	},
+
+	// Migration v5: Add search_terms column and file_path to FTS index.
+	// search_terms stores pre-split CamelCase tokens so inner words are searchable.
+	// file_path in FTS enables file-name matching via BM25.
+	// The Go-based backfill hook (postMigrationHooks[5]) populates the new columns.
+	5: {
+		`ALTER TABLE nodes ADD COLUMN search_terms TEXT NOT NULL DEFAULT ''`,
+		`DROP TABLE IF EXISTS nodes_fts`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+			symbol_name,
+			file_path,
+			content_sum,
+			search_terms,
+			node_id UNINDEXED,
+			tokenize='porter unicode61'
+		)`,
+	},
+}
+
+// postMigrationHooks maps schema versions to Go callbacks that run after the
+// version's SQL statements are committed. Use this when a migration needs Go
+// logic (e.g., calling BuildSearchTerms) that cannot be expressed in pure SQL.
+var postMigrationHooks = map[int]func(s *Store) error{
+	5: backfillSearchTerms,
+}
+
+// backfillSearchTerms populates the search_terms column for all existing nodes
+// and rebuilds the FTS index with the new 5-column schema.
+func backfillSearchTerms(s *Store) error {
+	rows, err := s.db.Query(`SELECT id, symbol_name, file_path, content_sum FROM nodes`)
+	if err != nil {
+		return fmt.Errorf("querying nodes for backfill: %w", err)
+	}
+	defer rows.Close()
+
+	type nodeRow struct {
+		id, symbolName, filePath, contentSum string
+	}
+	var nodes []nodeRow
+	for rows.Next() {
+		var n nodeRow
+		if err := rows.Scan(&n.id, &n.symbolName, &n.filePath, &n.contentSum); err != nil {
+			return fmt.Errorf("scanning node for backfill: %w", err)
+		}
+		nodes = append(nodes, n)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating nodes for backfill: %w", err)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning backfill transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	updateStmt, err := tx.Prepare(`UPDATE nodes SET search_terms = ? WHERE id = ?`)
+	if err != nil {
+		return fmt.Errorf("preparing search_terms update: %w", err)
+	}
+	defer updateStmt.Close()
+
+	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (symbol_name, file_path, content_sum, search_terms, node_id) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("preparing FTS insert: %w", err)
+	}
+	defer ftsStmt.Close()
+
+	for _, n := range nodes {
+		terms := BuildSearchTerms(n.symbolName, n.filePath)
+		if _, err := updateStmt.Exec(terms, n.id); err != nil {
+			return fmt.Errorf("updating search_terms for %s: %w", n.id, err)
+		}
+		if _, err := ftsStmt.Exec(n.symbolName, n.filePath, n.contentSum, terms, n.id); err != nil {
+			return fmt.Errorf("FTS insert for %s: %w", n.id, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing backfill: %w", err)
+	}
+	log.Printf("Backfilled search_terms for %d nodes", len(nodes))
+	return nil
 }
 
 // getSchemaVersion returns the current schema version from the database.
@@ -224,6 +307,13 @@ func (s *Store) runMigrations() error {
 		}
 
 		log.Printf("Applied schema migration version %d", v)
+
+		// Run post-migration Go hook if one exists for this version.
+		if hook, ok := postMigrationHooks[v]; ok {
+			if err := hook(s); err != nil {
+				return fmt.Errorf("post-migration hook for version %d: %w", v, err)
+			}
+		}
 	}
 
 	// Create the vec0 table for semantic search embeddings.

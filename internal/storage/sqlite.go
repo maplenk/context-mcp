@@ -18,6 +18,7 @@ import (
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/naman/qb-context/internal/gitmeta"
+	"github.com/naman/qb-context/internal/tokenutil"
 	"github.com/naman/qb-context/internal/types"
 )
 
@@ -105,6 +106,47 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
+// splitFileBasename splits a filename (without extension) on '.', '_', '-' separators.
+func splitFileBasename(name string) []string {
+	return strings.FieldsFunc(name, func(r rune) bool {
+		return r == '.' || r == '_' || r == '-'
+	})
+}
+
+// BuildSearchTerms produces a space-separated string of lowercase tokens derived from
+// the symbol name (CamelCase-split) and the file basename (split on . _ -).
+// This string is stored in the FTS index so that inner tokens of compound identifiers
+// like "PaymentMappingService" become individually searchable.
+func BuildSearchTerms(symbolName, filePath string) string {
+	// Split symbolName via CamelCase
+	parts := tokenutil.SplitCamelCase(symbolName)
+
+	// Split file basename (without extension) on . _ -
+	base := filepath.Base(filePath)
+	ext := filepath.Ext(base)
+	nameWithoutExt := strings.TrimSuffix(base, ext)
+	fileParts := splitFileBasename(nameWithoutExt)
+
+	// Collect all tokens lowercase, deduplicate preserving order
+	seen := make(map[string]bool)
+	var tokens []string
+	for _, p := range parts {
+		lower := strings.ToLower(p)
+		if lower != "" && !seen[lower] {
+			seen[lower] = true
+			tokens = append(tokens, lower)
+		}
+	}
+	for _, p := range fileParts {
+		lower := strings.ToLower(p)
+		if lower != "" && !seen[lower] {
+			seen[lower] = true
+			tokens = append(tokens, lower)
+		}
+	}
+	return strings.Join(tokens, " ")
+}
+
 // UpsertNode inserts or updates a node in the database.
 // Uses ON CONFLICT to avoid DELETE+INSERT which would cascade-delete edges.
 // Wrapped in a transaction to ensure node + FTS index stay in sync.
@@ -140,8 +182,8 @@ func (s *Store) UpsertNode(node types.ASTNode) error {
 		return fmt.Errorf("FTS delete: %w", err)
 	}
 	_, err = tx.Exec(
-		"INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
-		node.SymbolName, node.ContentSum, node.ID)
+		"INSERT INTO nodes_fts (symbol_name, file_path, content_sum, search_terms, node_id) VALUES (?, ?, ?, ?, ?)",
+		node.SymbolName, node.FilePath, node.ContentSum, BuildSearchTerms(node.SymbolName, node.FilePath), node.ID)
 	if err != nil {
 		return err
 	}
@@ -188,7 +230,7 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 	}
 	defer stmt.Close()
 
-	ftsStmt, err := tx.Prepare("INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)")
+	ftsStmt, err := tx.Prepare("INSERT INTO nodes_fts (symbol_name, file_path, content_sum, search_terms, node_id) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -203,7 +245,7 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 		if _, err := tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
 			return fmt.Errorf("FTS delete for %s: %w", node.ID, err)
 		}
-		if _, err := ftsStmt.Exec(node.SymbolName, node.ContentSum, node.ID); err != nil {
+		if _, err := ftsStmt.Exec(node.SymbolName, node.FilePath, node.ContentSum, BuildSearchTerms(node.SymbolName, node.FilePath), node.ID); err != nil {
 			return fmt.Errorf("FTS insert for %s: %w", node.ID, err)
 		}
 	}
@@ -367,8 +409,8 @@ func (s *Store) UpdateFTS(node types.ASTNode) error {
 	if _, err := tx.Exec("DELETE FROM nodes_fts WHERE node_id = ?", node.ID); err != nil {
 		return fmt.Errorf("FTS delete: %w", err)
 	}
-	if _, err := tx.Exec("INSERT INTO nodes_fts (symbol_name, content_sum, node_id) VALUES (?, ?, ?)",
-		node.SymbolName, node.ContentSum, node.ID); err != nil {
+	if _, err := tx.Exec("INSERT INTO nodes_fts (symbol_name, file_path, content_sum, search_terms, node_id) VALUES (?, ?, ?, ?, ?)",
+		node.SymbolName, node.FilePath, node.ContentSum, BuildSearchTerms(node.SymbolName, node.FilePath), node.ID); err != nil {
 		return fmt.Errorf("FTS insert: %w", err)
 	}
 	return tx.Commit()
@@ -554,7 +596,7 @@ func (s *Store) SearchLexical(query string, limit int) ([]types.SearchResult, er
 
 	rows, err := s.db.Query(`
 		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
-		       bm25(nodes_fts, 10.0, 1.0, 0.0) as score
+		       bm25(nodes_fts, 10.0, 1.0, 1.0, 5.0, 0.0) as score
 		FROM nodes_fts fts
 		JOIN nodes n ON n.id = fts.node_id
 		WHERE nodes_fts MATCH ?
@@ -591,7 +633,7 @@ func (s *Store) SearchLexicalRaw(query string, limit int) ([]types.SearchResult,
 
 	rows, err := s.db.Query(`
 		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
-		       bm25(nodes_fts, 10.0, 1.0, 0.0) as score
+		       bm25(nodes_fts, 10.0, 1.0, 1.0, 5.0, 0.0) as score
 		FROM nodes_fts fts
 		JOIN nodes n ON n.id = fts.node_id
 		WHERE nodes_fts MATCH ?

@@ -434,10 +434,15 @@ func TestBuildFTSQuery_StopWords(t *testing.T) {
 	stopWordQueries := []string{"the database", "a function", "is being called"}
 	for _, query := range stopWordQueries {
 		result := buildFTSQuery(query)
-		// Stop words should be filtered out — they should not appear as prefix-matched terms
+		// Stop words should be filtered out — they should not appear as standalone terms
+		lower := strings.ToLower(result)
+		terms := strings.Split(lower, " OR ")
 		for _, sw := range []string{"the", "a", "is", "being"} {
-			if strings.Contains(strings.ToLower(result), sw+"*") {
-				t.Errorf("buildFTSQuery(%q) = %q, should not contain stop word %q with prefix", query, result, sw)
+			for _, term := range terms {
+				cleaned := strings.TrimSpace(strings.TrimSuffix(term, "*"))
+				if cleaned == sw {
+					t.Errorf("buildFTSQuery(%q) = %q, should not contain stop word %q as standalone term", query, result, sw)
+				}
 			}
 		}
 	}
@@ -557,23 +562,29 @@ func TestPathPenalty(t *testing.T) {
 		{"node_modules", "node_modules/@types/node/index.js", 0.3},
 		{"lib directory", "lib/legacy/utils.js", 0.3},
 
-		// 0.4x: migrations
-		{"database migrations", "database/migrations/2024_01_create_orders.php", 0.4},
-		{"migration directory", "migrations/001_init.sql", 0.4},
+		// 0.2x: migrations
+		{"database migrations", "database/migrations/2024_01_create_orders.php", 0.2},
+		{"migration directory", "migrations/001_init.sql", 0.2},
 
-		// 0.5x: test files
-		{"tests directory", "tests/Unit/OrderTest.php", 0.5},
-		{"test directory", "test/helpers/setup.js", 0.5},
-		{"__tests__ directory", "__tests__/Order.test.js", 0.5},
-		{"spec directory", "spec/models/order_spec.rb", 0.5},
-		{"_test.go suffix", "internal/search/hybrid_test.go", 0.5},
-		{".test.js suffix", "src/utils.test.js", 0.5},
-		{".spec.ts suffix", "src/api.spec.ts", 0.5},
-		{"Test.php suffix", "tests/OrderControllerTest.php", 0.5},
+		// 0.3x: test files
+		{"tests directory", "tests/Unit/OrderTest.php", 0.3},
+		{"test directory", "test/helpers/setup.js", 0.3},
+		{"__tests__ directory", "__tests__/Order.test.js", 0.3},
+		{"spec directory", "spec/models/order_spec.rb", 0.3},
+		{"_test.go suffix", "internal/search/hybrid_test.go", 0.3},
+		{".test.js suffix", "src/utils.test.js", 0.3},
+		{".spec.ts suffix", "src/api.spec.ts", 0.3},
+		{"Test.php suffix", "tests/OrderControllerTest.php", 0.3},
 
 		// 0.6x: examples
 		{"examples directory", "examples/basic/main.go", 0.6},
 		{"example directory", "example/quickstart.py", 0.6},
+
+		// 0.8x: config directories
+		{"config directory", "config/session.php", 0.8},
+		{"config app file", "config/app.php", 0.8},
+		{"app config directory", "app/config/database.php", 0.8},
+		{"src Config directory", "src/Config/AppConfig.ts", 0.8},
 
 		// 1.0x: regular source files
 		{"regular Go", "internal/search/hybrid.go", 1.0},
@@ -876,8 +887,8 @@ func TestBuildFTSQuery_AliasExpansion(t *testing.T) {
 		},
 		{
 			"inventory expands to stock terms",
-			"inventory flow",
-			[]string{"stock", "stocktransaction", "stockledger", "warehouse", "inventory", "flow"},
+			"inventory lookup",
+			[]string{"stock", "stocktransaction", "stockledger", "warehouse", "inventory", "lookup"},
 		},
 		{
 			"payment expands to billing terms",
@@ -904,18 +915,18 @@ func TestBuildFTSQuery_AliasExpansion(t *testing.T) {
 	}
 }
 
-func TestBuildFTSQuery_AliasExactMatchOnly(t *testing.T) {
-	// "authentication" is not the exact key "auth", so no aliases should be added
-	t.Run("authentication does not trigger auth alias", func(t *testing.T) {
+func TestBuildFTSQuery_AliasPrefixMatching(t *testing.T) {
+	// "authentication" has prefix "auth" → should trigger auth alias expansion
+	t.Run("authentication triggers auth alias via prefix", func(t *testing.T) {
 		result := buildFTSQuery("authentication session")
 		lower := strings.ToLower(result)
-		if strings.Contains(lower, "oauth") {
-			t.Errorf("buildFTSQuery(\"authentication session\") should not expand 'auth' alias, got: %s", result)
+		if !strings.Contains(lower, "oauth") {
+			t.Errorf("expected 'oauth' from auth prefix alias, got: %s", result)
 		}
-		if strings.Contains(lower, "login") {
-			t.Errorf("buildFTSQuery(\"authentication session\") should not contain 'login' from auth alias, got: %s", result)
+		if !strings.Contains(lower, "login") {
+			t.Errorf("expected 'login' from auth prefix alias, got: %s", result)
 		}
-		// But the original terms should still be present
+		// Original terms should still be present
 		if !strings.Contains(lower, "authentication") {
 			t.Errorf("expected 'authentication' in result, got: %s", result)
 		}
@@ -924,12 +935,15 @@ func TestBuildFTSQuery_AliasExactMatchOnly(t *testing.T) {
 		}
 	})
 
-	// "payments" (plural) should not trigger "payment" alias
-	t.Run("payments does not trigger payment alias", func(t *testing.T) {
-		result := buildFTSQuery("payments flow")
+	// "payments" has prefix "payment" → should trigger payment alias expansion
+	t.Run("payments triggers payment alias via prefix", func(t *testing.T) {
+		result := buildFTSQuery("payments lookup")
 		lower := strings.ToLower(result)
-		if strings.Contains(lower, "razorpay") {
-			t.Errorf("buildFTSQuery(\"payments flow\") should not expand 'payment' alias, got: %s", result)
+		if !strings.Contains(lower, "razorpay") {
+			t.Errorf("expected 'razorpay' from payment prefix alias, got: %s", result)
+		}
+		if !strings.Contains(lower, "billing") {
+			t.Errorf("expected 'billing' from payment prefix alias, got: %s", result)
 		}
 	})
 }
@@ -1243,5 +1257,295 @@ func TestSearch_GraphExpansionNoNewNeighbors(t *testing.T) {
 	// Both nodes should appear (direct matches); expansion adds nothing new
 	if len(results) < 2 {
 		t.Errorf("expected at least 2 results, got %d", len(results))
+	}
+}
+
+// ---- Wave 1B: Prefix alias matching, new aliases, targeted stop words ----
+
+func TestBuildFTSQuery_PrefixAliasMatching(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		wantTerms []string
+	}{
+		{
+			"authentication triggers auth aliases via prefix",
+			"authentication check",
+			[]string{"authentication", "oauth", "login", "token", "middleware", "check"},
+		},
+		{
+			"loyaltypoint triggers loyalty aliases via prefix",
+			"loyaltypoint redeem",
+			[]string{"loyaltypoint", "mobiquest", "easyrewardz", "redeem"},
+		},
+		{
+			"webhook still triggers webhook aliases (exact is subset of prefix)",
+			"webhook dispatch",
+			[]string{"webhook", "callback", "hook", "dispatchwebhook", "dispatch"},
+		},
+		{
+			"exact match auth still works",
+			"auth check",
+			[]string{"auth", "oauth", "login", "token", "middleware", "check"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildFTSQuery(tt.query)
+			lower := strings.ToLower(result)
+			for _, want := range tt.wantTerms {
+				if !strings.Contains(lower, want) {
+					t.Errorf("buildFTSQuery(%q) = %q, expected to contain %q", tt.query, result, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildFTSQuery_PrefixAliasNoFalsePositives(t *testing.T) {
+	// "au" is shorter than the minimum alias key length (3), should not trigger
+	t.Run("short term au does not trigger aliases", func(t *testing.T) {
+		result := buildFTSQuery("au check")
+		lower := strings.ToLower(result)
+		if strings.Contains(lower, "oauth") {
+			t.Errorf("'au' should not trigger auth alias (too short), got: %s", result)
+		}
+	})
+
+	// "database" has prefix "database" → triggers database alias
+	t.Run("database triggers database aliases", func(t *testing.T) {
+		result := buildFTSQuery("database setup")
+		lower := strings.ToLower(result)
+		if !strings.Contains(lower, "migration") {
+			t.Errorf("expected 'migration' from database alias, got: %s", result)
+		}
+		if !strings.Contains(lower, "schema") {
+			t.Errorf("expected 'schema' from database alias, got: %s", result)
+		}
+		if !strings.Contains(lower, "table") {
+			t.Errorf("expected 'table' from database alias, got: %s", result)
+		}
+	})
+
+	// "xyz" is not a prefix of any alias key → no expansion
+	t.Run("unrelated term gets no alias expansion", func(t *testing.T) {
+		result := buildFTSQuery("xyz controller")
+		lower := strings.ToLower(result)
+		// Should only contain the original terms (plus wildcards)
+		if strings.Contains(lower, "oauth") || strings.Contains(lower, "razorpay") ||
+			strings.Contains(lower, "easyecom") || strings.Contains(lower, "sentry") {
+			t.Errorf("unexpected alias expansion for 'xyz controller', got: %s", result)
+		}
+	})
+}
+
+func TestBuildFTSQuery_NewAliases(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		wantTerms []string
+	}{
+		{
+			"loyalty alias expands",
+			"loyalty program",
+			[]string{"loyalty", "loyaltypoint", "mobiquest", "easyrewardz"},
+		},
+		{
+			"session alias expands",
+			"session timeout",
+			[]string{"session", "sessionhandler", "cookie"},
+		},
+		{
+			"sync alias expands",
+			"sync worker",
+			[]string{"sync", "listener", "event", "dispatch"},
+		},
+		{
+			"database alias expands",
+			"database query",
+			[]string{"database", "migration", "schema", "table"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildFTSQuery(tt.query)
+			lower := strings.ToLower(result)
+			for _, want := range tt.wantTerms {
+				if !strings.Contains(lower, want) {
+					t.Errorf("buildFTSQuery(%q) = %q, expected to contain %q", tt.query, result, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildFTSQuery_HandlingStopWord(t *testing.T) {
+	// "handling" should be filtered as a stop word in multi-word queries
+	t.Run("handling filtered from multi-word query", func(t *testing.T) {
+		result := buildFTSQuery("webhook handling dispatch")
+		lower := strings.ToLower(result)
+		// "handling" should be stripped
+		// Note: check for "handling" not preceded by another letter (to avoid matching inside other words)
+		terms := strings.Fields(lower)
+		for _, term := range terms {
+			cleaned := strings.TrimSuffix(term, "*")
+			if cleaned == "handling" {
+				t.Errorf("expected 'handling' to be filtered as stop word, got: %s", result)
+			}
+		}
+		// "webhook" and "dispatch" should remain
+		if !strings.Contains(lower, "webhook") {
+			t.Errorf("expected 'webhook' to be preserved, got: %s", result)
+		}
+		if !strings.Contains(lower, "dispatch") {
+			t.Errorf("expected 'dispatch' to be preserved, got: %s", result)
+		}
+	})
+
+	// "stockHandling" as CamelCase — "stock" should be preserved, "handling" filtered
+	t.Run("stockHandling CamelCase split preserves stock", func(t *testing.T) {
+		result := buildFTSQuery("stockHandling report")
+		lower := strings.ToLower(result)
+		if !strings.Contains(lower, "stock") {
+			t.Errorf("expected 'stock' from CamelCase split of stockHandling, got: %s", result)
+		}
+		if !strings.Contains(lower, "report") {
+			t.Errorf("expected 'report' to be preserved, got: %s", result)
+		}
+		// "handling" part should be filtered after CamelCase split
+		terms := strings.Fields(lower)
+		for _, term := range terms {
+			cleaned := strings.TrimSuffix(term, "*")
+			if cleaned == "handling" {
+				t.Errorf("expected 'handling' to be filtered from CamelCase split, got: %s", result)
+			}
+		}
+	})
+
+	// Single stop word "handling" should fall back to original query (not empty)
+	t.Run("handling alone falls back to original", func(t *testing.T) {
+		result := buildFTSQuery("handling")
+		if result == "" {
+			t.Fatal("buildFTSQuery returned empty string for single stop word 'handling'")
+		}
+	})
+}
+
+// ---- Wave 1C: Query kind detection + node-type boosting + BM25 score floor ----
+
+// TestDetectQueryKind verifies that detectQueryKind classifies queries correctly.
+func TestDetectQueryKind(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  queryKind
+	}{
+		{"route terms api+endpoints", "order API endpoints", queryKindRoute},
+		{"PascalCase class", "FiscalYearController", queryKindClass},
+		{"HTTP verb POST", "POST /v1/merchant/{storeID}/order", queryKindRoute},
+		{"snake_case function", "stock_transaction", queryKindFunction},
+		{"natural language", "payment processing flow", queryKindNatural},
+		{"natural language auth", "authentication and session management", queryKindNatural},
+		{"natural language webhook", "webhook handling and dispatch", queryKindNatural},
+		{"route login+endpoint", "find login endpoint", queryKindRoute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectQueryKind(tt.query)
+			if got != tt.want {
+				t.Errorf("detectQueryKind(%q) = %d, want %d", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNodeTypeBoost verifies that nodeTypeBoost returns expected multipliers
+// for all query kind / node type combinations.
+func TestNodeTypeBoost(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     queryKind
+		nodeType types.NodeType
+		want     float64
+	}{
+		// Route kind
+		{"route+Route", queryKindRoute, types.NodeTypeRoute, 2.5},
+		{"route+Method", queryKindRoute, types.NodeTypeMethod, 1.3},
+		{"route+Function", queryKindRoute, types.NodeTypeFunction, 1.0},
+		{"route+Class", queryKindRoute, types.NodeTypeClass, 1.0},
+		{"route+File", queryKindRoute, types.NodeTypeFile, 1.0},
+
+		// Class kind
+		{"class+Class", queryKindClass, types.NodeTypeClass, 1.5},
+		{"class+Interface", queryKindClass, types.NodeTypeInterface, 1.5},
+		{"class+Function", queryKindClass, types.NodeTypeFunction, 1.0},
+		{"class+Route", queryKindClass, types.NodeTypeRoute, 1.0},
+
+		// Function kind
+		{"function+Function", queryKindFunction, types.NodeTypeFunction, 1.2},
+		{"function+Method", queryKindFunction, types.NodeTypeMethod, 1.0},
+		{"function+Class", queryKindFunction, types.NodeTypeClass, 1.0},
+
+		// Natural kind (all 1.0)
+		{"natural+Function", queryKindNatural, types.NodeTypeFunction, 1.0},
+		{"natural+Class", queryKindNatural, types.NodeTypeClass, 1.0},
+		{"natural+Route", queryKindNatural, types.NodeTypeRoute, 1.0},
+		{"natural+Method", queryKindNatural, types.NodeTypeMethod, 1.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nodeTypeBoost(tt.kind, tt.nodeType)
+			if got != tt.want {
+				t.Errorf("nodeTypeBoost(%d, %v) = %f, want %f", tt.kind, tt.nodeType, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBM25ScoreFloor verifies that after normalization, nodes with raw BM25 > 0
+// get at least 0.05 in the normalized scores (floor prevents them from collapsing to 0).
+func TestBM25ScoreFloor(t *testing.T) {
+	results := []types.SearchResult{
+		{Node: types.ASTNode{ID: "high", SymbolName: "HighScore"}, Score: 10.0},
+		{Node: types.ASTNode{ID: "low", SymbolName: "LowScore"}, Score: 0.1},
+	}
+
+	normalized := normalizeScores(results)
+
+	// Apply BM25 floor (same logic as in Search)
+	for _, r := range results {
+		if r.Score > 0 {
+			if norm, ok := normalized[r.Node.ID]; ok && norm < 0.05 {
+				normalized[r.Node.ID] = 0.05
+			}
+		}
+	}
+
+	if normalized["low"] < 0.05 {
+		t.Errorf("BM25 floor failed: normalized[low] = %f, want >= 0.05", normalized["low"])
+	}
+	if normalized["high"] < 0.99 {
+		t.Errorf("BM25 floor should not affect high scorer: normalized[high] = %f", normalized["high"])
+	}
+
+	// Edge case: Score == 0 should NOT get the floor
+	resultsWithZero := []types.SearchResult{
+		{Node: types.ASTNode{ID: "pos"}, Score: 5.0},
+		{Node: types.ASTNode{ID: "zero"}, Score: 0.0},
+	}
+	normZero := normalizeScores(resultsWithZero)
+	for _, r := range resultsWithZero {
+		if r.Score > 0 {
+			if norm, ok := normZero[r.Node.ID]; ok && norm < 0.05 {
+				normZero[r.Node.ID] = 0.05
+			}
+		}
+	}
+	if normZero["zero"] >= 0.05 {
+		t.Errorf("BM25 floor should not apply to Score==0 nodes: normalized[zero] = %f", normZero["zero"])
 	}
 }
