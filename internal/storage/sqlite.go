@@ -161,17 +161,18 @@ func (s *Store) UpsertNode(node types.ASTNode) error {
 	defer tx.Rollback()
 
 	_, err = tx.Exec(`
-		INSERT INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum, search_terms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			file_path = excluded.file_path,
 			symbol_name = excluded.symbol_name,
 			node_type = excluded.node_type,
 			start_byte = excluded.start_byte,
 			end_byte = excluded.end_byte,
-			content_sum = excluded.content_sum`,
+			content_sum = excluded.content_sum,
+			search_terms = excluded.search_terms`,
 		node.ID, node.FilePath, node.SymbolName, uint8(node.NodeType),
-		node.StartByte, node.EndByte, node.ContentSum,
+		node.StartByte, node.EndByte, node.ContentSum, BuildSearchTerms(node.SymbolName, node.FilePath),
 	)
 	if err != nil {
 		return err
@@ -216,15 +217,16 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum, search_terms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			file_path = excluded.file_path,
 			symbol_name = excluded.symbol_name,
 			node_type = excluded.node_type,
 			start_byte = excluded.start_byte,
 			end_byte = excluded.end_byte,
-			content_sum = excluded.content_sum`)
+			content_sum = excluded.content_sum,
+			search_terms = excluded.search_terms`)
 	if err != nil {
 		return err
 	}
@@ -238,7 +240,7 @@ func (s *Store) UpsertNodes(nodes []types.ASTNode) error {
 
 	for _, node := range nodes {
 		_, err := stmt.Exec(node.ID, node.FilePath, node.SymbolName, uint8(node.NodeType),
-			node.StartByte, node.EndByte, node.ContentSum)
+			node.StartByte, node.EndByte, node.ContentSum, BuildSearchTerms(node.SymbolName, node.FilePath))
 		if err != nil {
 			return err
 		}

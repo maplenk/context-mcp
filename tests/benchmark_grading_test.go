@@ -4,7 +4,6 @@ package tests
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/naman/qb-context/internal/search"
+	"github.com/naman/qb-context/internal/types"
 )
 
 // benchmarkQueries maps query IDs to the search queries used for grading.
@@ -395,10 +395,13 @@ func matchSymbol(item expectedItem, results []searchResultInfo) bool {
 
 // queryResult holds per-query scoring data for reuse across tests.
 type queryResult struct {
-	ID    string
-	Query string
-	Hits  int
-	Total int
+	ID       string
+	Query    string
+	Hits     int
+	Total    int
+	HitItems  []string // items that matched
+	MissItems []string // items that didn't match
+	Results   []types.SearchResult // actual search results
 }
 
 // benchmarkResult holds aggregate benchmark scoring for a search engine configuration.
@@ -470,9 +473,13 @@ func runBenchmarkWith(eng *search.HybridSearch, answerKey map[string][]expectedI
 
 		// Score each expected item
 		hits := 0
+		var hitItems, missItems []string
 		for _, item := range expected {
 			if matchItem(item, resultInfos) {
 				hits++
+				hitItems = append(hitItems, item.raw)
+			} else {
+				missItems = append(missItems, item.raw)
 			}
 		}
 
@@ -481,7 +488,10 @@ func runBenchmarkWith(eng *search.HybridSearch, answerKey map[string][]expectedI
 		ts.hits += hits
 		ts.total += total
 
-		queries = append(queries, queryResult{ID: id, Query: query, Hits: hits, Total: total})
+		queries = append(queries, queryResult{
+			ID: id, Query: query, Hits: hits, Total: total,
+			HitItems: hitItems, MissItems: missItems, Results: results,
+		})
 	}
 
 	bcHits := tierScores["B"].hits + tierScores["C"].hits
@@ -514,70 +524,22 @@ func TestAutomatedGrading(t *testing.T) {
 	// Run the benchmark using the shared search engine
 	result := runBenchmarkWith(env.searchEng, answerKey, limits)
 
-	// Detailed per-query logging (preserved from original test)
-	for _, id := range orderedQueryIDs {
-		query, ok := benchmarkQueries[id]
-		if !ok {
-			t.Errorf("missing query for ID %s", id)
-			continue
+	// Detailed per-query logging from the same search results used for scoring
+	for _, q := range result.Queries {
+		t.Logf("[%s] %q — %d/%d hits (%d results returned)", q.ID, q.Query, q.Hits, q.Total, len(q.Results))
+		for _, h := range q.HitItems {
+			t.Logf("    HIT:  %s", h)
+		}
+		for _, m := range q.MissItems {
+			t.Logf("    MISS: %s", m)
 		}
 
-		expected, hasAnswers := answerKey[id]
-		if !hasAnswers || len(expected) == 0 {
-			t.Logf("[%s] %q — no expected items in answer key, skipping scoring", id, query)
-			continue
-		}
-
-		tier := queryTier(id)
-		limit := limits[tier]
-
-		results, err := env.searchEng.Search(query, limit, nil)
-		if err != nil {
-			t.Errorf("[%s] Search(%q) error: %v", id, query, err)
-			continue
-		}
-
-		// Convert to our matching format
-		resultInfos := make([]searchResultInfo, len(results))
-		for i, r := range results {
-			resultInfos[i] = searchResultInfo{
-				filePath:   r.Node.FilePath,
-				symbolName: r.Node.SymbolName,
-				contentSum: r.Node.ContentSum,
-			}
-		}
-
-		// Score each expected item
-		hits := 0
-		var hitItems []string
-		var missItems []string
-		for _, item := range expected {
-			if matchItem(item, resultInfos) {
-				hits++
-				hitItems = append(hitItems, fmt.Sprintf("  HIT:  %s", item.raw))
-			} else {
-				missItems = append(missItems, fmt.Sprintf("  MISS: %s", item.raw))
-			}
-		}
-
-		total := len(expected)
-
-		// Log per-query details
-		t.Logf("[%s] %q — %d/%d hits (%d results returned)", id, query, hits, total, len(results))
-		for _, h := range hitItems {
-			t.Logf("  %s", h)
-		}
-		for _, m := range missItems {
-			t.Logf("  %s", m)
-		}
-
-		// Log top results for debugging
 		maxShow := 5
-		if len(results) < maxShow {
-			maxShow = len(results)
+		if len(q.Results) < maxShow {
+			maxShow = len(q.Results)
 		}
 		for i := 0; i < maxShow; i++ {
-			r := results[i]
+			r := q.Results[i]
 			t.Logf("  result[%d]: %s (%s) in %s — score=%.4f",
 				i, r.Node.SymbolName, r.Node.NodeType, r.Node.FilePath, r.Score)
 		}

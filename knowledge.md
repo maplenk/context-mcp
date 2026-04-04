@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-04-04 (post-Phase 13 — Search quality optimization: Wave 1+2 improvements + 4-phase parameter sweep, B+C 33.3% → 55.6%).
+> Living document for team reference. Last updated: 2026-04-04 (post-Phase 13 — Search quality optimization: Wave 1+2 improvements + 4-phase parameter sweep + DA review fixes, B+C 33.3% → 53.1%).
 
 ---
 
@@ -193,9 +193,9 @@ qb-context/
 - Called during `indexRepo()` after graph build, stored in `project_summaries` table
 
 ### Search (`internal/search`)
-- Multi-signal composite scoring:
+- Multi-signal composite scoring (optimized via 4-phase parameter sweep):
   ```
-  composite = 0.35*PPR + 0.25*BM25 + 0.15*Betweenness + 0.10*InDegree + 0.15*SemanticSim
+  composite = 0.35*PPR + 0.30*BM25 + 0.20*Betweenness + 0.00*InDegree + 0.15*SemanticSim
   ```
 - All signals normalized to [0,1] before weighting
 - **Helper file penalty**: `composite *= 0.3` for `_ide_helper`, `.d.ts`, `generated` files — prevents auto-generated files from dominating results
@@ -448,7 +448,7 @@ qb-context/
 - Multi-seed connection bypass: if a neighbor connects to 2+ seed nodes, include regardless of query relevance
 - **Result limits doubled**: A=10→20, B/C=20→40
 
-**Impact:** B+C improved from 33.3% (27/81) → 48.1% (39/81) = +14.8%
+**Impact:** B+C improved from 33.3% (27/81) → 48.1% (39/81) pre-sweep (nondeterministic baseline)
 
 ### Phase 13: Parameter Sweep Optimization (Commits 51-52)
 
@@ -463,14 +463,16 @@ qb-context/
 - `runBenchmarkWith()` extracted from TestAutomatedGrading for reuse
 - 4-phase progressive narrowing across ~130 total configurations
 
-**4-Phase sweep results:**
+**4-Phase sweep results (pre-determinism fix — scores had ±2 variance from map iteration nondeterminism):**
 
-| Phase | Configs | Winner | B+C | Delta |
-|-------|---------|--------|-----|-------|
+| Phase | Configs | Winner | B+C (observed) | Delta |
+|-------|---------|--------|----------------|-------|
 | 1: Single-param | 48 | MaxPerFile=1 | 43/81 (53.1%) | +4 |
 | 2: Combos on MaxPerFile=1 | 35 | +no-indegree+seeds=10 | 45/81 (55.6%) | +2 |
 | 3: Fine-tune Phase 2 winner | 45 | +floor=0.00 | 46/81 (56.8%) | +1 |
 | 4: Combine top findings | 20 | Converged (6 configs tied) | 46/81 (56.8%) | 0 |
+
+**Deterministic score after DA review fixes:** 43/81 (53.1%) — stable across all runs after sort tiebreak + expansion determinism fixes.
 
 **Optimal config changes (applied to DefaultConfig):**
 
@@ -497,12 +499,12 @@ qb-context/
 | B5 error handling | **1/1** | Perfect |
 | B6 omnichannel sync | 3/7 | Missing event listeners |
 | C1 order creation | 3/14 | "creation" matches many irrelevant methods |
-| C2 stock transactions | 4-5/8 | Good, missing route nodes |
+| C2 stock transactions | 4/8 | Good, missing route nodes |
 | C3 webhooks | **7/7** | Perfect (improved from 5/7) |
 | C4 OpenTelemetry | **8/8** | Perfect |
-| C5 inventory writes | 5-6/8 | Good, missing bulk routes |
+| C5 inventory writes | 4/8 | Good, missing bulk routes |
 
-**Net improvement from all search work: 33.3% → 55.6% B+C (+22.3%)**
+**Net improvement from all search work: 33.3% → 53.1% B+C (+19.8%)**
 
 **Remaining weak spots (not parameter-tunable, need algorithmic changes):**
 - B1 payment: Need semantic flow tracing, not just keyword matching

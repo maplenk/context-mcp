@@ -345,9 +345,12 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 			pprScores, betweennessScores, inDegreeScores, limit, cleanedQuery)
 	}
 
-	// Sort by composite score descending
+	// Sort by composite score descending, with stable ID tiebreak for determinism
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].Node.ID < results[j].Node.ID
 	})
 
 	// Apply per-file cap
@@ -698,7 +701,7 @@ func safeGet(m map[string]float64, key string) float64 {
 }
 
 // applyPerFileCap limits results to maxPerFile entries per unique file_path.
-// Files with pathPenalty <= PenaltyTest (generated, vendor, IDE helpers, tests, migrations)
+// Files with pathPenalty <= NonCoreThreshold (generated, vendor, IDE helpers, tests, migrations)
 // are capped at 1 to prevent large auto-generated files from dominating results.
 func (h *HybridSearch) applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
 	fileCounts := make(map[string]int)
@@ -706,8 +709,8 @@ func (h *HybridSearch) applyPerFileCap(results []types.SearchResult, maxPerFile 
 
 	for _, r := range results {
 		cap := maxPerFile
-		if h.pathPenalty(r.Node.FilePath) <= h.config.PenaltyTest {
-			cap = 1 // generated/vendor/IDE helpers: 1 result max
+		if h.pathPenalty(r.Node.FilePath) <= h.config.NonCoreThreshold {
+			cap = 1 // non-core files (generated/vendor/test/etc): 1 result max
 		}
 		count := fileCounts[r.Node.FilePath]
 		if count < cap {
@@ -814,9 +817,12 @@ func (h *HybridSearch) expandFromSeeds(
 	limit int,
 	queryTerms string,
 ) []types.SearchResult {
-	// Take top-N seeds (pre-sort by score to get the best ones)
+	// Take top-N seeds (pre-sort by score to get the best ones, stable tiebreak)
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].Node.ID < results[j].Node.ID
 	})
 
 	seedCount := h.config.ExpansionSeedCount
@@ -851,14 +857,22 @@ func (h *HybridSearch) expandFromSeeds(
 	// Parse query terms for relevance filtering
 	terms := strings.Fields(strings.ToLower(queryTerms))
 
-	// Cap expansion to prevent result bloat
-	maxExpansion := h.config.ExpansionMaxNeighbors
+	// Collect all neighbors, then sort for deterministic expansion
 	neighborIDs := make([]string, 0, len(neighborSeedCount))
 	for id := range neighborSeedCount {
 		neighborIDs = append(neighborIDs, id)
-		if len(neighborIDs) >= maxExpansion {
-			break
+	}
+	sort.Slice(neighborIDs, func(i, j int) bool {
+		ci, cj := neighborSeedCount[neighborIDs[i]], neighborSeedCount[neighborIDs[j]]
+		if ci != cj {
+			return ci > cj // most-connected neighbors first
 		}
+		return neighborIDs[i] < neighborIDs[j] // stable tiebreak
+	})
+	// Cap expansion to prevent result bloat
+	maxExpansion := h.config.ExpansionMaxNeighbors
+	if len(neighborIDs) > maxExpansion {
+		neighborIDs = neighborIDs[:maxExpansion]
 	}
 
 	// Fetch neighbor nodes from store — limit additions to avoid flooding results

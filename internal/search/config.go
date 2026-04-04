@@ -29,6 +29,9 @@ type SearchConfig struct {
 	ExpansionMaxAddedDivisor int     // maxAdded = limit / this value
 	ExpansionBonus           float64 // fraction of seed score for connectivity bonus
 
+	// Per-file cap parameters
+	NonCoreThreshold float64 // pathPenalty at or below this → non-core (capped)
+
 	// Search pipeline parameters
 	BM25ScoreFloor      float64 // min normalized BM25 for nodes with positive raw score
 	CandidateMultiplier int     // candidateLimit = limit * this
@@ -61,6 +64,8 @@ func DefaultConfig() SearchConfig {
 		ExpansionMaxNeighbors:    20,
 		ExpansionMaxAddedDivisor: 4,
 		ExpansionBonus:           0.10,
+
+		NonCoreThreshold: 0.5, // catches generated(0.3), vendor(0.3), migration(0.2), test(0.3)
 
 		BM25ScoreFloor:      0.00,
 		CandidateMultiplier: 5,

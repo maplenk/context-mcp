@@ -173,17 +173,18 @@ var migrationSet = map[int][]string{
 	},
 }
 
-// postMigrationHooks maps schema versions to Go callbacks that run after the
-// version's SQL statements are committed. Use this when a migration needs Go
-// logic (e.g., calling BuildSearchTerms) that cannot be expressed in pure SQL.
-var postMigrationHooks = map[int]func(s *Store) error{
+// postMigrationHooks maps schema versions to Go callbacks that run inside the
+// migration transaction, before the version is committed. If the hook fails,
+// the transaction rolls back and the DB stays at the previous version.
+var postMigrationHooks = map[int]func(tx *sql.Tx, s *Store) error{
 	5: backfillSearchTerms,
 }
 
 // backfillSearchTerms populates the search_terms column for all existing nodes
 // and rebuilds the FTS index with the new 5-column schema.
-func backfillSearchTerms(s *Store) error {
-	rows, err := s.db.Query(`SELECT id, symbol_name, file_path, content_sum FROM nodes`)
+// Runs inside the migration transaction so failure rolls back cleanly.
+func backfillSearchTerms(tx *sql.Tx, s *Store) error {
+	rows, err := tx.Query(`SELECT id, symbol_name, file_path, content_sum FROM nodes`)
 	if err != nil {
 		return fmt.Errorf("querying nodes for backfill: %w", err)
 	}
@@ -203,12 +204,6 @@ func backfillSearchTerms(s *Store) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterating nodes for backfill: %w", err)
 	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("beginning backfill transaction: %w", err)
-	}
-	defer tx.Rollback()
 
 	updateStmt, err := tx.Prepare(`UPDATE nodes SET search_terms = ? WHERE id = ?`)
 	if err != nil {
@@ -232,9 +227,6 @@ func backfillSearchTerms(s *Store) error {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing backfill: %w", err)
-	}
 	log.Printf("Backfilled search_terms for %d nodes", len(nodes))
 	return nil
 }
@@ -297,6 +289,15 @@ func (s *Store) runMigrations() error {
 			}
 		}
 
+		// Run post-migration Go hook inside the transaction, before committing
+		// the version bump. If the hook fails, the whole migration rolls back.
+		if hook, ok := postMigrationHooks[v]; ok {
+			if err := hook(tx, s); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("post-migration hook for version %d: %w", v, err)
+			}
+		}
+
 		if err := setSchemaVersion(tx, v); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("recording schema version %d: %w", v, err)
@@ -307,13 +308,6 @@ func (s *Store) runMigrations() error {
 		}
 
 		log.Printf("Applied schema migration version %d", v)
-
-		// Run post-migration Go hook if one exists for this version.
-		if hook, ok := postMigrationHooks[v]; ok {
-			if err := hook(s); err != nil {
-				return fmt.Errorf("post-migration hook for version %d: %w", v, err)
-			}
-		}
 	}
 
 	// Create the vec0 table for semantic search embeddings.
