@@ -163,9 +163,6 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 			"--transport", transport,
 			"--scope", scope,
 		}
-		if opts.Force {
-			cmdArgs = append(cmdArgs, "--force")
-		}
 		// Pass env vars via --env KEY=VALUE.
 		for _, k := range sortedEnvKeys(opts.EnvVars) {
 			cmdArgs = append(cmdArgs, "--env", k+"="+opts.EnvVars[k])
