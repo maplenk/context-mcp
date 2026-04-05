@@ -111,6 +111,12 @@ func (s *Server) GetTools() []ToolDefinition {
 	return tools
 }
 
+// MCPServer returns the underlying mark3labs MCPServer for custom transport usage
+// (e.g., streamable HTTP).
+func (s *Server) MCPServer() *server.MCPServer {
+	return s.mcpServer
+}
+
 // Serve starts the MCP server using the SDK's protocol handler.
 // It blocks until the transport is closed (stdin EOF) or an error occurs.
 func (s *Server) Serve() error {

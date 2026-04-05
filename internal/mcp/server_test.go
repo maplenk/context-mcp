@@ -510,6 +510,15 @@ func TestConcurrentToolRegistration(t *testing.T) {
 	}
 }
 
+// TestMCPServerAccessor verifies that MCPServer() returns the underlying
+// mark3labs MCPServer instance (non-nil) for custom transport usage.
+func TestMCPServerAccessor(t *testing.T) {
+	s := NewServerWithIO(nil, nil)
+	if s.MCPServer() == nil {
+		t.Fatal("MCPServer() returned nil")
+	}
+}
+
 // testSearchArgs is a named struct for the SDK search tool handler in tests.
 type testSearchArgs struct {
 	Query string `json:"query"`

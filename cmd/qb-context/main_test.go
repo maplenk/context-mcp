@@ -1,11 +1,15 @@
 package main
 
 import (
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildTestBinary compiles the CLI binary for subprocess testing.
@@ -266,5 +270,97 @@ func (s *Service) Stop() error {
 	// Should contain at least one symbol from the file
 	if !strings.Contains(outStr, "Service") && !strings.Contains(outStr, "Start") && !strings.Contains(outStr, "Stop") {
 		t.Errorf("expected at least one symbol from svc.go in get_key_symbols output, got:\n%s", outStr)
+	}
+}
+
+// getFreePort returns an available TCP port on localhost.
+func getFreePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to get free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port
+}
+
+// TestServeHTTPStartsAndResponds verifies that the serve-http subcommand
+// starts an HTTP server that responds on /mcp.
+func TestServeHTTPStartsAndResponds(t *testing.T) {
+	binary := buildTestBinary(t)
+	tmpDir := t.TempDir()
+	port := getFreePort(t)
+
+	cmd := exec.Command(binary, "-repo", tmpDir, "serve-http", fmt.Sprintf("-port=%d", port))
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start serve-http: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	// Wait for the HTTP server to be ready
+	addr := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
+	var resp *http.Response
+	for i := 0; i < 50; i++ {
+		resp, _ = http.Post(addr, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`))
+		if resp != nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if resp == nil {
+		t.Fatal("serve-http did not respond within 5 seconds")
+	}
+	defer resp.Body.Close()
+
+	// The server should respond with 200 (MCP protocol response)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected HTTP 200, got %d", resp.StatusCode)
+	}
+}
+
+// TestServeHTTPBearerTokenRejectsUnauthorized verifies that when a bearer
+// token is configured, unauthenticated requests get 401.
+func TestServeHTTPBearerTokenRejectsUnauthorized(t *testing.T) {
+	binary := buildTestBinary(t)
+	tmpDir := t.TempDir()
+	port := getFreePort(t)
+
+	cmd := exec.Command(binary, "-repo", tmpDir, "serve-http",
+		fmt.Sprintf("-port=%d", port), "-bearer-token=secret123")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start serve-http: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	addr := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
+
+	// Wait for server to be ready (try with auth)
+	var readyResp *http.Response
+	for i := 0; i < 50; i++ {
+		req, _ := http.NewRequest("POST", addr, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer secret123")
+		readyResp, _ = http.DefaultClient.Do(req)
+		if readyResp != nil {
+			readyResp.Body.Close()
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if readyResp == nil {
+		t.Fatal("serve-http did not respond within 5 seconds")
+	}
+
+	// Request without auth should get 401
+	resp, err := http.Post(addr, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected HTTP 401 for unauthenticated request, got %d", resp.StatusCode)
 	}
 }

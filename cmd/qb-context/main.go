@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/maplenk/context-mcp/internal/adr"
 	"github.com/maplenk/context-mcp/internal/config"
 	"github.com/maplenk/context-mcp/internal/embedding"
@@ -40,7 +42,7 @@ func main() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// L3: Check for CLI subcommand BEFORE flag.Parse() — avoids fragile
+	// L3: Check for subcommands BEFORE flag.Parse() — avoids fragile
 	// reliance on flag stopping at non-flag arguments.
 	for i, arg := range os.Args[1:] {
 		if arg == "cli" {
@@ -49,6 +51,17 @@ func main() {
 				log.Fatalf("Failed to parse flags: %v", err)
 			}
 			runCLI(cfg, os.Args[i+2:]) // pass everything after "cli"
+			return
+		}
+		if arg == "serve-http" {
+			// Remove "serve-http" from os.Args so ParseFlags sees all flags
+			// (flags before and after the subcommand).
+			os.Args = append(os.Args[:i+1], os.Args[i+2:]...)
+			cfg, err := config.ParseFlags()
+			if err != nil {
+				log.Fatalf("Failed to parse flags: %v", err)
+			}
+			runServeHTTP(cfg)
 			return
 		}
 	}
@@ -375,6 +388,156 @@ func runCLI(cfg *config.Config, args []string) {
 		}
 	}
 	fmt.Println(outStr)
+}
+
+// runServeHTTP starts the MCP server over streamable HTTP transport.
+func runServeHTTP(cfg *config.Config) {
+	log.SetOutput(os.Stderr)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	log.Printf("qb-context HTTP server starting — repo: %s, port: %d", cfg.RepoRoot, cfg.HTTPPort)
+
+	// 1. Initialize embedding engine
+	embedder := initEmbedder(cfg)
+
+	// 2. Initialize SQLite storage
+	store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
+	if err != nil {
+		log.Fatalf("Failed to initialize storage: %v", err)
+	}
+	log.Printf("Storage initialized at %s", cfg.DBPath)
+
+	// Unified cleanup
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			store.Close()
+			embedder.Close()
+		})
+	}
+	defer cleanup()
+
+	// 3. Initialize parser
+	p := parser.New()
+
+	// 4. Initialize graph engine
+	graphEngine := graph.New()
+
+	// 5. Initialize hybrid search
+	hybridSearch := search.New(store, embedder, graphEngine)
+
+	// 6. Run initial indexing
+	log.Printf("Starting initial index...")
+	if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+		log.Printf("WARNING: Initial index encountered critical errors: %v", err)
+	}
+	log.Printf("Initial index complete")
+
+	// 7. Initialize filesystem watcher
+	w, err := watcher.New(cfg.RepoRoot, cfg.DebounceInterval, cfg.ExcludedDirs)
+	if err != nil {
+		log.Fatalf("Failed to create watcher: %v", err)
+	}
+	if err := w.Start(); err != nil {
+		log.Fatalf("Failed to start watcher: %v", err)
+	}
+	defer w.Stop()
+	log.Printf("Filesystem watcher started")
+
+	// 8. Start incremental update goroutine
+	var fileEventsWg sync.WaitGroup
+	fileEventsWg.Add(1)
+	go func() {
+		defer fileEventsWg.Done()
+		handleFileEvents(w, cfg, store, p, embedder, graphEngine)
+	}()
+
+	// 9. Create MCP server and register tools
+	mcpSrv := mcp.NewServer()
+	indexFn := func(path string) error {
+		indexMu.Lock()
+		defer indexMu.Unlock()
+		if path == "" {
+			log.Printf("Full re-index triggered")
+			if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+				return fmt.Errorf("full re-index failed: %w", err)
+			}
+		} else {
+			absPath, err := filepath.Abs(filepath.Join(cfg.RepoRoot, path))
+			if err != nil {
+				return fmt.Errorf("invalid path: %w", err)
+			}
+			absRoot, absRootErr := filepath.Abs(cfg.RepoRoot)
+			if absRootErr != nil {
+				return fmt.Errorf("resolving repo root: %w", absRootErr)
+			}
+			if !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) && absPath != absRoot {
+				return fmt.Errorf("path traversal detected: %s is outside repo root", path)
+			}
+			log.Printf("Targeted re-index triggered for: %s", absPath)
+			indexPath(cfg, store, p, embedder, graphEngine, absPath)
+		}
+		return nil
+	}
+	mcp.RegisterTools(mcpSrv, mcp.ToolDeps{
+		Store:    store,
+		Graph:    graphEngine,
+		Search:   hybridSearch,
+		RepoRoot: cfg.RepoRoot,
+		Profile:  cfg.Profile,
+	}, indexFn)
+
+	// 10. Create streamable HTTP transport
+	var httpOpts []mcpserver.StreamableHTTPOption
+	if cfg.HTTPBearerToken != "" {
+		log.Printf("Bearer token authentication enabled")
+	}
+
+	httpServer := mcpserver.NewStreamableHTTPServer(mcpSrv.MCPServer(), httpOpts...)
+
+	// 11. Build the HTTP handler (with optional bearer token middleware)
+	var handler http.Handler = httpServer
+	if cfg.HTTPBearerToken != "" {
+		expected := "Bearer " + cfg.HTTPBearerToken
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != expected {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			httpServer.ServeHTTP(w, r)
+		})
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", handler)
+
+	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	log.Printf("MCP HTTP server listening on %s", addr)
+
+	// 12. Graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("Received signal %v, shutting down HTTP server...", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+		w.Stop()
+		fileEventsWg.Wait()
+		asyncScoreWg.Wait()
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("HTTP server error: %v", err)
+	}
+
+	log.Printf("HTTP server stopped")
 }
 
 // initEmbedder creates an embedder based on config flags.

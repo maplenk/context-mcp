@@ -381,12 +381,20 @@ func registerContextTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("context", deps.Profile) {
 		tool := mcp.NewTool("context",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Context Search"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("query", mcp.Description("Natural language or keyword query to search for relevant code")),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of results to return (default: 5)")),
 			mcp.WithString("mode", mcp.Description("Search mode: 'search' (default) for hybrid search, 'architecture' for community detection")),
 			mcp.WithNumber("max_per_file", mcp.Description("Maximum results per unique file path (default: 1)")),
 			mcp.WithArray("active_files", mcp.Description("File paths the developer is currently editing for PPR personalization"), mcp.WithStringItems()),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/alwaysLoad": true,
+				"anthropic/searchHint": "ranked code discovery; start here for where to look",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p ContextParams
 			if err := req.BindArguments(&p); err != nil {
@@ -584,9 +592,16 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("impact", deps.Profile) {
 		tool := mcp.NewTool("impact",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Impact Analysis"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("symbol_id", mcp.Description("The ID or name of the symbol to analyze"), mcp.Required()),
 			mcp.WithNumber("depth", mcp.Description("Maximum BFS traversal depth (default: 5)")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "blast radius before editing code",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p ImpactParams
 			if err := req.BindArguments(&p); err != nil {
@@ -737,8 +752,15 @@ func registerReadSymbolTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("read_symbol", deps.Profile) {
 		tool := mcp.NewTool("read_symbol",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Read Symbol"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("symbol_id", mcp.Description("The ID or name of the symbol to read"), mcp.Required()),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "exact source for a selected symbol",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p ReadSymbolParams
 			if err := req.BindArguments(&p); err != nil {
@@ -794,8 +816,15 @@ func registerQueryTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("query", deps.Profile) {
 		tool := mcp.NewTool("query",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Query Index"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("sql", mcp.Description("SQL SELECT query to execute"), mcp.Required()),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "raw SQL query against the index",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p QueryParams
 			if err := req.BindArguments(&p); err != nil {
@@ -847,7 +876,14 @@ func registerHealthTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("health", deps.Profile) {
 		tool := mcp.NewTool("health",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Health Check"),
+			mcp.WithReadOnlyHintAnnotation(true),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "server health and index statistics",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			result, err := healthHandler(deps)
 			if err != nil {
@@ -931,8 +967,16 @@ func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	if isToolInProfile("index", deps.Profile) {
 		tool := mcp.NewTool("index",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Reindex"),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithString("path", mcp.Description("Optional: specific path to re-index")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "trigger re-indexing of the repository",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p IndexParams
 			if err := req.BindArguments(&p); err != nil {
@@ -1066,10 +1110,17 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("trace_call_path", deps.Profile) {
 		tool := mcp.NewTool("trace_call_path",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Trace Call Path"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("from", mcp.Description("Source symbol name or ID"), mcp.Required()),
 			mcp.WithString("to", mcp.Description("Target symbol name or ID"), mcp.Required()),
 			mcp.WithNumber("max_depth", mcp.Description("Maximum path depth to search (default: 10)")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "control flow from source to destination",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p TraceCallPathParams
 			if err := req.BindArguments(&p); err != nil {
@@ -1224,9 +1275,16 @@ func registerGetKeySymbolsTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("get_key_symbols", deps.Profile) {
 		tool := mcp.NewTool("get_key_symbols",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Key Symbols"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of symbols to return (default: 5)")),
 			mcp.WithString("file_filter", mcp.Description("Optional file path prefix to scope results to a specific directory")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "most important symbols by PageRank",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p GetKeySymbolsParams
 			if err := req.BindArguments(&p); err != nil {
@@ -1423,10 +1481,17 @@ func registerSearchCodeTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("search_code", deps.Profile) {
 		tool := mcp.NewTool("search_code",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Search Code"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("pattern", mcp.Description("Regex pattern to search for in file contents"), mcp.Required()),
 			mcp.WithString("file_filter", mcp.Description("Optional glob pattern to filter files")),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of matching lines to return (default: 20)")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "regex search across indexed files",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p SearchCodeParams
 			if err := req.BindArguments(&p); err != nil {
@@ -1761,10 +1826,17 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("detect_changes", deps.Profile) {
 		tool := mcp.NewTool("detect_changes",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Detect Changes"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("since", mcp.Description("Git ref to compare against (e.g. HEAD~5 or main or a commit hash)"), mcp.Required()),
 			mcp.WithString("path", mcp.Description("Optional path filter for changed files")),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of ranked changes to return (default: 5)")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "recent changes ranked by importance",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p DetectChangesParams
 			if err := req.BindArguments(&p); err != nil {
@@ -1961,8 +2033,15 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("get_architecture_summary", deps.Profile) {
 		tool := mcp.NewTool("get_architecture_summary",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Architecture Summary"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of structurally important nodes to return (default: 5)")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "structural overview of the codebase",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p ArchitectureSummaryParams
 			if err := req.BindArguments(&p); err != nil {
@@ -2190,10 +2269,17 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("explore", deps.Profile) {
 		tool := mcp.NewTool("explore",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Explore Symbol"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("symbol", mcp.Description("Symbol name to search for"), mcp.Required()),
 			mcp.WithBoolean("include_deps", mcp.Description("Whether to include dependency/dependent analysis (default: false)")),
 			mcp.WithNumber("depth", mcp.Description("Depth for dependency traversal (default: 2)")),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "deep-dive into a specific symbol and its neighbors",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p ExploreParams
 			if err := req.BindArguments(&p); err != nil {
@@ -2404,8 +2490,15 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 	if isToolInProfile("understand", deps.Profile) {
 		tool := mcp.NewTool("understand",
 			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Understand Symbol"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("symbol", mcp.Description("Symbol name to understand"), mcp.Required()),
 		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "relationships, callers, callees, importance",
+			},
+		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var p UnderstandParams
 			if err := req.BindArguments(&p); err != nil {

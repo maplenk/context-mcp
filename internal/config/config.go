@@ -82,6 +82,13 @@ type Config struct {
 
 	// OpenAIModel is the model name for the OpenAI-compatible embeddings API.
 	OpenAIModel string
+
+	// HTTPPort is the port for serve-http mode (default: 8080)
+	HTTPPort int
+
+	// HTTPBearerToken is the optional bearer token for HTTP authentication.
+	// When set, requests must include "Authorization: Bearer <token>".
+	HTTPBearerToken string
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -104,6 +111,7 @@ func DefaultConfig() *Config {
 		Profile:             "core",
 		OllamaModel:         "nomic-embed-code",
 		OpenAIModel:          "text-embedding-nomic-embed-code",
+		HTTPPort:             8080,
 	}
 }
 
@@ -135,6 +143,8 @@ func ParseFlags() (*Config, error) {
 	fs.StringVar(&cfg.LlamaCppEndpoint, "llamacpp-endpoint", cfg.LlamaCppEndpoint, "llama.cpp server endpoint (e.g., http://localhost:8080)")
 	fs.StringVar(&cfg.OpenAIEndpoint, "openai-endpoint", cfg.OpenAIEndpoint, "OpenAI-compatible API endpoint (e.g., http://localhost:1234)")
 	fs.StringVar(&cfg.OpenAIModel, "openai-model", cfg.OpenAIModel, "Model name for OpenAI-compatible embeddings")
+	fs.IntVar(&cfg.HTTPPort, "port", cfg.HTTPPort, "HTTP port for serve-http mode")
+	fs.StringVar(&cfg.HTTPBearerToken, "bearer-token", cfg.HTTPBearerToken, "Bearer token for HTTP authentication")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, fmt.Errorf("parsing flags: %w", err)
 	}
