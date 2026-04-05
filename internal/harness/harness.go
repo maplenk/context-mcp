@@ -322,11 +322,13 @@ func uninstallCodex() (string, error) {
 	return fmt.Sprintf("Uninstalled from %s", cfgPath), nil
 }
 
-// removeTomlSection removes a [header] block from TOML content.
-// It removes lines from the matching header up to (but not including) the next
-// section header or EOF. Trailing blank lines left by the removal are also cleaned.
+// removeTomlSection removes a [header] block and any nested subtables from
+// TOML content. For example, removing "mcp_servers.context-mcp" also removes
+// [mcp_servers.context-mcp.tools.context] and similar child sections.
+// Trailing blank lines left by the removal are also cleaned.
 func removeTomlSection(content, section string) string {
 	header := "[" + section + "]"
+	childPrefix := "[" + section + "."
 	lines := strings.Split(content, "\n")
 	var out []string
 	skipping := false
@@ -337,12 +339,18 @@ func removeTomlSection(content, section string) string {
 			continue
 		}
 		if skipping {
-			// Stop skipping at the next section header (including [[array_of_tables]]).
 			if strings.HasPrefix(trimmed, "[") {
+				// Check if this is a child subtable of the removed section.
+				if strings.HasPrefix(trimmed, childPrefix) {
+					// Still a nested subtable — keep skipping.
+					continue
+				}
+				// Genuinely different section — stop skipping.
 				skipping = false
 				out = append(out, line)
+				continue
 			}
-			// else: still inside the removed section, skip line.
+			// Still inside the removed section (or a child), skip line.
 			continue
 		}
 		out = append(out, line)

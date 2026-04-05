@@ -75,6 +75,65 @@ key = "val"
 	}
 }
 
+func TestRemoveTomlSection_NestedSubtables(t *testing.T) {
+	content := `[mcp_servers.context-mcp]
+command = "/usr/local/bin/context-mcp"
+args = ["--repo", "/path"]
+
+[mcp_servers.context-mcp.tools.context]
+enabled = true
+
+[mcp_servers.context-mcp.tools.impact]
+enabled = false
+
+[mcp_servers.other]
+command = "other"
+`
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
+	if strings.Contains(got, "context-mcp") {
+		t.Fatalf("section and subtables should be removed:\n%s", got)
+	}
+	if !strings.Contains(got, "[mcp_servers.other]") {
+		t.Fatalf("unrelated section should survive:\n%s", got)
+	}
+}
+
+func TestRemoveTomlSection_NestedSubtablesAtEnd(t *testing.T) {
+	content := `[mcp_servers.other]
+command = "other"
+
+[mcp_servers.context-mcp]
+command = "/usr/local/bin/context-mcp"
+
+[mcp_servers.context-mcp.tools.context]
+enabled = true
+`
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
+	if strings.Contains(got, "context-mcp") {
+		t.Fatalf("section and subtables at EOF should be removed:\n%s", got)
+	}
+	if !strings.Contains(got, "[mcp_servers.other]") {
+		t.Fatalf("preceding section should survive:\n%s", got)
+	}
+}
+
+func TestRemoveTomlSection_SimilarPrefixNotRemoved(t *testing.T) {
+	// "context-mcp-extra" is NOT a child of "context-mcp" — must survive.
+	content := `[mcp_servers.context-mcp]
+command = "ctx"
+
+[mcp_servers.context-mcp-extra]
+command = "extra"
+`
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
+	if !strings.Contains(got, "[mcp_servers.context-mcp-extra]") {
+		t.Fatalf("similarly-prefixed section should NOT be removed:\n%s", got)
+	}
+	if strings.Contains(got, "command = \"ctx\"") {
+		t.Fatalf("original section content should be removed:\n%s", got)
+	}
+}
+
 func TestRemoveTomlSection_OnlySection(t *testing.T) {
 	content := `[mcp_servers.context-mcp]
 command = "/usr/bin/qb"
