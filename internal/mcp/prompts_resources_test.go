@@ -14,11 +14,11 @@ import (
 // TestPromptsRegistered verifies that RegisterPrompts registers all 5 prompts
 // and they can be listed via the MCP protocol.
 func TestPromptsRegistered(t *testing.T) {
-	deps, cleanup := setupTestEnv(t)
+	_, cleanup := setupTestEnv(t)
 	defer cleanup()
 
 	server := NewServerWithIO(nil, nil)
-	RegisterPrompts(server, deps)
+	RegisterPrompts(server)
 
 	// Verify prompts are registered by checking via protocol
 	input := &bytes.Buffer{}
@@ -37,7 +37,7 @@ func TestPromptsRegistered(t *testing.T) {
 	sendJSONRPC(input, 2, "prompts/list", map[string]interface{}{})
 
 	srv := NewServerWithIO(input, output)
-	RegisterPrompts(srv, deps)
+	RegisterPrompts(srv)
 
 	done := make(chan error, 1)
 	go func() {
@@ -188,7 +188,7 @@ func TestResourcesRegistered(t *testing.T) {
 
 // TestPromptGetReviewChanges verifies the review_changes prompt returns a valid message.
 func TestPromptGetReviewChanges(t *testing.T) {
-	deps, cleanup := setupTestEnv(t)
+	_, cleanup := setupTestEnv(t)
 	defer cleanup()
 
 	input := &bytes.Buffer{}
@@ -210,7 +210,7 @@ func TestPromptGetReviewChanges(t *testing.T) {
 	})
 
 	srv := NewServerWithIO(input, output)
-	RegisterPrompts(srv, deps)
+	RegisterPrompts(srv)
 
 	done := make(chan error, 1)
 	go func() {
@@ -262,7 +262,7 @@ func TestPromptGetReviewChanges(t *testing.T) {
 
 // TestPromptGetOnboardRepo verifies the onboard_repo prompt returns a valid message with no args.
 func TestPromptGetOnboardRepo(t *testing.T) {
-	deps, cleanup := setupTestEnv(t)
+	_, cleanup := setupTestEnv(t)
 	defer cleanup()
 
 	input := &bytes.Buffer{}
@@ -283,7 +283,7 @@ func TestPromptGetOnboardRepo(t *testing.T) {
 	})
 
 	srv := NewServerWithIO(input, output)
-	RegisterPrompts(srv, deps)
+	RegisterPrompts(srv)
 
 	done := make(chan error, 1)
 	go func() {

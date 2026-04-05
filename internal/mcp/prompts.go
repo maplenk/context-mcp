@@ -8,7 +8,7 @@ import (
 )
 
 // RegisterPrompts registers all MCP prompt templates with the server.
-func RegisterPrompts(s *Server, deps ToolDeps) {
+func RegisterPrompts(s *Server) {
 	registerReviewChangesPrompt(s)
 	registerTraceImpactPrompt(s)
 	registerPrepareFixContextPrompt(s)

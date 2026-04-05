@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -63,7 +64,10 @@ func registerRepoSummaryResource(s *Server, deps ToolDeps) {
 			"profile":     deps.Profile,
 		}
 
-		jsonBytes, _ := json.MarshalIndent(data, "", "  ")
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("marshal repo_summary: %w", err)
+		}
 		return []mcp.ResourceContents{
 			mcp.TextResourceContents{
 				URI:      req.Params.URI,
@@ -180,7 +184,10 @@ func registerIndexStatsResource(s *Server, deps ToolDeps) {
 			}
 		}
 
-		jsonBytes, _ := json.MarshalIndent(data, "", "  ")
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("marshal index_stats: %w", err)
+		}
 		return []mcp.ResourceContents{
 			mcp.TextResourceContents{
 				URI:      req.Params.URI,
@@ -220,7 +227,7 @@ func registerChangedSymbolsResource(s *Server, deps ToolDeps) {
 							"id":          n.ID,
 							"symbol_name": n.SymbolName,
 							"file_path":   n.FilePath,
-							"node_type":   string(n.NodeType),
+							"node_type":   n.NodeType.String(),
 						})
 					}
 				}
@@ -236,7 +243,10 @@ func registerChangedSymbolsResource(s *Server, deps ToolDeps) {
 			"count":           len(symbols),
 		}
 
-		jsonBytes, _ := json.MarshalIndent(data, "", "  ")
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("marshal changed_symbols: %w", err)
+		}
 		return []mcp.ResourceContents{
 			mcp.TextResourceContents{
 				URI:      req.Params.URI,
@@ -262,11 +272,22 @@ func registerHotPathsResource(s *Server, deps ToolDeps) {
 					"ORDER BY s.pagerank DESC LIMIT 20")
 			if err == nil {
 				for _, row := range rows {
+					nodeType := ""
+					if v, ok := row["node_type"]; ok {
+						switch n := v.(type) {
+						case int64:
+							nodeType = types.NodeType(n).String()
+						case float64:
+							nodeType = types.NodeType(int(n)).String()
+						case string:
+							nodeType = n
+						}
+					}
 					entry := map[string]interface{}{
 						"id":          row["id"],
 						"symbol_name": row["symbol_name"],
 						"file_path":   row["file_path"],
-						"node_type":   row["node_type"],
+						"node_type":   nodeType,
 						"pagerank":    row["pagerank"],
 						"betweenness": row["betweenness"],
 					}
@@ -284,7 +305,10 @@ func registerHotPathsResource(s *Server, deps ToolDeps) {
 			"count":     len(hotPaths),
 		}
 
-		jsonBytes, _ := json.MarshalIndent(data, "", "  ")
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("marshal hot_paths: %w", err)
+		}
 		return []mcp.ResourceContents{
 			mcp.TextResourceContents{
 				URI:      req.Params.URI,

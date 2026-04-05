@@ -214,7 +214,7 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerReadDeltaTool(s, deps)
 	// P4: Register MCP resources and prompts
 	RegisterResources(s, deps)
-	RegisterPrompts(s, deps)
+	RegisterPrompts(s)
 }
 
 // ----- Tool 1: context -----
