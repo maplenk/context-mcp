@@ -1,14 +1,15 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"sync"
 
-	mcp_golang "github.com/metoro-io/mcp-golang"
-	"github.com/metoro-io/mcp-golang/transport/stdio"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // ToolDefinition describes an MCP tool for the tools/list response.
@@ -23,42 +24,47 @@ type ToolDefinition struct {
 // Retained for CLI compatibility (GetHandler / runCLI).
 type ToolHandler func(params json.RawMessage) (interface{}, error)
 
-// Server wraps the metoro-io/mcp-golang SDK server while preserving
+// Server wraps the mark3labs/mcp-go SDK server while preserving
 // the GetHandler / GetTools interface used by CLI mode.
 type Server struct {
-	sdk      *mcp_golang.Server
-	tools    []ToolDefinition
-	handlers map[string]ToolHandler
-	mu       sync.Mutex
+	mcpServer *server.MCPServer
+	tools     []ToolDefinition
+	handlers  map[string]ToolHandler
+	mu        sync.Mutex
+
+	// For testing with custom I/O (nil means use stdio)
+	input  io.Reader
+	output io.Writer
 }
 
 // NewServer creates a new MCP server backed by the SDK, using stdin/stdout.
 func NewServer() *Server {
 	return &Server{
-		sdk: mcp_golang.NewServer(
-			stdio.NewStdioServerTransport(),
-			mcp_golang.WithName("qb-context"),
-			mcp_golang.WithVersion(Version),
+		mcpServer: server.NewMCPServer("qb-context", Version,
+			server.WithToolCapabilities(true),
+			server.WithResourceCapabilities(false, false),
+			server.WithPromptCapabilities(false),
 		),
 		handlers: make(map[string]ToolHandler),
 	}
 }
 
 // NewServerWithIO creates a new MCP server with custom I/O (for testing).
-// Uses the SDK's stdio transport with the provided reader/writer.
 func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 	return &Server{
-		sdk: mcp_golang.NewServer(
-			stdio.NewStdioServerTransportWithIO(input, output),
-			mcp_golang.WithName("qb-context"),
-			mcp_golang.WithVersion(Version),
+		mcpServer: server.NewMCPServer("qb-context", Version,
+			server.WithToolCapabilities(true),
+			server.WithResourceCapabilities(false, false),
+			server.WithPromptCapabilities(false),
 		),
 		handlers: make(map[string]ToolHandler),
+		input:    input,
+		output:   output,
 	}
 }
 
 // RegisterTool registers a tool definition and a json.RawMessage-based
-// handler for CLI mode only. Call RegisterSDKTool separately to register
+// handler for CLI mode only. Call AddSDKTool separately to register
 // the typed handler with the MCP SDK for protocol mode.
 func (s *Server) RegisterTool(def ToolDefinition, handler ToolHandler) {
 	s.mu.Lock()
@@ -73,14 +79,19 @@ func (s *Server) RegisterTool(def ToolDefinition, handler ToolHandler) {
 	s.handlers[def.Name] = handler
 }
 
-// RegisterSDKTool registers a typed handler with the underlying SDK server.
-// The handler parameter must conform to the SDK's expectations:
-//
-//	func(ArgsStruct) (*mcp_golang.ToolResponse, error)
-//
-// where ArgsStruct is a struct with json/jsonschema tags.
-func (s *Server) RegisterSDKTool(name, description string, handler interface{}) error {
-	return s.sdk.RegisterTool(name, description, handler)
+// AddSDKTool registers a tool with the underlying MCP SDK server.
+func (s *Server) AddSDKTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
+	s.mcpServer.AddTool(tool, handler)
+}
+
+// AddResource registers a resource with the underlying MCP SDK server.
+func (s *Server) AddResource(resource mcp.Resource, handler server.ResourceHandlerFunc) {
+	s.mcpServer.AddResource(resource, handler)
+}
+
+// AddPrompt registers a prompt with the underlying MCP SDK server.
+func (s *Server) AddPrompt(prompt mcp.Prompt, handler server.PromptHandlerFunc) {
+	s.mcpServer.AddPrompt(prompt, handler)
 }
 
 // GetHandler returns the handler for a named tool, or false if not found.
@@ -106,5 +117,12 @@ func (s *Server) Serve() error {
 	// Route logging to stderr to avoid corrupting the JSON-RPC stream.
 	log.SetOutput(os.Stderr)
 
-	return s.sdk.Serve()
+	if s.input != nil && s.output != nil {
+		// Testing mode: use StdioServer with custom I/O
+		stdioServer := server.NewStdioServer(s.mcpServer)
+		return stdioServer.Listen(context.Background(), s.input, s.output)
+	}
+
+	// Production mode: serve on stdin/stdout
+	return server.ServeStdio(s.mcpServer)
 }

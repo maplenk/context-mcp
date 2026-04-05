@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	mcp_golang "github.com/metoro-io/mcp-golang"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // syncBuffer wraps bytes.Buffer with a mutex for thread-safe reads/writes.
@@ -332,8 +333,12 @@ func TestSDKServe_ToolsList(t *testing.T) {
 	output := &syncBuffer{}
 	server := NewServerWithIO(input, output)
 
-	// Register via SDK
-	_ = server.RegisterSDKTool("search_code", "Searches the code graph", func(args testSearchArgs) (*ToolResponse, error) {
+	// Register via SDK using the new API
+	tool := mcp.NewTool("search_code",
+		mcp.WithDescription("Searches the code graph"),
+		mcp.WithString("query", mcp.Description("Search query"), mcp.Required()),
+	)
+	server.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return nil, nil
 	})
 
@@ -415,9 +420,17 @@ func TestSDKServe_ToolsCall(t *testing.T) {
 	server := NewServerWithIO(input, output)
 
 	handlerCalled := false
-	_ = server.RegisterSDKTool("echo_tool", "Echoes input", func(args testEchoArgs) (*ToolResponse, error) {
+	tool := mcp.NewTool("echo_tool",
+		mcp.WithDescription("Echoes input"),
+		mcp.WithString("message", mcp.Description("Message to echo"), mcp.Required()),
+	)
+	server.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args testEchoArgs
+		if err := req.BindArguments(&args); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		handlerCalled = true
-		return NewToolResponse(NewTextContent(fmt.Sprintf("echo: %s", args.Message))), nil
+		return mcp.NewToolResultText(fmt.Sprintf("echo: %s", args.Message)), nil
 	})
 
 	done := make(chan error, 1)
@@ -497,21 +510,12 @@ func TestConcurrentToolRegistration(t *testing.T) {
 	}
 }
 
-// ToolResponse and NewToolResponse / NewTextContent are re-exported from the
-// SDK for convenience in tests.
-type ToolResponse = mcp_golang.ToolResponse
-
-var (
-	NewToolResponse = mcp_golang.NewToolResponse
-	NewTextContent  = mcp_golang.NewTextContent
-)
-
 // testSearchArgs is a named struct for the SDK search tool handler in tests.
 type testSearchArgs struct {
-	Query string `json:"query" jsonschema:"required,description=Search query"`
+	Query string `json:"query"`
 }
 
 // testEchoArgs is a named struct for the SDK echo tool handler in tests.
 type testEchoArgs struct {
-	Message string `json:"message" jsonschema:"required,description=Message to echo"`
+	Message string `json:"message"`
 }
