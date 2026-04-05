@@ -1569,6 +1569,7 @@ func runUninstall(args []string) {
 func runDoctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (optional, checks all if omitted)")
+	repo := fs.String("repo", "", "Repository root path (optional, auto-detected if omitted)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
@@ -1576,7 +1577,8 @@ func runDoctor(args []string) {
 	validateClient(*client, false)
 
 	checks, err := harness.Doctor(harness.DoctorOpts{
-		Client: harness.Client(*client),
+		Client:   harness.Client(*client),
+		RepoRoot: *repo,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

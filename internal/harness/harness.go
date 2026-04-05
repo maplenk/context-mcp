@@ -65,7 +65,8 @@ type DoctorCheck struct {
 
 // DoctorOpts contains options for the doctor command.
 type DoctorOpts struct {
-	Client Client // if empty, check all clients
+	Client   Client // if empty, check all clients
+	RepoRoot string // absolute path to repo root (optional; auto-detected if empty)
 }
 
 // ---------------------------------------------------------------------------
@@ -557,11 +558,27 @@ func printConfigCodex(bin string, opts PrintConfigOpts) string {
 // Doctor
 // ---------------------------------------------------------------------------
 
+// detectRepoRoot attempts to find the repository root via git.
+func detectRepoRoot() string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // Doctor runs diagnostic checks and returns results.
 func Doctor(opts DoctorOpts) ([]DoctorCheck, error) {
 	clients := []Client{ClientClaudeCode, ClientCodex}
 	if opts.Client != "" {
 		clients = []Client{opts.Client}
+	}
+
+	// Resolve repo root: explicit > auto-detect.
+	repoRoot := opts.RepoRoot
+	if repoRoot == "" {
+		repoRoot = detectRepoRoot()
 	}
 
 	var checks []DoctorCheck
@@ -602,7 +619,7 @@ func Doctor(opts DoctorOpts) ([]DoctorCheck, error) {
 
 	// Per-client checks.
 	for _, c := range clients {
-		cc, err := doctorClient(c)
+		cc, err := doctorClient(c, repoRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -612,7 +629,7 @@ func Doctor(opts DoctorOpts) ([]DoctorCheck, error) {
 	return checks, nil
 }
 
-func doctorClient(c Client) ([]DoctorCheck, error) {
+func doctorClient(c Client, repoRoot string) ([]DoctorCheck, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine home directory: %w", err)
@@ -623,109 +640,223 @@ func doctorClient(c Client) ([]DoctorCheck, error) {
 
 	switch c {
 	case ClientClaudeCode:
-		cfgPath := filepath.Join(home, ".claude.json")
-		checks = append(checks, doctorClaudeCode(prefix, cfgPath)...)
+		userCfg := filepath.Join(home, ".claude.json")
+		checks = append(checks, doctorClaudeCode(prefix, userCfg, repoRoot)...)
 	case ClientCodex:
-		cfgPath := filepath.Join(home, ".codex", "config.toml")
-		checks = append(checks, doctorCodex(prefix, cfgPath)...)
+		userCfg := filepath.Join(home, ".codex", "config.toml")
+		checks = append(checks, doctorCodex(prefix, userCfg, repoRoot)...)
 	}
 
 	return checks, nil
 }
 
-func doctorClaudeCode(prefix, cfgPath string) []DoctorCheck {
+// checkClaudeCodeJSON checks a single JSON config file for a context-mcp entry.
+// Returns (found bool, repoPath string extracted from args, diagnostic checks).
+func checkClaudeCodeJSON(prefix, scope, cfgPath string) (bool, string, []DoctorCheck) {
 	var checks []DoctorCheck
 
-	// Config file exists?
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		checks = append(checks, DoctorCheck{
-			Name:    prefix + "/config",
+			Name:    prefix + "/config-" + scope,
 			Passed:  false,
-			Message: fmt.Sprintf("Config file not found: %s", cfgPath),
-			Fix:     "Run: context-mcp install --client claude-code --repo <path>",
+			Message: fmt.Sprintf("Config not found (%s): %s", scope, cfgPath),
 		})
-		return checks
+		return false, "", checks
 	}
 	checks = append(checks, DoctorCheck{
-		Name:    prefix + "/config",
+		Name:    prefix + "/config-" + scope,
 		Passed:  true,
-		Message: fmt.Sprintf("Config file exists: %s", cfgPath),
+		Message: fmt.Sprintf("Config exists (%s): %s", scope, cfgPath),
 	})
 
-	// Parse and check entry.
 	root := make(map[string]any)
 	if err := json.Unmarshal(data, &root); err != nil {
 		checks = append(checks, DoctorCheck{
-			Name:    prefix + "/entry",
+			Name:    prefix + "/entry-" + scope,
 			Passed:  false,
 			Message: fmt.Sprintf("Cannot parse %s: %v", cfgPath, err),
 			Fix:     "Fix JSON syntax in " + cfgPath,
 		})
-		return checks
+		return false, "", checks
 	}
 
 	servers, _ := root["mcpServers"].(map[string]any)
 	entry, _ := servers["context-mcp"].(map[string]any)
 	if entry == nil {
 		checks = append(checks, DoctorCheck{
+			Name:    prefix + "/entry-" + scope,
+			Passed:  false,
+			Message: fmt.Sprintf("context-mcp not found in mcpServers (%s)", scope),
+		})
+		return false, "", checks
+	}
+
+	repoPath := extractRepoArg(entry)
+	checks = append(checks, DoctorCheck{
+		Name:    prefix + "/entry-" + scope,
+		Passed:  true,
+		Message: fmt.Sprintf("context-mcp entry found (%s): %s", scope, cfgPath),
+	})
+	return true, repoPath, checks
+}
+
+func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
+	var checks []DoctorCheck
+
+	// Check user-scope config.
+	userFound, userRepoPath, userChecks := checkClaudeCodeJSON(prefix, "user", userCfgPath)
+	checks = append(checks, userChecks...)
+
+	// Check project-scope configs if repoRoot is known.
+	var projectFound bool
+	var projectRepoPath string
+	if repoRoot != "" {
+		projectConfigs := []string{
+			filepath.Join(repoRoot, ".mcp.json"),
+			filepath.Join(repoRoot, ".claude", "settings.json"),
+		}
+		for _, pc := range projectConfigs {
+			found, rp, pcChecks := checkClaudeCodeJSON(prefix, "project", pc)
+			checks = append(checks, pcChecks...)
+			if found {
+				projectFound = true
+				if rp != "" {
+					projectRepoPath = rp
+				}
+				break // one project config is enough
+			}
+		}
+	}
+
+	// Overall entry verdict.
+	if !userFound && !projectFound {
+		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/entry",
 			Passed:  false,
-			Message: "context-mcp not found in mcpServers",
+			Message: "context-mcp not found in any config scope (user or project)",
 			Fix:     "Run: context-mcp install --client claude-code --repo <path>",
 		})
 		return checks
 	}
+
+	var scopes []string
+	if userFound {
+		scopes = append(scopes, "user")
+	}
+	if projectFound {
+		scopes = append(scopes, "project")
+	}
 	checks = append(checks, DoctorCheck{
 		Name:    prefix + "/entry",
 		Passed:  true,
-		Message: "context-mcp entry found in mcpServers",
+		Message: fmt.Sprintf("context-mcp configured (scopes: %s)", strings.Join(scopes, ", ")),
 	})
 
-	// Extract repo path from args.
-	repoPath := extractRepoArg(entry)
+	// Determine best repo path: prefer user config, fall back to project config, fall back to repoRoot.
+	repoPath := userRepoPath
+	if repoPath == "" {
+		repoPath = projectRepoPath
+	}
+	if repoPath == "" {
+		repoPath = repoRoot
+	}
 	checks = append(checks, doctorRepoPaths(prefix, repoPath)...)
 
 	return checks
 }
 
-func doctorCodex(prefix, cfgPath string) []DoctorCheck {
+// checkCodexTOML checks a single TOML config file for a context-mcp section.
+// Returns (found bool, repoPath string extracted from args, diagnostic checks).
+func checkCodexTOML(prefix, scope, cfgPath string) (bool, string, []DoctorCheck) {
 	var checks []DoctorCheck
 
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		checks = append(checks, DoctorCheck{
-			Name:    prefix + "/config",
+			Name:    prefix + "/config-" + scope,
 			Passed:  false,
-			Message: fmt.Sprintf("Config file not found: %s", cfgPath),
-			Fix:     "Run: context-mcp install --client codex --repo <path>",
+			Message: fmt.Sprintf("Config not found (%s): %s", scope, cfgPath),
 		})
-		return checks
+		return false, "", checks
 	}
 	checks = append(checks, DoctorCheck{
-		Name:    prefix + "/config",
+		Name:    prefix + "/config-" + scope,
 		Passed:  true,
-		Message: fmt.Sprintf("Config file exists: %s", cfgPath),
+		Message: fmt.Sprintf("Config exists (%s): %s", scope, cfgPath),
 	})
 
 	content := string(data)
 	if !strings.Contains(content, "[mcp_servers.context-mcp]") {
 		checks = append(checks, DoctorCheck{
+			Name:    prefix + "/entry-" + scope,
+			Passed:  false,
+			Message: fmt.Sprintf("context-mcp section not found (%s)", scope),
+		})
+		return false, "", checks
+	}
+
+	repoPath := extractRepoArgFromTOML(content)
+	checks = append(checks, DoctorCheck{
+		Name:    prefix + "/entry-" + scope,
+		Passed:  true,
+		Message: fmt.Sprintf("context-mcp section found (%s): %s", scope, cfgPath),
+	})
+	return true, repoPath, checks
+}
+
+func doctorCodex(prefix, userCfgPath, repoRoot string) []DoctorCheck {
+	var checks []DoctorCheck
+
+	// Check user-scope config.
+	userFound, userRepoPath, userChecks := checkCodexTOML(prefix, "user", userCfgPath)
+	checks = append(checks, userChecks...)
+
+	// Check project-scope config if repoRoot is known.
+	var projectFound bool
+	var projectRepoPath string
+	if repoRoot != "" {
+		projectCfg := filepath.Join(repoRoot, ".codex", "config.toml")
+		found, rp, pcChecks := checkCodexTOML(prefix, "project", projectCfg)
+		checks = append(checks, pcChecks...)
+		if found {
+			projectFound = true
+			projectRepoPath = rp
+		}
+	}
+
+	// Overall entry verdict.
+	if !userFound && !projectFound {
+		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/entry",
 			Passed:  false,
-			Message: "context-mcp section not found in config",
+			Message: "context-mcp not found in any config scope (user or project)",
 			Fix:     "Run: context-mcp install --client codex --repo <path>",
 		})
 		return checks
 	}
+
+	var scopes []string
+	if userFound {
+		scopes = append(scopes, "user")
+	}
+	if projectFound {
+		scopes = append(scopes, "project")
+	}
 	checks = append(checks, DoctorCheck{
 		Name:    prefix + "/entry",
 		Passed:  true,
-		Message: "context-mcp section found in config",
+		Message: fmt.Sprintf("context-mcp configured (scopes: %s)", strings.Join(scopes, ", ")),
 	})
 
-	// Extract repo path from TOML args line.
-	repoPath := extractRepoArgFromTOML(content)
+	// Determine best repo path.
+	repoPath := userRepoPath
+	if repoPath == "" {
+		repoPath = projectRepoPath
+	}
+	if repoPath == "" {
+		repoPath = repoRoot
+	}
 	checks = append(checks, doctorRepoPaths(prefix, repoPath)...)
 
 	return checks
@@ -795,9 +926,8 @@ func doctorRepoPaths(prefix, repoPath string) []DoctorCheck {
 	if repoPath == "" {
 		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/repo",
-			Passed:  false,
-			Message: "Cannot determine repo path from config",
-			Fix:     "Re-run install with --repo <path>",
+			Passed:  true,
+			Message: "Repo path not specified in config (skipping repo/index checks)",
 		})
 		return checks
 	}

@@ -449,10 +449,11 @@ func TestDoctorRepoPaths_EmptyPath(t *testing.T) {
 	if len(checks) == 0 {
 		t.Fatal("expected at least one check")
 	}
-	if checks[0].Passed {
-		t.Fatal("repo check should fail for empty path")
+	// Now passes with a skip warning instead of failing.
+	if !checks[0].Passed {
+		t.Fatal("repo check should pass (with skip warning) for empty path")
 	}
-	if !strings.Contains(checks[0].Message, "Cannot determine repo path") {
+	if !strings.Contains(checks[0].Message, "not specified") {
 		t.Fatalf("unexpected message: %s", checks[0].Message)
 	}
 }
@@ -478,12 +479,19 @@ func TestDoctorRepoPaths_MissingIndex(t *testing.T) {
 
 func TestDoctorClaudeCode_MissingConfig(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "nonexistent.json")
-	checks := doctorClaudeCode("test", cfgPath)
+	checks := doctorClaudeCode("test", cfgPath, "")
 	if len(checks) == 0 {
 		t.Fatal("expected checks")
 	}
-	if checks[0].Passed {
-		t.Fatal("config check should fail")
+	// Should have config-user fail and overall entry fail.
+	entryFailed := false
+	for _, c := range checks {
+		if c.Name == "test/entry" && !c.Passed {
+			entryFailed = true
+		}
+	}
+	if !entryFailed {
+		t.Fatal("overall entry check should fail when no config found")
 	}
 }
 
@@ -493,16 +501,16 @@ func TestDoctorClaudeCode_InvalidJSON(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("not json"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	checks := doctorClaudeCode("test", cfgPath)
-	// Should have config (pass) + entry (fail due to parse error).
+	checks := doctorClaudeCode("test", cfgPath, "")
+	// Should have config-user (pass) + entry-user (fail due to parse error) + overall entry (fail).
 	found := false
 	for _, c := range checks {
-		if strings.HasSuffix(c.Name, "/entry") && !c.Passed {
+		if c.Name == "test/entry" && !c.Passed {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected entry check to fail on invalid JSON")
+		t.Fatal("expected overall entry check to fail on invalid JSON")
 	}
 }
 
@@ -517,15 +525,15 @@ func TestDoctorClaudeCode_NoQBEntry(t *testing.T) {
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	checks := doctorClaudeCode("test", cfgPath)
+	checks := doctorClaudeCode("test", cfgPath, "")
 	found := false
 	for _, c := range checks {
-		if strings.HasSuffix(c.Name, "/entry") && !c.Passed {
+		if c.Name == "test/entry" && !c.Passed {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected entry check to fail when context-mcp not present")
+		t.Fatal("expected overall entry check to fail when context-mcp not present")
 	}
 }
 
@@ -553,7 +561,7 @@ func TestDoctorClaudeCode_ValidEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	checks := doctorClaudeCode("test", cfgPath)
+	checks := doctorClaudeCode("test", cfgPath, "")
 	for _, c := range checks {
 		if !c.Passed {
 			t.Fatalf("check %q should pass: %s", c.Name, c.Message)
@@ -567,12 +575,18 @@ func TestDoctorClaudeCode_ValidEntry(t *testing.T) {
 
 func TestDoctorCodex_MissingConfig(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "nonexistent.toml")
-	checks := doctorCodex("test", cfgPath)
+	checks := doctorCodex("test", cfgPath, "")
 	if len(checks) == 0 {
 		t.Fatal("expected checks")
 	}
-	if checks[0].Passed {
-		t.Fatal("config check should fail")
+	entryFailed := false
+	for _, c := range checks {
+		if c.Name == "test/entry" && !c.Passed {
+			entryFailed = true
+		}
+	}
+	if !entryFailed {
+		t.Fatal("overall entry check should fail when no config found")
 	}
 }
 
@@ -582,15 +596,15 @@ func TestDoctorCodex_NoQBSection(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("[other]\nkey = \"val\"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	checks := doctorCodex("test", cfgPath)
+	checks := doctorCodex("test", cfgPath, "")
 	found := false
 	for _, c := range checks {
-		if strings.HasSuffix(c.Name, "/entry") && !c.Passed {
+		if c.Name == "test/entry" && !c.Passed {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected entry check to fail when context-mcp section missing")
+		t.Fatal("expected overall entry check to fail when context-mcp section missing")
 	}
 }
 
@@ -614,11 +628,366 @@ args = ["--repo", "` + repoDir + `"]
 		t.Fatal(err)
 	}
 
-	checks := doctorCodex("test", cfgPath)
+	checks := doctorCodex("test", cfgPath, "")
 	for _, c := range checks {
 		if !c.Passed {
 			t.Fatalf("check %q should pass: %s", c.Name, c.Message)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Project-scoped config: Claude Code (.mcp.json)
+// ---------------------------------------------------------------------------
+
+func TestDoctorClaudeCode_ProjectScope_MCPJson(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := filepath.Join(tmp, "repo")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "index.db"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .mcp.json in the project root.
+	mcpJSON, _ := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"context-mcp": map[string]any{
+				"command": "/usr/bin/qb",
+				"args":    []any{"--repo", repoDir},
+			},
+		},
+	})
+	if err := os.WriteFile(filepath.Join(repoDir, ".mcp.json"), mcpJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a nonexistent user config so only the project config is found.
+	userCfg := filepath.Join(tmp, "nonexistent.json")
+	checks := doctorClaudeCode("test", userCfg, repoDir)
+
+	// Overall entry should pass via project scope.
+	entryPassed := false
+	for _, c := range checks {
+		if c.Name == "test/entry" && c.Passed {
+			entryPassed = true
+			if !strings.Contains(c.Message, "project") {
+				t.Fatalf("entry message should mention project scope: %s", c.Message)
+			}
+		}
+	}
+	if !entryPassed {
+		t.Fatal("entry check should pass via project-scoped .mcp.json")
+	}
+}
+
+func TestDoctorClaudeCode_ProjectScope_ClaudeSettings(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := filepath.Join(tmp, "repo")
+
+	// Create .claude/settings.json in the project root.
+	settingsDir := filepath.Join(repoDir, ".claude")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsJSON, _ := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"context-mcp": map[string]any{
+				"command": "/usr/bin/qb",
+				"args":    []any{},
+			},
+		},
+	})
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), settingsJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	userCfg := filepath.Join(tmp, "nonexistent.json")
+	checks := doctorClaudeCode("test", userCfg, repoDir)
+
+	entryPassed := false
+	for _, c := range checks {
+		if c.Name == "test/entry" && c.Passed {
+			entryPassed = true
+		}
+	}
+	if !entryPassed {
+		t.Fatal("entry check should pass via project-scoped .claude/settings.json")
+	}
+}
+
+func TestDoctorClaudeCode_BothScopes(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := filepath.Join(tmp, "repo")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "index.db"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// User config.
+	userCfg := filepath.Join(tmp, ".claude.json")
+	userData, _ := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"context-mcp": map[string]any{
+				"command": "/usr/bin/qb",
+				"args":    []any{"--repo", repoDir},
+			},
+		},
+	})
+	if err := os.WriteFile(userCfg, userData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Project config.
+	mcpJSON, _ := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"context-mcp": map[string]any{
+				"command": "/usr/bin/qb",
+				"args":    []any{"--repo", repoDir},
+			},
+		},
+	})
+	if err := os.WriteFile(filepath.Join(repoDir, ".mcp.json"), mcpJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	checks := doctorClaudeCode("test", userCfg, repoDir)
+
+	entryPassed := false
+	for _, c := range checks {
+		if c.Name == "test/entry" && c.Passed {
+			entryPassed = true
+			if !strings.Contains(c.Message, "user") || !strings.Contains(c.Message, "project") {
+				t.Fatalf("entry message should mention both scopes: %s", c.Message)
+			}
+		}
+	}
+	if !entryPassed {
+		t.Fatal("entry check should pass with both scopes")
+	}
+}
+
+func TestDoctorClaudeCode_ProjectScopeNoRepoArg(t *testing.T) {
+	// Project config exists but has no --repo arg; repoRoot is provided.
+	// The overall entry, repo, and index checks should pass using repoRoot as fallback.
+	tmp := t.TempDir()
+	repoDir := filepath.Join(tmp, "repo")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "index.db"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mcpJSON, _ := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"context-mcp": map[string]any{
+				"command": "/usr/bin/qb",
+				"args":    []any{},
+			},
+		},
+	})
+	if err := os.WriteFile(filepath.Join(repoDir, ".mcp.json"), mcpJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	userCfg := filepath.Join(tmp, "nonexistent.json")
+	checks := doctorClaudeCode("test", userCfg, repoDir)
+
+	// The overall entry, repo, and index checks should pass.
+	// Individual scope checks (config-user) may fail, which is expected.
+	for _, c := range checks {
+		switch c.Name {
+		case "test/entry", "test/repo", "test/index":
+			if !c.Passed {
+				t.Fatalf("check %q should pass: %s", c.Name, c.Message)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Project-scoped config: Codex (.codex/config.toml)
+// ---------------------------------------------------------------------------
+
+func TestDoctorCodex_ProjectScope(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := filepath.Join(tmp, "repo")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "index.db"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create project-scoped .codex/config.toml.
+	codexDir := filepath.Join(repoDir, ".codex")
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := `[mcp_servers.context-mcp]
+command = "/usr/bin/qb"
+args = ["--repo", "` + repoDir + `"]
+`
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No user config.
+	userCfg := filepath.Join(tmp, "nonexistent.toml")
+	checks := doctorCodex("test", userCfg, repoDir)
+
+	entryPassed := false
+	for _, c := range checks {
+		if c.Name == "test/entry" && c.Passed {
+			entryPassed = true
+			if !strings.Contains(c.Message, "project") {
+				t.Fatalf("entry message should mention project scope: %s", c.Message)
+			}
+		}
+	}
+	if !entryPassed {
+		t.Fatal("entry check should pass via project-scoped .codex/config.toml")
+	}
+}
+
+func TestDoctorCodex_BothScopes(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := filepath.Join(tmp, "repo")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "index.db"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// User config.
+	userCfg := filepath.Join(tmp, "config.toml")
+	userContent := `[mcp_servers.context-mcp]
+command = "/usr/bin/qb"
+args = ["--repo", "` + repoDir + `"]
+`
+	if err := os.WriteFile(userCfg, []byte(userContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Project config.
+	codexDir := filepath.Join(repoDir, ".codex")
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(userContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	checks := doctorCodex("test", userCfg, repoDir)
+
+	entryPassed := false
+	for _, c := range checks {
+		if c.Name == "test/entry" && c.Passed {
+			entryPassed = true
+			if !strings.Contains(c.Message, "user") || !strings.Contains(c.Message, "project") {
+				t.Fatalf("entry message should mention both scopes: %s", c.Message)
+			}
+		}
+	}
+	if !entryPassed {
+		t.Fatal("entry check should pass with both scopes")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// checkClaudeCodeJSON / checkCodexTOML unit tests
+// ---------------------------------------------------------------------------
+
+func TestCheckClaudeCodeJSON_Found(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "test.json")
+	data, _ := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"context-mcp": map[string]any{
+				"command": "/usr/bin/qb",
+				"args":    []any{"--repo", "/some/path"},
+			},
+		},
+	})
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, repoPath, checks := checkClaudeCodeJSON("test", "user", cfgPath)
+	if !found {
+		t.Fatal("should find entry")
+	}
+	if repoPath != "/some/path" {
+		t.Fatalf("repoPath = %q, want /some/path", repoPath)
+	}
+	for _, c := range checks {
+		if !c.Passed {
+			t.Fatalf("check %q should pass: %s", c.Name, c.Message)
+		}
+	}
+}
+
+func TestCheckClaudeCodeJSON_NotFound(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "test.json")
+	data, _ := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{},
+	})
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, _, _ := checkClaudeCodeJSON("test", "user", cfgPath)
+	if found {
+		t.Fatal("should not find entry in empty mcpServers")
+	}
+}
+
+func TestCheckCodexTOML_Found(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.toml")
+	content := `[mcp_servers.context-mcp]
+command = "/usr/bin/qb"
+args = ["--repo", "/some/path"]
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, repoPath, checks := checkCodexTOML("test", "project", cfgPath)
+	if !found {
+		t.Fatal("should find section")
+	}
+	if repoPath != "/some/path" {
+		t.Fatalf("repoPath = %q, want /some/path", repoPath)
+	}
+	for _, c := range checks {
+		if !c.Passed {
+			t.Fatalf("check %q should pass: %s", c.Name, c.Message)
+		}
+	}
+}
+
+func TestCheckCodexTOML_NotFound(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[other]\nkey = \"val\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, _, _ := checkCodexTOML("test", "project", cfgPath)
+	if found {
+		t.Fatal("should not find section")
 	}
 }
 
