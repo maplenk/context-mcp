@@ -15,6 +15,10 @@ import (
 	"github.com/maplenk/context-mcp/internal/types"
 )
 
+// maxCheckpoints is the maximum number of checkpoints retained in memory.
+// Oldest checkpoints are evicted when this limit is exceeded.
+const maxCheckpoints = 10
+
 // CheckpointStore holds in-memory session checkpoints.
 type CheckpointStore struct {
 	mu          sync.RWMutex
@@ -23,13 +27,14 @@ type CheckpointStore struct {
 
 // Checkpoint captures index state at a point in time.
 type Checkpoint struct {
-	Name       string                          `json:"name"`
-	Timestamp  time.Time                       `json:"timestamp"`
-	HeadCommit string                          `json:"head_commit"`
-	NodeCount  int                             `json:"node_count"`
-	FileCount  int                             `json:"file_count"`
-	NodeHashes map[string]string               `json:"-"` // nodeID -> SHA256 of source bytes
-	NodeMeta   map[string]nodeCheckpointMeta   `json:"-"` // nodeID -> metadata for delta
+	Name       string    `json:"name"`
+	Timestamp  time.Time `json:"timestamp"`
+	HeadCommit string    `json:"head_commit"`
+	NodeCount  int       `json:"node_count"`
+	FileCount  int       `json:"file_count"`
+	// unexported to prevent external mutation (M3)
+	nodeHashes map[string]string              // nodeID -> SHA256 of source bytes
+	nodeMeta   map[string]nodeCheckpointMeta  // nodeID -> metadata for delta
 }
 
 type nodeCheckpointMeta struct {
@@ -49,8 +54,12 @@ func NewCheckpointStore() *CheckpointStore {
 // CreateCheckpoint snapshots the current index state under the given name.
 // If name is empty, an auto-generated name is used.
 func (cs *CheckpointStore) CreateCheckpoint(name, repoRoot string, store *storage.Store) (*Checkpoint, error) {
+	name = strings.TrimSpace(name)
 	if name == "" {
-		name = fmt.Sprintf("cp-%d", time.Now().Unix())
+		name = fmt.Sprintf("cp-%d", time.Now().UnixNano()) // L1: nanosecond precision
+	}
+	if len(name) > 64 {
+		return nil, fmt.Errorf("checkpoint name too long (max 64 chars)")
 	}
 
 	nodeIDs, err := store.GetAllNodeIDs()
@@ -92,12 +101,24 @@ func (cs *CheckpointStore) CreateCheckpoint(name, repoRoot string, store *storag
 		HeadCommit: headCommit,
 		NodeCount:  len(nodeIDs),
 		FileCount:  len(fileSet),
-		NodeHashes: nodeHashes,
-		NodeMeta:   nodeMeta,
+		nodeHashes: nodeHashes,
+		nodeMeta:   nodeMeta,
 	}
 
 	cs.mu.Lock()
 	cs.checkpoints[name] = cp
+	// C1: Evict oldest checkpoint if over limit
+	if len(cs.checkpoints) > maxCheckpoints {
+		var oldestName string
+		var oldestTime time.Time
+		for n, c := range cs.checkpoints {
+			if oldestName == "" || c.Timestamp.Before(oldestTime) {
+				oldestName = n
+				oldestTime = c.Timestamp
+			}
+		}
+		delete(cs.checkpoints, oldestName)
+	}
 	cs.mu.Unlock()
 
 	return cp, nil
@@ -163,7 +184,7 @@ func (cs *CheckpointStore) ComputeDelta(checkpointName, repoRoot string, store *
 			continue
 		}
 
-		oldHash, existed := cp.NodeHashes[id]
+		oldHash, existed := cp.nodeHashes[id]
 		if !existed {
 			added = append(added, DeltaItem{
 				NodeID:     id,
@@ -174,7 +195,11 @@ func (cs *CheckpointStore) ComputeDelta(checkpointName, repoRoot string, store *
 			})
 		} else {
 			newHash := hashNodeSource(repoRoot, *node)
-			if newHash != oldHash && newHash != "" && oldHash != "" {
+			// M1: Treat newHash=="" (file deleted/unreadable) as modified when oldHash was valid
+			if newHash != oldHash {
+				if oldHash == "" {
+					continue // couldn't hash at checkpoint time either, skip
+				}
 				modified = append(modified, DeltaItem{
 					NodeID:     id,
 					SymbolName: node.SymbolName,
@@ -187,7 +212,7 @@ func (cs *CheckpointStore) ComputeDelta(checkpointName, repoRoot string, store *
 	}
 
 	var deleted []DeltaItem
-	for id, meta := range cp.NodeMeta {
+	for id, meta := range cp.nodeMeta {
 		if _, exists := currentSet[id]; !exists {
 			// Apply path filter
 			if pathFilter != "" && !strings.HasPrefix(meta.FilePath, pathFilter) {
@@ -203,7 +228,12 @@ func (cs *CheckpointStore) ComputeDelta(checkpointName, repoRoot string, store *
 		}
 	}
 
-	// Truncate to limit per change type
+	// H1: Capture true counts before truncation
+	trueAdded := len(added)
+	trueModified := len(modified)
+	trueDeleted := len(deleted)
+	totalChanges := trueAdded + trueModified + trueDeleted
+
 	if len(added) > limit {
 		added = added[:limit]
 	}
@@ -214,9 +244,11 @@ func (cs *CheckpointStore) ComputeDelta(checkpointName, repoRoot string, store *
 		deleted = deleted[:limit]
 	}
 
-	totalChanges := len(added) + len(modified) + len(deleted)
 	summary := fmt.Sprintf("%d added, %d modified, %d deleted since checkpoint '%s'",
-		len(added), len(modified), len(deleted), checkpointName)
+		trueAdded, trueModified, trueDeleted, checkpointName)
+	if trueAdded > limit || trueModified > limit || trueDeleted > limit {
+		summary += fmt.Sprintf(" (showing up to %d per type)", limit)
+	}
 
 	return &DeltaResult{
 		CheckpointName: cp.Name,
@@ -230,7 +262,7 @@ func (cs *CheckpointStore) ComputeDelta(checkpointName, repoRoot string, store *
 }
 
 // hashNodeSource computes a SHA-256 hash of the source bytes for a node.
-// Returns "" on any error (file missing, out-of-range, etc.).
+// Returns "" on any error (file missing, out-of-range, >5MB files skipped).
 func hashNodeSource(repoRoot string, node types.ASTNode) string {
 	filePath := filepath.Join(repoRoot, node.FilePath)
 	f, err := os.Open(filePath)
@@ -240,7 +272,7 @@ func hashNodeSource(repoRoot string, node types.ASTNode) string {
 	defer f.Close()
 
 	info, err := f.Stat()
-	if err != nil || info.Size() > 5*1024*1024 {
+	if err != nil || info.Size() > 5*1024*1024 { // skip files >5MB to avoid excessive memory
 		return ""
 	}
 

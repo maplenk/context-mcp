@@ -2917,7 +2917,6 @@ func registerCheckpointContextTool(s *Server, deps ToolDeps) {
 		tool := mcp.NewTool("checkpoint_context",
 			mcp.WithDescription(desc),
 			mcp.WithTitleAnnotation("Checkpoint Context"),
-			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("name", mcp.Description("Checkpoint name (auto-generated if empty)")),
 		)
 		tool.Meta = &mcp.Meta{
