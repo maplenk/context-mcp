@@ -1,6 +1,6 @@
-# qb-context User Guide
+# context-mcp User Guide
 
-A local-first MCP daemon that indexes your codebase and gives LLM agents surgical, context-aware code retrieval.
+A local-first MCP daemon that indexes your codebase and gives LLM agents surgical, context-aware code retrieval. Provides 16 tools, 5 prompt templates, and 4 resources.
 
 ---
 
@@ -24,6 +24,11 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
   - [get_architecture_summary](#get_architecture_summary--architecture-overview)
   - [explore](#explore--explore-codebase)
   - [understand](#understand--deep-symbol-understanding)
+  - [assemble_context](#assemble_context--token-budgeted-context-assembly)
+  - [checkpoint_context](#checkpoint_context--create-index-checkpoint)
+  - [read_delta](#read_delta--compare-against-checkpoint)
+- [MCP Prompts](#mcp-prompts)
+- [MCP Resources](#mcp-resources)
 - [Connecting to Claude Desktop](#connecting-to-claude-desktop)
 - [Configuration](#configuration)
 - [How Indexing Works](#how-indexing-works)
@@ -35,13 +40,13 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
 
 ```bash
 # Build
-go build -tags "fts5" -o qb-context ./cmd/qb-context
+go build -tags "fts5" -o context-mcp ./cmd/qb-context
 
 # Index and query your repo via CLI
-./qb-context -repo /path/to/your/project cli context '{"query": "authentication"}'
+./context-mcp -repo /path/to/your/project cli context '{"query": "authentication"}'
 
 # Or run as a persistent MCP daemon
-./qb-context -repo /path/to/your/project
+./context-mcp -repo /path/to/your/project
 ```
 
 ---
@@ -51,22 +56,22 @@ go build -tags "fts5" -o qb-context ./cmd/qb-context
 ### Prerequisites
 
 - Go 1.24+ with CGO enabled (required for SQLite FTS5)
-- A C compiler (gcc/clang) — needed by `go-sqlite3`
+- A C compiler (gcc/clang) -- needed by `go-sqlite3`
 
 ### Build from Source
 
 ```bash
 git clone https://github.com/maplenk/context-mcp.git
-cd qb-context
-go build -tags "fts5" -o qb-context ./cmd/qb-context
+cd context-mcp
+go build -tags "fts5" -o context-mcp ./cmd/qb-context
 ```
 
-The `-tags "fts5"` flag is **required** — it enables SQLite full-text search.
+The `-tags "fts5"` flag is **required** -- it enables SQLite full-text search.
 
 ### Verify
 
 ```bash
-./qb-context cli --list
+./context-mcp cli --list
 ```
 
 Expected output:
@@ -87,6 +92,9 @@ detect_changes             Detects changed symbols since a git ref.
 get_architecture_summary   Comprehensive architecture overview with communities and hubs.
 explore                    Explores codebase by searching for a symbol with optional deps.
 understand                 Deep symbol understanding with callers, callees, and PageRank.
+assemble_context           Token-budgeted context assembly with ranked code snippets.
+checkpoint_context         Create a named checkpoint of the current index state.
+read_delta                 Compare current index against a named checkpoint.
 ```
 
 ---
@@ -96,7 +104,7 @@ understand                 Deep symbol understanding with callers, callees, and 
 The daemon runs as an MCP server over stdio. It indexes your repo on startup, watches for file changes, and serves tool requests.
 
 ```bash
-./qb-context -repo /path/to/your/project
+./context-mcp -repo /path/to/your/project
 ```
 
 On startup it will:
@@ -108,7 +116,7 @@ On startup it will:
 5. Start watching for file changes (incremental re-indexing)
 6. Listen for MCP JSON-RPC requests on stdin
 
-The SQLite database is stored at `<repo>/.qb-context/index.db` by default.
+The SQLite database is stored at `<repo>/.context-mcp/index.db` by default.
 
 ### Stopping
 
@@ -123,13 +131,13 @@ Use the `cli` subcommand to invoke any MCP tool directly from the terminal. This
 ### Syntax
 
 ```bash
-./qb-context [flags] cli <tool_name> [json_args]
+./context-mcp [flags] cli <tool_name> [json_args]
 ```
 
 ### List Available Tools
 
 ```bash
-./qb-context cli --list
+./context-mcp cli --list
 ```
 
 ### Examples
@@ -137,37 +145,37 @@ Use the `cli` subcommand to invoke any MCP tool directly from the terminal. This
 **Search for code related to "payment processing":**
 
 ```bash
-./qb-context -repo . cli context '{"query": "payment processing", "limit": 5}'
+./context-mcp -repo . cli context '{"query": "payment processing", "limit": 5}'
 ```
 
 **Analyze the blast radius of a symbol:**
 
 ```bash
-./qb-context -repo . cli impact '{"symbol_id": "handlePayment", "depth": 3}'
+./context-mcp -repo . cli impact '{"symbol_id": "handlePayment", "depth": 3}'
 ```
 
 **Read the source code of a function:**
 
 ```bash
-./qb-context -repo . cli read_symbol '{"symbol_id": "ParseFile"}'
+./context-mcp -repo . cli read_symbol '{"symbol_id": "ParseFile"}'
 ```
 
 **Run a diagnostic SQL query:**
 
 ```bash
-./qb-context -repo . cli query '{"sql": "SELECT symbol_name, file_path FROM nodes WHERE node_type = 1 LIMIT 10"}'
+./context-mcp -repo . cli query '{"sql": "SELECT symbol_name, file_path FROM nodes WHERE node_type = 1 LIMIT 10"}'
 ```
 
 **Trigger a full re-index:**
 
 ```bash
-./qb-context -repo . cli index '{}'
+./context-mcp -repo . cli index '{}'
 ```
 
 **View architecture communities:**
 
 ```bash
-./qb-context -repo . cli context '{"query": "_", "mode": "architecture"}'
+./context-mcp -repo . cli context '{"query": "_", "mode": "architecture"}'
 ```
 
 > All output is JSON printed to stdout. Logs go to stderr.
@@ -176,7 +184,7 @@ Use the `cli` subcommand to invoke any MCP tool directly from the terminal. This
 
 ## MCP Tools Reference
 
-### `context` — Search & Discover Code
+### `context` -- Search & Discover Code
 
 Discovers relevant code symbols using multi-signal ranked search. Combines lexical search (FTS5/BM25), semantic similarity, graph-based PageRank, betweenness centrality, and in-degree authority into a composite score.
 
@@ -184,11 +192,11 @@ Discovers relevant code symbols using multi-signal ranked search. Combines lexic
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `query` | string | yes | — | Natural language or keyword query |
+| `query` | string | yes | -- | Natural language or keyword query |
 | `limit` | integer | no | 10 | Max results to return |
 | `mode` | string | no | `"search"` | `"search"` for hybrid search, `"architecture"` for community detection |
 | `max_per_file` | integer | no | 3 | Maximum results per unique file path |
-| `active_files` | string[] | no | — | File paths the developer is currently editing for PPR personalization |
+| `active_files` | string[] | no | -- | File paths the developer is currently editing for PPR personalization |
 
 **Search mode example:**
 
@@ -210,7 +218,7 @@ Returns ranked results with composite scores. If architecture documents (ARCHITE
 }
 ```
 
-Returns Louvain community clusters — groups of tightly coupled code symbols — along with a modularity score. Useful for understanding domain boundaries and component coupling.
+Returns Louvain community clusters -- groups of tightly coupled code symbols -- along with a modularity score. Useful for understanding domain boundaries and component coupling.
 
 **Response (architecture mode):**
 
@@ -228,7 +236,7 @@ Returns Louvain community clusters — groups of tightly coupled code symbols �
 
 ---
 
-### `impact` — Blast Radius Analysis
+### `impact` -- Blast Radius Analysis
 
 Traces all downstream dependents of a symbol via BFS graph traversal and classifies them by risk level based on distance.
 
@@ -236,7 +244,7 @@ Traces all downstream dependents of a symbol via BFS graph traversal and classif
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `symbol_id` | string | yes | — | Symbol name or hash ID |
+| `symbol_id` | string | yes | -- | Symbol name or hash ID |
 | `depth` | integer | no | 5 | Max BFS traversal depth |
 
 **Example:**
@@ -261,7 +269,7 @@ Traces all downstream dependents of a symbol via BFS graph traversal and classif
   "medium_risk": [...],
   "low_risk": [...],
   "affected_tests": [...],
-  "summary": "Symbol has betweenness 0.73 — 3 direct dependents, 12 total affected, 2 tests impacted"
+  "summary": "Symbol has betweenness 0.73 -- 3 direct dependents, 12 total affected, 2 tests impacted"
 }
 ```
 
@@ -269,7 +277,7 @@ Traces all downstream dependents of a symbol via BFS graph traversal and classif
 
 | Hop | Risk Level |
 |-----|-----------|
-| 1 | CRITICAL — direct dependents |
+| 1 | CRITICAL -- direct dependents |
 | 2 | HIGH |
 | 3 | MEDIUM |
 | 4+ | LOW |
@@ -278,15 +286,15 @@ The `risk_score` is the betweenness centrality of the target symbol (0-1). Highe
 
 ---
 
-### `read_symbol` — Read Source Code
+### `read_symbol` -- Read Source Code
 
-Retrieves the exact source code of a symbol by reading the specific byte range from disk. No grep, no scanning — precise extraction.
+Retrieves the exact source code of a symbol by reading the specific byte range from disk. No grep, no scanning -- precise extraction.
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `symbol_id` | string | yes | — | Symbol name or hash ID |
+| `symbol_id` | string | yes | -- | Symbol name or hash ID |
 
 **Example:**
 
@@ -313,7 +321,7 @@ Accepts either the symbol name (e.g., `"ParseFile"`) or the full SHA-256 hash ID
 
 ---
 
-### `query` — Raw SQL
+### `query` -- Raw SQL
 
 Executes a read-only SQL query against the structural database. Useful for diagnostics and custom analysis.
 
@@ -321,7 +329,7 @@ Executes a read-only SQL query against the structural database. Useful for diagn
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `sql` | string | yes | — | A `SELECT` query |
+| `sql` | string | yes | -- | A `SELECT` query |
 
 **Example queries:**
 
@@ -364,7 +372,7 @@ SELECT project, source_hash FROM project_summaries
 
 ---
 
-### `index` — Re-index Repository
+### `index` -- Re-index Repository
 
 Triggers a full re-index of the repository. The daemon also indexes automatically on startup and on file changes, so manual re-indexing is rarely needed.
 
@@ -372,7 +380,7 @@ Triggers a full re-index of the repository. The daemon also indexes automaticall
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `path` | string | no | — | Optional: specific path to re-index (file or directory) |
+| `path` | string | no | -- | Optional: specific path to re-index (file or directory) |
 
 **Example:**
 
@@ -382,7 +390,7 @@ Triggers a full re-index of the repository. The daemon also indexes automaticall
 
 ---
 
-### `health` — System Health Status
+### `health` -- System Health Status
 
 Returns system health status including uptime, indexed file count, node/edge counts, and database size. Takes no parameters.
 
@@ -409,7 +417,7 @@ Returns system health status including uptime, indexed file count, node/edge cou
 
 ---
 
-### `trace_call_path` — Trace Call Paths
+### `trace_call_path` -- Trace Call Paths
 
 Traces call paths between two symbols. Useful for understanding how control flows from one function to another through the dependency graph.
 
@@ -417,8 +425,8 @@ Traces call paths between two symbols. Useful for understanding how control flow
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `from` | string | yes | — | Source symbol name or ID |
-| `to` | string | yes | — | Target symbol name or ID |
+| `from` | string | yes | -- | Source symbol name or ID |
+| `to` | string | yes | -- | Target symbol name or ID |
 | `max_depth` | integer | no | 10 | Maximum traversal depth |
 
 **Example:**
@@ -433,7 +441,7 @@ Traces call paths between two symbols. Useful for understanding how control flow
 
 ---
 
-### `get_key_symbols` — Top Symbols by Centrality
+### `get_key_symbols` -- Top Symbols by Centrality
 
 Returns the most important symbols in the codebase ranked by centrality metrics. Useful for identifying core abstractions and architectural hotspots.
 
@@ -442,7 +450,7 @@ Returns the most important symbols in the codebase ranked by centrality metrics.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `limit` | integer | no | 20 | Maximum number of symbols to return |
-| `file_filter` | string | no | — | Optional file path prefix to filter results |
+| `file_filter` | string | no | -- | Optional file path prefix to filter results |
 
 **Example:**
 
@@ -455,7 +463,7 @@ Returns the most important symbols in the codebase ranked by centrality metrics.
 
 ---
 
-### `search_code` — Regex Source Search
+### `search_code` -- Regex Source Search
 
 Performs regex search across indexed source files. Returns matching lines with file paths and line numbers.
 
@@ -463,8 +471,8 @@ Performs regex search across indexed source files. Returns matching lines with f
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `pattern` | string | yes | — | Regex pattern to search for |
-| `file_filter` | string | no | — | Optional glob pattern to filter files (e.g. `"*.go"`) |
+| `pattern` | string | yes | -- | Regex pattern to search for |
+| `file_filter` | string | no | -- | Optional glob pattern to filter files (e.g. `"*.go"`) |
 | `limit` | integer | no | 20 | Maximum number of results |
 
 **Example:**
@@ -479,7 +487,7 @@ Performs regex search across indexed source files. Returns matching lines with f
 
 ---
 
-### `detect_changes` — Changed Symbol Detection
+### `detect_changes` -- Changed Symbol Detection
 
 Detects symbols that have changed since a given git ref. Useful for understanding what functions/classes were modified in recent commits or compared to a branch.
 
@@ -487,8 +495,8 @@ Detects symbols that have changed since a given git ref. Useful for understandin
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `since` | string | yes | — | Git ref to compare against (e.g. `"HEAD~5"`, `"main"`, a commit SHA) |
-| `path` | string | no | — | Optional path filter to restrict detection scope |
+| `since` | string | yes | -- | Git ref to compare against (e.g. `"HEAD~5"`, `"main"`, a commit SHA) |
+| `path` | string | no | -- | Optional path filter to restrict detection scope |
 
 **Example:**
 
@@ -501,7 +509,7 @@ Detects symbols that have changed since a given git ref. Useful for understandin
 
 ---
 
-### `get_architecture_summary` — Architecture Overview
+### `get_architecture_summary` -- Architecture Overview
 
 Returns a comprehensive architecture overview including community clusters, entry points, hub nodes, and connector symbols. Provides a high-level map of the codebase structure.
 
@@ -521,7 +529,7 @@ Returns a comprehensive architecture overview including community clusters, entr
 
 ---
 
-### `explore` — Explore Codebase
+### `explore` -- Explore Codebase
 
 Explores the codebase by searching for a symbol with optional dependency analysis. A good starting point when you want to find a symbol and optionally see what it depends on.
 
@@ -529,7 +537,7 @@ Explores the codebase by searching for a symbol with optional dependency analysi
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `symbol` | string | yes | — | Symbol name to search for |
+| `symbol` | string | yes | -- | Symbol name to search for |
 | `include_deps` | boolean | no | false | Whether to include dependency analysis |
 | `depth` | integer | no | 2 | Dependency traversal depth (when `include_deps` is true) |
 
@@ -545,7 +553,7 @@ Explores the codebase by searching for a symbol with optional dependency analysi
 
 ---
 
-### `understand` — Deep Symbol Understanding
+### `understand` -- Deep Symbol Understanding
 
 Provides deep understanding of a symbol using 3-tier resolution (exact match, fuzzy match, search fallback) plus callers, callees, PageRank score, and community membership. The most comprehensive single-symbol analysis tool.
 
@@ -553,7 +561,7 @@ Provides deep understanding of a symbol using 3-tier resolution (exact match, fu
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `symbol` | string | yes | — | Symbol name to analyze |
+| `symbol` | string | yes | -- | Symbol name to analyze |
 
 **Example:**
 
@@ -565,24 +573,122 @@ Provides deep understanding of a symbol using 3-tier resolution (exact match, fu
 
 ---
 
+### `assemble_context` -- Token-Budgeted Context Assembly
+
+Returns ranked code snippets fitted within a token budget. Use when you need to gather context efficiently within a token limit. Supports multiple output fidelities from compact summaries to full source.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | yes | -- | Search query to find relevant code |
+| `budget_tokens` | integer | no | 4000 | Maximum token budget |
+| `mode` | string | no | `"snippets"` | Output fidelity: `summary`, `signatures`, `snippets`, `bundle`, or `full` |
+| `active_files` | string[] | no | -- | File paths currently being edited |
+| `max_per_file` | integer | no | 2 | Maximum results per file |
+| `include_neighbors` | boolean | no | false | Include callers/callees of top results |
+
+**Example:**
+
+```json
+{
+  "query": "payment processing",
+  "budget_tokens": 4000,
+  "mode": "snippets"
+}
+```
+
+---
+
+### `checkpoint_context` -- Create Index Checkpoint
+
+Creates a named checkpoint of the current index state. Use with `read_delta` to see what changed since this point.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `name` | string | no | (auto-generated) | Checkpoint name |
+
+**Example:**
+
+```json
+{
+  "name": "before-refactor"
+}
+```
+
+---
+
+### `read_delta` -- Compare Against Checkpoint
+
+Compares the current index state against a named checkpoint. Shows added, modified, and deleted symbols since the checkpoint was created.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `since` | string | yes | -- | Checkpoint name to compare against |
+| `path` | string | no | -- | Filter by file path prefix |
+| `limit` | integer | no | 20 | Maximum items per change type |
+
+**Example:**
+
+```json
+{
+  "since": "before-refactor",
+  "path": "internal/",
+  "limit": 10
+}
+```
+
+---
+
+## MCP Prompts
+
+context-mcp provides 5 prompt templates that orchestrate multi-tool workflows:
+
+| Prompt | Description |
+|--------|-------------|
+| `review_changes` | Review recent code changes and their impact (args: `since`) |
+| `trace_impact` | Trace the blast radius of changes to a symbol (args: `symbol`, required) |
+| `prepare_fix_context` | Gather context needed to fix a bug (args: `description` required, `file` optional) |
+| `onboard_repo` | Get oriented in the codebase -- architecture, key symbols, entry points |
+| `collect_minimal_context` | Collect minimum context for a task within a token budget (args: `task` required, `budget` optional) |
+
+---
+
+## MCP Resources
+
+context-mcp exposes 4 read-only resources for live index data:
+
+| Resource URI | Description |
+|-------------|-------------|
+| `context-mcp://repo_summary` | High-level summary: repo root, node/edge counts, active profile |
+| `context-mcp://index_stats` | Detailed statistics: node counts by type, unique files, top files by node count |
+| `context-mcp://changed_symbols` | Symbols in files changed since the last commit |
+| `context-mcp://hot_paths` | Top 20 symbols by PageRank and betweenness centrality |
+
+---
+
 ## Connecting to Claude Desktop
 
-Add qb-context to your Claude Desktop MCP configuration:
+Add context-mcp to your Claude Desktop MCP configuration:
 
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
-    "qb-context": {
-      "command": "/absolute/path/to/qb-context",
+    "context-mcp": {
+      "command": "/absolute/path/to/context-mcp",
       "args": ["-repo", "/absolute/path/to/your/project"]
     }
   }
 }
 ```
 
-Restart Claude Desktop after editing the config. All 13 tools will appear in Claude's tool list.
+Restart Claude Desktop after editing the config. All 16 tools will appear in Claude's tool list.
 
 ### Connecting to Claude Code
 
@@ -591,8 +697,8 @@ Add to your project's `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "qb-context": {
-      "command": "/absolute/path/to/qb-context",
+    "context-mcp": {
+      "command": "/absolute/path/to/context-mcp",
       "args": ["-repo", "."]
     }
   }
@@ -608,7 +714,7 @@ All options are set via CLI flags:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-repo` | `.` (current directory) | Path to the repository root |
-| `-db` | `.qb-context/index.db` | Path to the SQLite database |
+| `-db` | `.context-mcp/index.db` | Path to the SQLite database |
 | `-debounce` | `500ms` | Filesystem event debounce interval |
 | `-max-depth` | `5` | Default max BFS depth for impact analysis |
 | `-batch-size` | `32` | Embedding batch size |
@@ -623,12 +729,12 @@ All options are set via CLI flags:
 **Example with custom settings:**
 
 ```bash
-./qb-context -repo ~/projects/my-app -workers 8 -debounce 1s
+./context-mcp -repo ~/projects/my-app -workers 8 -debounce 1s
 ```
 
 ### Local Embedding Models
 
-qb-context supports three embedding backends beyond the built-in TF-IDF fallback. Priority order: ONNX > Ollama > llama.cpp > TF-IDF.
+context-mcp supports three embedding backends beyond the built-in TF-IDF fallback. Priority order: ONNX > Ollama > llama.cpp > TF-IDF.
 
 **Option 1: Pre-quantized ONNX model (recommended for best quality)**
 
@@ -636,29 +742,29 @@ Download the pre-quantized Jina Code model (~488MB) with the provided script:
 
 ```bash
 ./scripts/download-model.sh                        # downloads to models/jina-code-int8/
-./qb-context -onnx-model models/jina-code-int8 -onnx-lib /path/to/libonnxruntime.dylib
+./context-mcp -onnx-model models/jina-code-int8 -onnx-lib /path/to/libonnxruntime.dylib
 ```
 
 Or export manually via `optimum-cli` (see the ONNX model export documentation).
 
 **Option 2: Ollama (easiest setup, no compilation needed)**
 
-Install [Ollama](https://ollama.com), pull an embedding model, and point qb-context at it:
+Install [Ollama](https://ollama.com), pull an embedding model, and point context-mcp at it:
 
 ```bash
 ollama pull nomic-embed-code
-./qb-context -ollama-endpoint http://localhost:11434 -ollama-model nomic-embed-code -embedding-dim 768
+./context-mcp -ollama-endpoint http://localhost:11434 -ollama-model nomic-embed-code -embedding-dim 768
 ```
 
 Supported models include `nomic-embed-code` (768d, code-optimized), `nomic-embed-text` (768d), `mxbai-embed-large` (1024d), and `all-minilm` (384d).
 
 **Option 3: llama.cpp server (GGUF models, native batching)**
 
-Start `llama-server` with an embedding model, then point qb-context at it:
+Start `llama-server` with an embedding model, then point context-mcp at it:
 
 ```bash
 llama-server -m nomic-embed-code-q8_0.gguf --embedding --port 8080
-./qb-context -llamacpp-endpoint http://localhost:8080 -embedding-dim 768
+./context-mcp -llamacpp-endpoint http://localhost:8080 -embedding-dim 768
 ```
 
 llama.cpp supports native batch embedding and GGUF quantized models (smaller than ONNX).
@@ -669,14 +775,14 @@ llama.cpp supports native batch embedding and GGUF quantized models (smaller tha
 
 ## How Indexing Works
 
-1. **File discovery** — Walks the repo, respecting `.gitignore` and excluded dirs (`.git`, `.qb-context`)
-2. **AST parsing** — Extracts functions, classes, structs, and methods. Builds call/import/implements edges
-3. **Storage** — Upserts nodes and edges into SQLite with FTS5 full-text index
-4. **Embeddings** — Generates vector embeddings for each symbol (TF-IDF default; optional ONNX via `--onnx-model`)
-5. **Graph build** — Constructs a directed dependency graph in memory using gonum
-6. **Centrality** — Computes betweenness centrality (Brandes' algorithm) and stores scores
-7. **ADR discovery** — Finds and stores architecture documents (ARCHITECTURE.md, ADR.md, DESIGN.md, adr/ directories)
-8. **Watch** — Monitors filesystem for changes and incrementally re-indexes modified files
+1. **File discovery** -- Walks the repo, respecting `.gitignore` and excluded dirs (`.git`, `.context-mcp`)
+2. **AST parsing** -- Extracts functions, classes, structs, and methods. Builds call/import/implements edges
+3. **Storage** -- Upserts nodes and edges into SQLite with FTS5 full-text index
+4. **Embeddings** -- Generates vector embeddings for each symbol (TF-IDF default; optional ONNX via `--onnx-model`)
+5. **Graph build** -- Constructs a directed dependency graph in memory using gonum
+6. **Centrality** -- Computes betweenness centrality (Brandes' algorithm) and stores scores
+7. **ADR discovery** -- Finds and stores architecture documents (ARCHITECTURE.md, ADR.md, DESIGN.md, adr/ directories)
+8. **Watch** -- Monitors filesystem for changes and incrementally re-indexes modified files
 
 ### Search Ranking
 
@@ -697,23 +803,23 @@ All signals are normalized to [0, 1] before weighting. FTS5 queries are enhanced
 
 | Language | Parser | Accuracy |
 |----------|--------|----------|
-| Go | Native `go/ast` | High — full AST walk |
-| JavaScript | Tree-sitter + regex | High — tree-sitter for declarations, regex for call extraction |
-| TypeScript | Tree-sitter + regex | High — tree-sitter for declarations, regex for call extraction |
-| PHP | Tree-sitter + regex | High — tree-sitter for declarations, regex for call extraction |
+| Go | Native `go/ast` | High -- full AST walk |
+| JavaScript | Tree-sitter + regex | High -- tree-sitter for declarations, regex for call extraction |
+| TypeScript | Tree-sitter + regex | High -- tree-sitter for declarations, regex for call extraction |
+| PHP | Tree-sitter + regex | High -- tree-sitter for declarations, regex for call extraction |
 
 ---
 
 ## Troubleshooting
 
 **Build fails with "undefined: sqlite3"**
-Ensure CGO is enabled: `CGO_ENABLED=1 go build -tags "fts5" ./cmd/qb-context`
+Ensure CGO is enabled: `CGO_ENABLED=1 go build -tags "fts5" -o context-mcp ./cmd/qb-context`
 
 **No search results**
 Run `cli query '{"sql": "SELECT COUNT(*) FROM nodes"}'` to verify the index has data. If empty, check that your repo contains supported file types (.go, .js, .ts, .php).
 
 **Database locked errors**
-qb-context uses WAL mode for concurrent reads. If another process holds the database, wait or delete the `.qb-context/index.db` file and re-index.
+context-mcp uses WAL mode for concurrent reads. If another process holds the database, wait or delete the `.context-mcp/index.db` file and re-index.
 
 **Large repos are slow to index**
 Increase the worker count: `-workers 8`. The initial index is the slowest; subsequent file changes are indexed incrementally.

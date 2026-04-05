@@ -10,12 +10,14 @@ A local-first MCP daemon that gives LLM coding agents surgical, token-efficient 
 
 ## The Problem
 
-LLM coding agents waste tokens brute-forcing through grep and glob results with no structural understanding of the codebase. They read entire files hoping to stumble on the right function, missing cross-file relationships and architectural context entirely. context-mcp builds a live AST graph and semantic index of your codebase and exposes 13 MCP tools for ranked, context-aware code discovery. Single binary, zero cloud dependencies, local-first.
+LLM coding agents waste tokens brute-forcing through grep and glob results with no structural understanding of the codebase. They read entire files hoping to stumble on the right function, missing cross-file relationships and architectural context entirely. context-mcp builds a live AST graph and semantic index of your codebase and exposes 16 MCP tools, 5 prompt templates, and 4 resources for ranked, context-aware code discovery. Single binary, zero cloud dependencies, local-first.
 
 ## Key Features
 
 - **Hybrid ranked search** -- PPR + BM25 + Betweenness Centrality + Semantic Similarity with optimized weights
-- **13 MCP tools**: context, impact, read\_symbol, query, index, health, trace\_call\_path, get\_key\_symbols, search\_code, detect\_changes, get\_architecture\_summary, explore, understand
+- **16 MCP tools**: context, impact, read\_symbol, query, index, health, trace\_call\_path, get\_key\_symbols, search\_code, detect\_changes, get\_architecture\_summary, explore, understand, assemble\_context, checkpoint\_context, read\_delta
+- **5 MCP prompts**: review\_changes, trace\_impact, prepare\_fix\_context, onboard\_repo, collect\_minimal\_context
+- **4 MCP resources**: repo\_summary, index\_stats, changed\_symbols, hot\_paths
 - **Multi-language AST parsing**: Go (native go/ast), JavaScript, TypeScript, PHP (tree-sitter)
 - **Graph analysis**: Louvain community detection, betweenness centrality, blast radius, Personalized PageRank
 - **Incremental indexing** with filesystem watching (.gitignore-aware, hot-reload)
@@ -131,6 +133,9 @@ Add to your project's `.mcp.json`:
 | `get_architecture_summary` | Architecture overview with community clusters, hubs, and entry points |
 | `explore` | Searches for a symbol with optional dependency analysis |
 | `understand` | Deep symbol analysis with callers, callees, PageRank, and community membership |
+| `assemble_context` | Token-budgeted context assembly -- returns ranked code snippets fitted within a token budget |
+| `checkpoint_context` | Creates a named checkpoint of the current index state |
+| `read_delta` | Compares current index state against a named checkpoint -- shows added, modified, and deleted symbols |
 
 For complete documentation with parameters and examples, see [USAGE.md](USAGE.md).
 
@@ -191,7 +196,7 @@ All options are set via CLI flags:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-repo` | `.` | Path to the repository root |
-| `-db` | `.qb-context/index.db` | Path to the SQLite database |
+| `-db` | `.context-mcp/index.db` | Path to the SQLite database |
 | `-debounce` | `500ms` | Filesystem event debounce interval |
 | `-max-depth` | `5` | Default max BFS depth for impact analysis |
 | `-batch-size` | `32` | Embedding batch size |
@@ -199,7 +204,7 @@ All options are set via CLI flags:
 | `-onnx-model` | (empty) | Path to ONNX model directory (enables neural embeddings) |
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
 | `-embedding-dim` | `384` | Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896) |
-| `-profile` | `core` | Tool profile for MCP SDK: `core` (6 tools), `extended` (10), or `full` (13) |
+| `-profile` | `core` | Tool profile for MCP SDK: `core` (6 tools), `extended` (13), or `full` (16) |
 | `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
 
 ## Development

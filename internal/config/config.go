@@ -62,7 +62,7 @@ type Config struct {
 
 	// Profile selects which tools are registered for MCP SDK mode.
 	// Valid values: "core" (6 tools), "extended" (13 tools), "full" (all 16).
-	// CLI mode always registers all 14 tools regardless of profile.
+	// CLI mode always registers all 16 tools regardless of profile.
 	Profile string
 
 	// OllamaEndpoint is the Ollama API endpoint (e.g., http://localhost:11434).

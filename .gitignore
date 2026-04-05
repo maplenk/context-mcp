@@ -28,6 +28,7 @@ Thumbs.db
 .env
 
 # Project index database
+.context-mcp/
 .qb-context/
 
 # Agent tool configs and worktrees
