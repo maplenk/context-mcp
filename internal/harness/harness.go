@@ -42,6 +42,7 @@ type InstallOpts struct {
 // UninstallOpts contains options for uninstalling.
 type UninstallOpts struct {
 	Client Client
+	Scope  string // optional; if empty, uses claude CLI default
 }
 
 // PrintConfigOpts contains options for printing the config snippet.
@@ -339,7 +340,7 @@ func tomlStringArray(ss []string) string {
 func Uninstall(opts UninstallOpts) (string, error) {
 	switch opts.Client {
 	case ClientClaudeCode:
-		return uninstallClaudeCode()
+		return uninstallClaudeCode(opts)
 	case ClientCodex:
 		return uninstallCodex()
 	default:
@@ -347,10 +348,15 @@ func Uninstall(opts UninstallOpts) (string, error) {
 	}
 }
 
-func uninstallClaudeCode() (string, error) {
+func uninstallClaudeCode(opts UninstallOpts) (string, error) {
 	claudePath, lookErr := exec.LookPath("claude")
 	if lookErr == nil {
-		cmd := exec.Command(claudePath, "mcp", "remove", "context-mcp")
+		cmdArgs := []string{"mcp", "remove"}
+		if opts.Scope != "" {
+			cmdArgs = append(cmdArgs, "--scope", opts.Scope)
+		}
+		cmdArgs = append(cmdArgs, "context-mcp")
+		cmd := exec.Command(claudePath, cmdArgs...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("claude mcp remove failed: %w\n%s", err, string(out))
@@ -764,6 +770,33 @@ func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 		repoPath = repoRoot
 	}
 	checks = append(checks, doctorRepoPaths(prefix, repoPath)...)
+
+	// Check project-level config files for context-mcp entry.
+	if repoPath != "" {
+		projectConfigs := []string{
+			filepath.Join(repoPath, ".mcp.json"),
+			filepath.Join(repoPath, ".claude", "settings.json"),
+			filepath.Join(repoPath, ".claude", "settings.local.json"),
+		}
+		for _, pc := range projectConfigs {
+			pcData, err := os.ReadFile(pc)
+			if err != nil {
+				continue // file doesn't exist, skip
+			}
+			var pcRoot map[string]any
+			if err := json.Unmarshal(pcData, &pcRoot); err != nil {
+				continue
+			}
+			pcServers, _ := pcRoot["mcpServers"].(map[string]any)
+			if _, ok := pcServers["context-mcp"]; ok {
+				checks = append(checks, DoctorCheck{
+					Name:    prefix + "/project-config",
+					Passed:  true,
+					Message: fmt.Sprintf("context-mcp also configured in project file: %s", pc),
+				})
+			}
+		}
+	}
 
 	return checks
 }

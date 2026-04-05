@@ -1519,7 +1519,7 @@ func (e *envFlag) Set(val string) error {
 func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
-	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
+	profile := fs.String("profile", "core", "Tool profile: core (6 tools), extended (13), or full (16)")
 	repo := fs.String("repo", ".", "Repository root path")
 	force := fs.Bool("force", false, "Overwrite existing configuration")
 	scope := fs.String("scope", "", "Install scope: user (default), local, project (Claude Code only)")
@@ -1567,6 +1567,7 @@ func runInstall(args []string) {
 func runUninstall(args []string) {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
+	scope := fs.String("scope", "", "Claude Code scope: user or project (optional)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
@@ -1575,6 +1576,7 @@ func runUninstall(args []string) {
 
 	msg, err := harness.Uninstall(harness.UninstallOpts{
 		Client: harness.Client(*client),
+		Scope:  *scope,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1631,7 +1633,7 @@ func runDoctor(args []string) {
 func runPrintConfig(args []string) {
 	fs := flag.NewFlagSet("print-config", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
-	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
+	profile := fs.String("profile", "core", "Tool profile: core (6 tools), extended (13), or full (16)")
 	repo := fs.String("repo", ".", "Repository root path")
 	scope := fs.String("scope", "", "Install scope: user (default), local, project (Claude Code only)")
 	transport := fs.String("transport", "", "Transport: stdio (default), http, sse")
