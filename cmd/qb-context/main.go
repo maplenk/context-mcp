@@ -1471,18 +1471,58 @@ func validateProfile(p string) {
 	}
 }
 
+// validateTransport checks --transport flag value.
+func validateTransport(t string) {
+	switch t {
+	case "", "stdio", "http", "sse":
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid --transport %q, must be stdio, http, or sse\n", t)
+		os.Exit(1)
+	}
+}
+
+// envFlag collects repeated --env KEY=VALUE flags into a map.
+type envFlag struct {
+	vals map[string]string
+}
+
+func (e *envFlag) String() string { return "" }
+func (e *envFlag) Set(val string) error {
+	if e.vals == nil {
+		e.vals = make(map[string]string)
+	}
+	parts := strings.SplitN(val, "=", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid env format %q, expected KEY=VALUE", val)
+	}
+	e.vals[parts[0]] = parts[1]
+	return nil
+}
+
 func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
 	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
 	repo := fs.String("repo", ".", "Repository root path")
 	force := fs.Bool("force", false, "Overwrite existing configuration")
+	scope := fs.String("scope", "", "Install scope: user (default), local, project (Claude Code only)")
+	transport := fs.String("transport", "", "Transport: stdio (default), http, sse")
+	url := fs.String("url", "", "HTTP/SSE endpoint URL (required when transport is http or sse)")
+	var envVars envFlag
+	fs.Var(&envVars, "env", "Environment variable KEY=VALUE (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
 	validateClient(*client, true)
 	validateProfile(*profile)
+	validateTransport(*transport)
+
+	// Validate URL requirement for remote transports.
+	if (*transport == "http" || *transport == "sse") && *url == "" {
+		fmt.Fprintf(os.Stderr, "Error: --url is required when --transport is %s\n", *transport)
+		os.Exit(1)
+	}
 
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {
@@ -1491,10 +1531,14 @@ func runInstall(args []string) {
 	}
 
 	msg, err := harness.Install(harness.InstallOpts{
-		Client:   harness.Client(*client),
-		Profile:  *profile,
-		RepoRoot: absRepo,
-		Force:    *force,
+		Client:    harness.Client(*client),
+		Profile:   *profile,
+		RepoRoot:  absRepo,
+		Force:     *force,
+		Scope:     *scope,
+		Transport: *transport,
+		URL:       *url,
+		EnvVars:   envVars.vals,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1561,12 +1605,18 @@ func runPrintConfig(args []string) {
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
 	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
 	repo := fs.String("repo", ".", "Repository root path")
+	scope := fs.String("scope", "", "Install scope: user (default), local, project (Claude Code only)")
+	transport := fs.String("transport", "", "Transport: stdio (default), http, sse")
+	url := fs.String("url", "", "HTTP/SSE endpoint URL (required when transport is http or sse)")
+	var envVars envFlag
+	fs.Var(&envVars, "env", "Environment variable KEY=VALUE (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
 	validateClient(*client, true)
 	validateProfile(*profile)
+	validateTransport(*transport)
 
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {
@@ -1575,9 +1625,13 @@ func runPrintConfig(args []string) {
 	}
 
 	output, err := harness.PrintConfig(harness.PrintConfigOpts{
-		Client:   harness.Client(*client),
-		Profile:  *profile,
-		RepoRoot: absRepo,
+		Client:    harness.Client(*client),
+		Profile:   *profile,
+		RepoRoot:  absRepo,
+		Scope:     *scope,
+		Transport: *transport,
+		URL:       *url,
+		EnvVars:   envVars.vals,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

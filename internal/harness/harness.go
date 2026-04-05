@@ -29,10 +29,14 @@ const (
 
 // InstallOpts contains options for installing context-mcp into a client.
 type InstallOpts struct {
-	Client   Client
-	Profile  string // core, extended, full
-	RepoRoot string // absolute path to repo
-	Force    bool   // overwrite existing config
+	Client    Client
+	Profile   string            // core, extended, full
+	RepoRoot  string            // absolute path to repo
+	Force     bool              // overwrite existing config
+	Scope     string            // "user" (default), "local", "project" — Claude Code only
+	Transport string            // "stdio" (default), "http", "sse"
+	URL       string            // HTTP/SSE endpoint URL (required when transport != stdio)
+	EnvVars   map[string]string // environment variables to pass to MCP server
 }
 
 // UninstallOpts contains options for uninstalling.
@@ -42,9 +46,13 @@ type UninstallOpts struct {
 
 // PrintConfigOpts contains options for printing the config snippet.
 type PrintConfigOpts struct {
-	Client   Client
-	Profile  string
-	RepoRoot string
+	Client    Client
+	Profile   string
+	RepoRoot  string
+	Scope     string            // "user" (default), "local", "project" — Claude Code only
+	Transport string            // "stdio" (default), "http", "sse"
+	URL       string            // HTTP/SSE endpoint URL
+	EnvVars   map[string]string // environment variables to pass to MCP server
 }
 
 // DoctorCheck represents a single diagnostic check result.
@@ -93,10 +101,56 @@ func buildArgs(opts InstallOpts) []string {
 	return args
 }
 
+// effectiveScope returns the scope to use, defaulting to "user" if empty.
+func effectiveScope(s string) string {
+	if s == "" {
+		return "user"
+	}
+	return s
+}
+
+// effectiveTransport returns the transport to use, defaulting to "stdio" if empty.
+func effectiveTransport(t string) string {
+	if t == "" {
+		return "stdio"
+	}
+	return t
+}
+
+// isRemoteTransport returns true for http and sse transports.
+func isRemoteTransport(t string) bool {
+	return t == "http" || t == "sse"
+}
+
+// sortedEnvKeys returns the keys of a map in sorted order for deterministic output.
+func sortedEnvKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	// sort
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[j] < keys[i] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	return keys
+}
+
 func installClaudeCode(opts InstallOpts) (string, error) {
-	bin, err := selfBinary()
-	if err != nil {
-		return "", err
+	transport := effectiveTransport(opts.Transport)
+	scope := effectiveScope(opts.Scope)
+	remote := isRemoteTransport(transport)
+
+	var bin string
+	if !remote {
+		var err error
+		bin, err = selfBinary()
+		if err != nil {
+			return "", err
+		}
 	}
 
 	claudePath, lookErr := exec.LookPath("claude")
@@ -105,14 +159,23 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 	if lookErr == nil {
 		cmdArgs := []string{
 			"mcp", "add",
-			"--transport", "stdio",
-			"--scope", "user",
+			"--transport", transport,
+			"--scope", scope,
 		}
 		if opts.Force {
 			cmdArgs = append(cmdArgs, "--force")
 		}
-		cmdArgs = append(cmdArgs, "context-mcp", "--", bin)
-		cmdArgs = append(cmdArgs, buildArgs(opts)...)
+		// Pass env vars via --env KEY=VALUE.
+		for _, k := range sortedEnvKeys(opts.EnvVars) {
+			cmdArgs = append(cmdArgs, "--env", k+"="+opts.EnvVars[k])
+		}
+		if remote {
+			cmdArgs = append(cmdArgs, "--url", opts.URL)
+			cmdArgs = append(cmdArgs, "context-mcp")
+		} else {
+			cmdArgs = append(cmdArgs, "context-mcp", "--", bin)
+			cmdArgs = append(cmdArgs, buildArgs(opts)...)
+		}
 
 		cmd := exec.Command(claudePath, cmdArgs...)
 		out, err := cmd.CombinedOutput()
@@ -147,10 +210,7 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 		return "", fmt.Errorf("context-mcp already configured in %s (use --force to overwrite)", cfgPath)
 	}
 
-	entry := map[string]any{
-		"command": bin,
-		"args":    buildArgs(opts),
-	}
+	entry := buildClaudeCodeJSONEntry(bin, transport, opts)
 	servers["context-mcp"] = entry
 	root["mcpServers"] = servers
 
@@ -164,10 +224,35 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 	return fmt.Sprintf("Installed by writing to %s", cfgPath), nil
 }
 
+// buildClaudeCodeJSONEntry builds the JSON entry for the Claude Code config file.
+func buildClaudeCodeJSONEntry(bin, transport string, opts InstallOpts) map[string]any {
+	entry := make(map[string]any)
+	if isRemoteTransport(transport) {
+		entry["url"] = opts.URL
+		entry["transport"] = transport
+	} else {
+		entry["command"] = bin
+		entry["args"] = buildArgs(opts)
+	}
+	if len(opts.EnvVars) > 0 {
+		env := make(map[string]any, len(opts.EnvVars))
+		for k, v := range opts.EnvVars {
+			env[k] = v
+		}
+		entry["env"] = env
+	}
+	return entry
+}
+
 func installCodex(opts InstallOpts) (string, error) {
-	bin, err := selfBinary()
-	if err != nil {
-		return "", err
+	transport := effectiveTransport(opts.Transport)
+	var bin string
+	if !isRemoteTransport(transport) {
+		var err error
+		bin, err = selfBinary()
+		if err != nil {
+			return "", err
+		}
 	}
 
 	home, err := os.UserHomeDir()
@@ -212,8 +297,26 @@ func installCodex(opts InstallOpts) (string, error) {
 }
 
 func buildCodexTOML(bin string, opts InstallOpts) string {
-	args := buildArgs(opts)
-	return fmt.Sprintf("[mcp_servers.context-mcp]\ncommand = %q\nargs = %s\n", bin, tomlStringArray(args))
+	transport := effectiveTransport(opts.Transport)
+	var b strings.Builder
+	b.WriteString("[mcp_servers.context-mcp]\n")
+
+	if isRemoteTransport(transport) {
+		b.WriteString(fmt.Sprintf("url = %q\n", opts.URL))
+	} else {
+		args := buildArgs(opts)
+		b.WriteString(fmt.Sprintf("command = %q\n", bin))
+		b.WriteString(fmt.Sprintf("args = %s\n", tomlStringArray(args)))
+	}
+
+	if len(opts.EnvVars) > 0 {
+		b.WriteString("\n[mcp_servers.context-mcp.env]\n")
+		for _, k := range sortedEnvKeys(opts.EnvVars) {
+			b.WriteString(fmt.Sprintf("%s = %q\n", k, opts.EnvVars[k]))
+		}
+	}
+
+	return b.String()
 }
 
 // tomlStringArray formats a Go string slice as a TOML inline array.
@@ -322,30 +425,25 @@ func uninstallCodex() (string, error) {
 	return fmt.Sprintf("Uninstalled from %s", cfgPath), nil
 }
 
-// removeTomlSection removes a [header] block and any nested subtables from
-// TOML content. For example, removing "mcp_servers.context-mcp" also removes
-// [mcp_servers.context-mcp.tools.context] and similar child sections.
+// removeTomlSection removes a [header] block and any sub-sections from TOML content.
+// For example, removing "mcp_servers.context-mcp" also removes
+// "[mcp_servers.context-mcp.env]" and similar child sections.
 // Trailing blank lines left by the removal are also cleaned.
 func removeTomlSection(content, section string) string {
 	header := "[" + section + "]"
-	childPrefix := "[" + section + "."
+	subPrefix := "[" + section + "."
 	lines := strings.Split(content, "\n")
 	var out []string
 	skipping := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == header {
+		if trimmed == header || strings.HasPrefix(trimmed, subPrefix) {
 			skipping = true
 			continue
 		}
 		if skipping {
-			if strings.HasPrefix(trimmed, "[") {
-				// Check if this is a child subtable of the removed section.
-				if strings.HasPrefix(trimmed, childPrefix) {
-					// Still a nested subtable — keep skipping.
-					continue
-				}
-				// Genuinely different section — stop skipping.
+			// Stop skipping at the next section header that is not a sub-section.
+			if strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, subPrefix) {
 				skipping = false
 				out = append(out, line)
 				continue
@@ -374,9 +472,13 @@ func removeTomlSection(content, section string) string {
 
 // PrintConfig returns the config snippet for manual installation.
 func PrintConfig(opts PrintConfigOpts) (string, error) {
-	bin, err := selfBinary()
-	if err != nil {
-		return "", err
+	var bin string
+	if !isRemoteTransport(effectiveTransport(opts.Transport)) {
+		var err error
+		bin, err = selfBinary()
+		if err != nil {
+			return "", err
+		}
 	}
 
 	switch opts.Client {
@@ -390,22 +492,37 @@ func PrintConfig(opts PrintConfigOpts) (string, error) {
 }
 
 func printConfigClaudeCode(bin string, opts PrintConfigOpts) string {
-	args := buildArgs(InstallOpts{RepoRoot: opts.RepoRoot, Profile: opts.Profile})
+	transport := effectiveTransport(opts.Transport)
+	scope := effectiveScope(opts.Scope)
+	remote := isRemoteTransport(transport)
+
+	installOpts := InstallOpts{
+		RepoRoot:  opts.RepoRoot,
+		Profile:   opts.Profile,
+		Transport: opts.Transport,
+		URL:       opts.URL,
+		EnvVars:   opts.EnvVars,
+	}
 
 	// Build the CLI command.
 	cmdParts := []string{
 		"claude", "mcp", "add",
-		"--transport", "stdio",
-		"--scope", "user",
-		"context-mcp", "--", bin,
+		"--transport", transport,
+		"--scope", scope,
 	}
-	cmdParts = append(cmdParts, args...)
+	for _, k := range sortedEnvKeys(opts.EnvVars) {
+		cmdParts = append(cmdParts, "--env", k+"="+opts.EnvVars[k])
+	}
+	if remote {
+		cmdParts = append(cmdParts, "--url", opts.URL, "context-mcp")
+	} else {
+		args := buildArgs(installOpts)
+		cmdParts = append(cmdParts, "context-mcp", "--", bin)
+		cmdParts = append(cmdParts, args...)
+	}
 
 	// Build the JSON snippet.
-	entry := map[string]any{
-		"command": bin,
-		"args":    args,
-	}
+	entry := buildClaudeCodeJSONEntry(bin, transport, installOpts)
 	snippet := map[string]any{
 		"mcpServers": map[string]any{
 			"context-mcp": entry,
@@ -423,9 +540,15 @@ func printConfigClaudeCode(bin string, opts PrintConfigOpts) string {
 }
 
 func printConfigCodex(bin string, opts PrintConfigOpts) string {
-	block := buildCodexTOML(bin, InstallOpts{RepoRoot: opts.RepoRoot, Profile: opts.Profile})
+	block := buildCodexTOML(bin, InstallOpts{
+		RepoRoot:  opts.RepoRoot,
+		Profile:   opts.Profile,
+		Transport: opts.Transport,
+		URL:       opts.URL,
+		EnvVars:   opts.EnvVars,
+	})
 	var b strings.Builder
-	b.WriteString("# Codex — TOML snippet for ~/.codex/config.toml:")
+	b.WriteString("# Codex — TOML snippet for ~/.codex/config.toml:\n")
 	b.WriteString(block)
 	return b.String()
 }
