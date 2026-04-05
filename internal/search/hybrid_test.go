@@ -1465,6 +1465,7 @@ func TestDetectQueryKind(t *testing.T) {
 // TestNodeTypeBoost verifies that nodeTypeBoost returns expected multipliers
 // for all query kind / node type combinations.
 func TestNodeTypeBoost(t *testing.T) {
+	cfg := DefaultConfig()
 	tests := []struct {
 		name     string
 		kind     queryKind
@@ -1472,20 +1473,20 @@ func TestNodeTypeBoost(t *testing.T) {
 		want     float64
 	}{
 		// Route kind
-		{"route+Route", queryKindRoute, types.NodeTypeRoute, 2.5},
-		{"route+Method", queryKindRoute, types.NodeTypeMethod, 1.3},
+		{"route+Route", queryKindRoute, types.NodeTypeRoute, cfg.RouteBoost},
+		{"route+Method", queryKindRoute, types.NodeTypeMethod, cfg.RouteMethodBoost},
 		{"route+Function", queryKindRoute, types.NodeTypeFunction, 1.0},
 		{"route+Class", queryKindRoute, types.NodeTypeClass, 1.0},
 		{"route+File", queryKindRoute, types.NodeTypeFile, 1.0},
 
 		// Class kind
-		{"class+Class", queryKindClass, types.NodeTypeClass, 1.5},
-		{"class+Interface", queryKindClass, types.NodeTypeInterface, 1.5},
+		{"class+Class", queryKindClass, types.NodeTypeClass, cfg.ClassBoost},
+		{"class+Interface", queryKindClass, types.NodeTypeInterface, cfg.ClassBoost},
 		{"class+Function", queryKindClass, types.NodeTypeFunction, 1.0},
 		{"class+Route", queryKindClass, types.NodeTypeRoute, 1.0},
 
 		// Function kind
-		{"function+Function", queryKindFunction, types.NodeTypeFunction, 1.2},
+		{"function+Function", queryKindFunction, types.NodeTypeFunction, cfg.FunctionBoost},
 		{"function+Method", queryKindFunction, types.NodeTypeMethod, 1.0},
 		{"function+Class", queryKindFunction, types.NodeTypeClass, 1.0},
 

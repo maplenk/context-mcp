@@ -772,6 +772,57 @@ func TestDoctorClaudeCode_BothScopes(t *testing.T) {
 	}
 }
 
+func TestDoctorClaudeCode_LocalScope_GlobalProjects(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := filepath.Join(tmp, "repo")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "index.db"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	userCfg := filepath.Join(tmp, ".claude.json")
+	data, _ := json.Marshal(map[string]any{
+		"projects": map[string]any{
+			filepath.ToSlash(repoDir): map[string]any{
+				"mcpServers": map[string]any{
+					"context-mcp": map[string]any{
+						"command": "/usr/bin/qb",
+						"args":    []any{"--repo", repoDir},
+					},
+				},
+			},
+		},
+	})
+	if err := os.WriteFile(userCfg, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	checks := doctorClaudeCode("test", userCfg, repoDir)
+
+	var localFound bool
+	var entryPassed bool
+	for _, c := range checks {
+		if c.Name == "test/entry-local" && c.Passed {
+			localFound = true
+		}
+		if c.Name == "test/entry" && c.Passed {
+			entryPassed = true
+			if !strings.Contains(c.Message, "local") {
+				t.Fatalf("entry message should mention local scope: %s", c.Message)
+			}
+		}
+	}
+	if !localFound {
+		t.Fatal("local-scope Claude config should be detected from projects[...]")
+	}
+	if !entryPassed {
+		t.Fatal("overall entry should pass via local-scope Claude config")
+	}
+}
+
 func TestDoctorClaudeCode_ProjectScopeNoRepoArg(t *testing.T) {
 	// Project config exists but has no --repo arg; repoRoot is provided.
 	// The overall entry, repo, and index checks should pass using repoRoot as fallback.
@@ -1049,7 +1100,7 @@ func TestBuildCodexTOML_EnvVars(t *testing.T) {
 		RepoRoot: "/my/repo",
 		EnvVars: map[string]string{
 			"CONTEXT_MCP_AUTH": "token123",
-			"ANOTHER_VAR":     "value",
+			"ANOTHER_VAR":      "value",
 		},
 	})
 	if !strings.Contains(block, `command = "/usr/local/bin/qb"`) {
@@ -1107,8 +1158,8 @@ func TestBuildClaudeCodeJSONEntry_HTTP(t *testing.T) {
 	if entry["url"] != "http://localhost:8080/mcp" {
 		t.Fatalf("expected url, got %v", entry)
 	}
-	if entry["transport"] != "http" {
-		t.Fatalf("expected transport=http, got %v", entry["transport"])
+	if entry["type"] != "http" {
+		t.Fatalf("expected type=http, got %v", entry["type"])
 	}
 	if _, ok := entry["command"]; ok {
 		t.Fatal("HTTP should not have command")
@@ -1122,8 +1173,8 @@ func TestBuildClaudeCodeJSONEntry_SSE(t *testing.T) {
 	if entry["url"] != "http://localhost:9090/sse" {
 		t.Fatalf("expected url, got %v", entry)
 	}
-	if entry["transport"] != "sse" {
-		t.Fatalf("expected transport=sse, got %v", entry["transport"])
+	if entry["type"] != "sse" {
+		t.Fatalf("expected type=sse, got %v", entry["type"])
 	}
 }
 
@@ -1159,14 +1210,32 @@ func TestPrintConfig_ClaudeCode_HTTP(t *testing.T) {
 	if !strings.Contains(out, "--transport http") {
 		t.Fatal("output should contain --transport http")
 	}
-	if !strings.Contains(out, "--url http://localhost:8080/mcp") {
-		t.Fatal("output should contain --url")
+	if !strings.Contains(out, "context-mcp http://localhost:8080/mcp") {
+		t.Fatal("output should pass the URL positionally")
 	}
 	if !strings.Contains(out, `"url"`) {
 		t.Fatal("JSON should contain url key")
 	}
-	if !strings.Contains(out, `"transport"`) {
-		t.Fatal("JSON should contain transport key")
+	if !strings.Contains(out, `"type"`) {
+		t.Fatal("JSON should contain type key")
+	}
+}
+
+func TestBuildClaudeAddArgs_HTTP(t *testing.T) {
+	args := buildClaudeAddArgs("", InstallOpts{
+		Scope:     "project",
+		Transport: "http",
+		URL:       "http://localhost:8080/mcp",
+	})
+	got := strings.Join(args, " ")
+	if strings.Contains(got, "--url") {
+		t.Fatalf("Claude add args should not use --url: %s", got)
+	}
+	if !strings.Contains(got, "context-mcp http://localhost:8080/mcp") {
+		t.Fatalf("Claude add args should use positional URL: %s", got)
+	}
+	if !strings.Contains(got, "--scope project") {
+		t.Fatalf("Claude add args should preserve scope: %s", got)
 	}
 }
 

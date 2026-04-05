@@ -124,6 +124,30 @@ func isRemoteTransport(t string) bool {
 	return t == "http" || t == "sse"
 }
 
+// buildClaudeAddArgs returns the argument list for `claude mcp add`.
+// Remote transports pass the MCP endpoint as the positional commandOrUrl arg.
+func buildClaudeAddArgs(bin string, opts InstallOpts) []string {
+	transport := effectiveTransport(opts.Transport)
+	scope := effectiveScope(opts.Scope)
+
+	cmdArgs := []string{
+		"mcp", "add",
+		"--transport", transport,
+		"--scope", scope,
+	}
+	for _, k := range sortedEnvKeys(opts.EnvVars) {
+		cmdArgs = append(cmdArgs, "--env", k+"="+opts.EnvVars[k])
+	}
+	if isRemoteTransport(transport) {
+		cmdArgs = append(cmdArgs, "context-mcp", opts.URL)
+		return cmdArgs
+	}
+
+	cmdArgs = append(cmdArgs, "context-mcp", "--", bin)
+	cmdArgs = append(cmdArgs, buildArgs(opts)...)
+	return cmdArgs
+}
+
 // sortedEnvKeys returns the keys of a map in sorted order for deterministic output.
 func sortedEnvKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
@@ -160,28 +184,11 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 	// Try the CLI path first.
 	if lookErr == nil {
 		if opts.Force {
-			rmCmd := exec.Command(claudePath, "mcp", "remove", "context-mcp")
+			rmCmd := exec.Command(claudePath, "mcp", "remove", "--scope", scope, "context-mcp")
 			rmCmd.CombinedOutput() // ignore error (entry might not exist)
 		}
 
-		cmdArgs := []string{
-			"mcp", "add",
-			"--transport", transport,
-			"--scope", scope,
-		}
-		// Pass env vars via --env KEY=VALUE.
-		for _, k := range sortedEnvKeys(opts.EnvVars) {
-			cmdArgs = append(cmdArgs, "--env", k+"="+opts.EnvVars[k])
-		}
-		if remote {
-			cmdArgs = append(cmdArgs, "--url", opts.URL)
-			cmdArgs = append(cmdArgs, "context-mcp")
-		} else {
-			cmdArgs = append(cmdArgs, "context-mcp", "--", bin)
-			cmdArgs = append(cmdArgs, buildArgs(opts)...)
-		}
-
-		cmd := exec.Command(claudePath, cmdArgs...)
+		cmd := exec.Command(claudePath, buildClaudeAddArgs(bin, opts)...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("claude mcp add failed: %w\n%s", err, string(out))
@@ -233,7 +240,7 @@ func buildClaudeCodeJSONEntry(bin, transport string, opts InstallOpts) map[strin
 	entry := make(map[string]any)
 	if isRemoteTransport(transport) {
 		entry["url"] = opts.URL
-		entry["transport"] = transport
+		entry["type"] = transport
 	} else {
 		entry["command"] = bin
 		entry["args"] = buildArgs(opts)
@@ -503,32 +510,18 @@ func PrintConfig(opts PrintConfigOpts) (string, error) {
 func printConfigClaudeCode(bin string, opts PrintConfigOpts) string {
 	transport := effectiveTransport(opts.Transport)
 	scope := effectiveScope(opts.Scope)
-	remote := isRemoteTransport(transport)
 
 	installOpts := InstallOpts{
 		RepoRoot:  opts.RepoRoot,
 		Profile:   opts.Profile,
+		Scope:     opts.Scope,
 		Transport: opts.Transport,
 		URL:       opts.URL,
 		EnvVars:   opts.EnvVars,
 	}
 
 	// Build the CLI command.
-	cmdParts := []string{
-		"claude", "mcp", "add",
-		"--transport", transport,
-		"--scope", scope,
-	}
-	for _, k := range sortedEnvKeys(opts.EnvVars) {
-		cmdParts = append(cmdParts, "--env", k+"="+opts.EnvVars[k])
-	}
-	if remote {
-		cmdParts = append(cmdParts, "--url", opts.URL, "context-mcp")
-	} else {
-		args := buildArgs(installOpts)
-		cmdParts = append(cmdParts, "context-mcp", "--", bin)
-		cmdParts = append(cmdParts, args...)
-	}
+	cmdParts := buildClaudeAddArgs(bin, installOpts)
 
 	// Build the JSON snippet.
 	entry := buildClaudeCodeJSONEntry(bin, transport, installOpts)
@@ -542,7 +535,13 @@ func printConfigClaudeCode(bin string, opts PrintConfigOpts) string {
 	var b strings.Builder
 	b.WriteString("# Claude Code — CLI command:\n")
 	b.WriteString(strings.Join(cmdParts, " "))
-	b.WriteString("\n\n# Claude Code — JSON snippet for ~/.claude.json:\n")
+	b.WriteString("\n\n# Claude Code — JSON snippet")
+	if scope == "project" {
+		b.WriteString(" for .mcp.json")
+	} else {
+		b.WriteString(" for ~/.claude.json")
+	}
+	b.WriteString(":\n")
 	b.Write(jsonBytes)
 	b.WriteString("\n")
 	return b.String()
@@ -574,6 +573,10 @@ func detectRepoRoot() string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func normalizedProjectKey(repoRoot string) string {
+	return filepath.ToSlash(filepath.Clean(repoRoot))
 }
 
 // Doctor runs diagnostic checks and returns results.
@@ -709,12 +712,61 @@ func checkClaudeCodeJSON(prefix, scope, cfgPath string) (bool, string, []DoctorC
 	return true, repoPath, checks
 }
 
+// checkClaudeCodeLocalProject checks Claude's global projects[...] config for a
+// local-scope MCP entry for the requested repository.
+func checkClaudeCodeLocalProject(prefix, cfgPath, repoRoot string) (bool, string, []DoctorCheck) {
+	if repoRoot == "" {
+		return false, "", nil
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return false, "", nil
+	}
+
+	root := make(map[string]any)
+	if err := json.Unmarshal(data, &root); err != nil {
+		return false, "", nil
+	}
+
+	projects, _ := root["projects"].(map[string]any)
+	if projects == nil {
+		return false, "", nil
+	}
+
+	candidates := []string{repoRoot, filepath.Clean(repoRoot), normalizedProjectKey(repoRoot)}
+	for _, key := range candidates {
+		project, _ := projects[key].(map[string]any)
+		if project == nil {
+			continue
+		}
+		servers, _ := project["mcpServers"].(map[string]any)
+		entry, _ := servers["context-mcp"].(map[string]any)
+		if entry == nil {
+			continue
+		}
+		repoPath := extractRepoArg(entry)
+		checks := []DoctorCheck{{
+			Name:    prefix + "/entry-local",
+			Passed:  true,
+			Message: fmt.Sprintf("context-mcp entry found (local): %s [%s]", cfgPath, key),
+		}}
+		return true, repoPath, checks
+	}
+
+	return false, "", nil
+}
+
 func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 	var checks []DoctorCheck
 
 	// Check user-scope config.
 	userFound, userRepoPath, userChecks := checkClaudeCodeJSON(prefix, "user", userCfgPath)
 	checks = append(checks, userChecks...)
+
+	// Check local-scope config stored under projects[...] in the global file.
+	localFound, localRepoPath, localChecks := checkClaudeCodeLocalProject(prefix, userCfgPath, repoRoot)
+	checks = append(checks, localChecks...)
 
 	// Check project-scope configs if repoRoot is known.
 	var projectFound bool
@@ -723,6 +775,7 @@ func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 		projectConfigs := []string{
 			filepath.Join(repoRoot, ".mcp.json"),
 			filepath.Join(repoRoot, ".claude", "settings.json"),
+			filepath.Join(repoRoot, ".claude", "settings.local.json"),
 		}
 		for _, pc := range projectConfigs {
 			found, rp, pcChecks := checkClaudeCodeJSON(prefix, "project", pc)
@@ -738,11 +791,11 @@ func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 	}
 
 	// Overall entry verdict.
-	if !userFound && !projectFound {
+	if !userFound && !localFound && !projectFound {
 		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/entry",
 			Passed:  false,
-			Message: "context-mcp not found in any config scope (user or project)",
+			Message: "context-mcp not found in any config scope (user, local, or project)",
 			Fix:     "Run: context-mcp install --client claude-code --repo <path>",
 		})
 		return checks
@@ -751,6 +804,9 @@ func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 	var scopes []string
 	if userFound {
 		scopes = append(scopes, "user")
+	}
+	if localFound {
+		scopes = append(scopes, "local")
 	}
 	if projectFound {
 		scopes = append(scopes, "project")
@@ -763,6 +819,9 @@ func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 
 	// Determine best repo path: prefer user config, fall back to project config, fall back to repoRoot.
 	repoPath := userRepoPath
+	if repoPath == "" {
+		repoPath = localRepoPath
+	}
 	if repoPath == "" {
 		repoPath = projectRepoPath
 	}

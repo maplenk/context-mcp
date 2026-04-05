@@ -120,9 +120,16 @@ Route::post('/v1/order', ['as' => 'createOrder', 'uses' => 'OrderController@crea
 	if len(nodes) != 1 {
 		t.Fatalf("expected 1 route node, got %d", len(nodes))
 	}
-	want := "POST /v1/order -> OrderController@create"
-	if nodes[0].ContentSum != want {
-		t.Errorf("expected ContentSum %q, got %q", want, nodes[0].ContentSum)
+	got := nodes[0].ContentSum
+	for _, wantPart := range []string{
+		"POST /v1/order",
+		"v1 order",
+		"api endpoint",
+		"OrderController create",
+	} {
+		if !strings.Contains(got, wantPart) {
+			t.Errorf("expected ContentSum to contain %q, got %q", wantPart, got)
+		}
 	}
 }
 
