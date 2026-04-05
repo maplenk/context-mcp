@@ -103,39 +103,38 @@ func (e *LlamaCppEmbedder) Embed(text string) ([]float32, error) {
 	return vec, nil
 }
 
-// EmbedBatch generates embeddings for multiple texts using llama.cpp's native
-// batch support. Falls back to sequential calls if the batch response format
-// is not recognized.
+// EmbedBatch generates embeddings for multiple texts. Attempts batch via
+// /embedding first; falls back to sequential Embed() calls if the server
+// doesn't support batch format or returns an unexpected response.
 func (e *LlamaCppEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	reqBody, err := json.Marshal(llamaCppEmbedRequest{Content: texts})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling llama.cpp batch request: %w", err)
+		return e.embedSequential(texts)
 	}
 
 	resp, err := e.client.Post(e.endpoint+"/embedding", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("llama.cpp batch embed request: %w", err)
+		return e.embedSequential(texts)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("llama.cpp returned status %d: %s", resp.StatusCode, string(body))
+		return e.embedSequential(texts)
 	}
 
 	var batchResult llamaCppBatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&batchResult); err != nil {
-		return nil, fmt.Errorf("decoding llama.cpp batch response: %w", err)
+		return e.embedSequential(texts)
 	}
 
 	if len(batchResult.Results) != len(texts) {
-		return nil, fmt.Errorf("llama.cpp returned %d embeddings, expected %d", len(batchResult.Results), len(texts))
+		return e.embedSequential(texts)
 	}
 
 	results := make([][]float32, len(texts))
 	for i, item := range batchResult.Results {
 		if len(item.Embedding) < e.dim {
-			return nil, fmt.Errorf("llama.cpp embedding %d dimension %d < requested %d", i, len(item.Embedding), e.dim)
+			return e.embedSequential(texts)
 		}
 		vec := make([]float32, e.dim)
 		for j := 0; j < e.dim; j++ {
@@ -145,6 +144,19 @@ func (e *LlamaCppEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 		results[i] = vec
 	}
 
+	return results, nil
+}
+
+// embedSequential falls back to one-at-a-time Embed() calls.
+func (e *LlamaCppEmbedder) embedSequential(texts []string) ([][]float32, error) {
+	results := make([][]float32, len(texts))
+	for i, text := range texts {
+		vec, err := e.Embed(text)
+		if err != nil {
+			return nil, fmt.Errorf("embedding text %d: %w", i, err)
+		}
+		results[i] = vec
+	}
 	return results, nil
 }
 

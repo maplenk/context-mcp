@@ -75,6 +75,13 @@ type Config struct {
 	// LlamaCppEndpoint is the llama.cpp server endpoint (e.g., http://localhost:8080).
 	// Empty string disables the llama.cpp backend.
 	LlamaCppEndpoint string
+
+	// OpenAIEndpoint is the OpenAI-compatible API endpoint (e.g., http://localhost:1234).
+	// Empty string disables the OpenAI-compatible backend.
+	OpenAIEndpoint string
+
+	// OpenAIModel is the model name for the OpenAI-compatible embeddings API.
+	OpenAIModel string
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -87,6 +94,7 @@ func DefaultConfig() *Config {
 		EmbeddingBatchSize: 32,
 		WorkerCount:        4,
 		ExcludedDirs:       []string{".git", ".qb-context"},
+		ONNXModelDir:        detectDefaultONNXModel(),
 		EmbeddingDim:       384,
 		ColdStartEnabled:    true,
 		GitHistoryDepth:     500,
@@ -95,6 +103,7 @@ func DefaultConfig() *Config {
 		GitMaxIntentBytes:   1500,
 		Profile:             "core",
 		OllamaModel:         "nomic-embed-code",
+		OpenAIModel:          "text-embedding-nomic-embed-code",
 	}
 }
 
@@ -124,6 +133,8 @@ func ParseFlags() (*Config, error) {
 	fs.StringVar(&cfg.OllamaEndpoint, "ollama-endpoint", cfg.OllamaEndpoint, "Ollama API endpoint (e.g., http://localhost:11434)")
 	fs.StringVar(&cfg.OllamaModel, "ollama-model", cfg.OllamaModel, "Ollama embedding model name")
 	fs.StringVar(&cfg.LlamaCppEndpoint, "llamacpp-endpoint", cfg.LlamaCppEndpoint, "llama.cpp server endpoint (e.g., http://localhost:8080)")
+	fs.StringVar(&cfg.OpenAIEndpoint, "openai-endpoint", cfg.OpenAIEndpoint, "OpenAI-compatible API endpoint (e.g., http://localhost:1234)")
+	fs.StringVar(&cfg.OpenAIModel, "openai-model", cfg.OpenAIModel, "Model name for OpenAI-compatible embeddings")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, fmt.Errorf("parsing flags: %w", err)
 	}
@@ -184,4 +195,17 @@ func ParseFlags() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// detectDefaultONNXModel checks for a bundled CodeRankEmbed model at known paths.
+func detectDefaultONNXModel() string {
+	candidates := []string{
+		"models/CodeRankEmbed-onnx-int8",
+	}
+	for _, dir := range candidates {
+		if _, err := os.Stat(filepath.Join(dir, "tokenizer.json")); err == nil {
+			return dir
+		}
+	}
+	return ""
 }

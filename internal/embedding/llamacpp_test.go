@@ -173,32 +173,55 @@ func TestLlamaCppEmbedder_Dim(t *testing.T) {
 	}
 }
 
-func TestLlamaCppEmbedder_BatchCountMismatch(t *testing.T) {
+func TestLlamaCppEmbedder_BatchFallbackToSequential(t *testing.T) {
+	dim := 3
+	singleCalls := 0
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 		case "/embedding":
-			// Return 2 results for 3 inputs
-			json.NewEncoder(w).Encode(llamaCppBatchResponse{
-				Results: []llamaCppBatchItem{
-					{Embedding: []float64{1.0, 0.0, 0.0}},
-					{Embedding: []float64{0.0, 1.0, 0.0}},
-				},
-			})
+			var raw json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				http.Error(w, "bad", 400)
+				return
+			}
+			// If content is a string → single request; if array → batch (return wrong count to trigger fallback)
+			var req struct{ Content json.RawMessage }
+			json.Unmarshal(raw, &req)
+			if len(req.Content) > 0 && req.Content[0] == '"' {
+				singleCalls++
+				json.NewEncoder(w).Encode(llamaCppEmbedResponse{
+					Embedding: []float64{1.0, 0.0, 0.0},
+				})
+			} else {
+				// Return wrong count to trigger fallback
+				json.NewEncoder(w).Encode(llamaCppBatchResponse{
+					Results: []llamaCppBatchItem{
+						{Embedding: []float64{1.0, 0.0, 0.0}},
+					},
+				})
+			}
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer srv.Close()
 
-	emb, err := NewLlamaCppEmbedder(srv.URL, 3)
+	emb, err := NewLlamaCppEmbedder(srv.URL, dim)
 	if err != nil {
 		t.Fatalf("NewLlamaCppEmbedder: %v", err)
 	}
 
-	_, err = emb.EmbedBatch([]string{"a", "b", "c"})
-	if err == nil {
-		t.Fatal("expected error for batch count mismatch")
+	results, err := emb.EmbedBatch([]string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("EmbedBatch should fall back to sequential: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if singleCalls != 3 {
+		t.Errorf("expected 3 sequential calls after batch fallback, got %d", singleCalls)
 	}
 }

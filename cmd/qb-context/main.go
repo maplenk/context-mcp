@@ -60,48 +60,8 @@ func main() {
 
 	log.Printf("qb-context daemon starting — repo: %s", cfg.RepoRoot)
 
-	// 1. Initialize embedding engine — priority: ONNX → Ollama → llama.cpp → TF-IDF
-	var embedder embedding.Embedder
-	switch {
-	case cfg.ONNXModelDir != "":
-		dim := cfg.EmbeddingDim
-		if dim == storage.DefaultEmbeddingDim {
-			dim = 256 // default Matryoshka dim for ONNX
-		}
-		onnxEmb, err := embedding.NewONNXEmbedder(cfg.ONNXModelDir, dim, cfg.ONNXLibPath)
-		if err != nil {
-			log.Printf("WARNING: ONNX model requested (--onnx-model=%s) but initialization failed: %v. Falling back to TFIDF embeddings — search quality will be significantly degraded.", cfg.ONNXModelDir, err)
-			embedder = embedding.NewEmbedder()
-		} else {
-			embedder = onnxEmb
-			embedding.SetEmbeddingDim(dim)
-			cfg.EmbeddingDim = dim
-			log.Printf("ONNX embedder initialized (dim=%d, model=%s)", dim, cfg.ONNXModelDir)
-		}
-	case cfg.OllamaEndpoint != "":
-		ollamaEmb, err := embedding.NewOllamaEmbedder(cfg.OllamaEndpoint, cfg.OllamaModel, cfg.EmbeddingDim)
-		if err != nil {
-			log.Printf("WARNING: Ollama requested (--ollama-endpoint=%s) but initialization failed: %v. Falling back to TFIDF.", cfg.OllamaEndpoint, err)
-			embedder = embedding.NewEmbedder()
-		} else {
-			embedder = ollamaEmb
-			embedding.SetEmbeddingDim(cfg.EmbeddingDim)
-			log.Printf("Ollama embedder initialized (dim=%d, model=%s, endpoint=%s)", cfg.EmbeddingDim, cfg.OllamaModel, cfg.OllamaEndpoint)
-		}
-	case cfg.LlamaCppEndpoint != "":
-		llamaEmb, err := embedding.NewLlamaCppEmbedder(cfg.LlamaCppEndpoint, cfg.EmbeddingDim)
-		if err != nil {
-			log.Printf("WARNING: llama.cpp requested (--llamacpp-endpoint=%s) but initialization failed: %v. Falling back to TFIDF.", cfg.LlamaCppEndpoint, err)
-			embedder = embedding.NewEmbedder()
-		} else {
-			embedder = llamaEmb
-			embedding.SetEmbeddingDim(cfg.EmbeddingDim)
-			log.Printf("llama.cpp embedder initialized (dim=%d, endpoint=%s)", cfg.EmbeddingDim, cfg.LlamaCppEndpoint)
-		}
-	default:
-		embedder = embedding.NewEmbedder()
-		log.Printf("Embedding engine initialized (TF-IDF, dim=%d)", embedding.GetEmbeddingDim())
-	}
+	// 1. Initialize embedding engine — priority: ONNX → Ollama → OpenAI-compat → llama.cpp → TF-IDF
+	embedder := initEmbedder(cfg)
 
 	// 2. Initialize SQLite storage
 	store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
@@ -260,15 +220,15 @@ func runCLI(cfg *config.Config, args []string) {
 
 	// Handle --list flag
 	if len(args) > 0 && args[0] == "--list" {
+		embedder := initEmbedder(cfg)
+		defer embedder.Close()
+
 		store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
 			os.Exit(1)
 		}
 		defer store.Close()
-
-		embedder := embedding.NewEmbedder()
-		defer embedder.Close()
 		graphEngine := graph.New()
 		hybridSearch := search.New(store, embedder, graphEngine)
 
@@ -315,7 +275,10 @@ func runCLI(cfg *config.Config, args []string) {
 		argsJSON = json.RawMessage(args[1])
 	}
 
-	// Boot pipeline
+	// Boot pipeline — init embedder first so cfg.EmbeddingDim is set correctly
+	embedder := initEmbedder(cfg)
+	defer embedder.Close()
+
 	store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
@@ -323,8 +286,6 @@ func runCLI(cfg *config.Config, args []string) {
 	}
 	defer store.Close()
 
-	embedder := embedding.NewEmbedder()
-	defer embedder.Close()
 	p := parser.New()
 	graphEngine := graph.New()
 	hybridSearch := search.New(store, embedder, graphEngine)
@@ -414,6 +375,62 @@ func runCLI(cfg *config.Config, args []string) {
 		}
 	}
 	fmt.Println(outStr)
+}
+
+// initEmbedder creates an embedder based on config flags.
+// Priority: ONNX → Ollama → OpenAI-compat → llama.cpp → TF-IDF.
+// On backend init failure, falls back to TF-IDF and resets cfg.EmbeddingDim.
+func initEmbedder(cfg *config.Config) embedding.Embedder {
+	switch {
+	case cfg.ONNXModelDir != "":
+		dim := cfg.EmbeddingDim
+		if dim == storage.DefaultEmbeddingDim {
+			dim = embedding.DefaultDimForModel(cfg.ONNXModelDir)
+		}
+		onnxEmb, err := embedding.NewONNXEmbedder(cfg.ONNXModelDir, dim, cfg.ONNXLibPath)
+		if err != nil {
+			log.Printf("WARNING: ONNX model requested (--onnx-model=%s) but initialization failed: %v. Falling back to TFIDF.", cfg.ONNXModelDir, err)
+			cfg.EmbeddingDim = embedding.GetEmbeddingDim()
+			return embedding.NewEmbedder()
+		}
+		embedding.SetEmbeddingDim(dim)
+		cfg.EmbeddingDim = dim
+		log.Printf("ONNX embedder initialized (dim=%d, model=%s)", dim, cfg.ONNXModelDir)
+		return onnxEmb
+	case cfg.OllamaEndpoint != "":
+		ollamaEmb, err := embedding.NewOllamaEmbedder(cfg.OllamaEndpoint, cfg.OllamaModel, cfg.EmbeddingDim)
+		if err != nil {
+			log.Printf("WARNING: Ollama requested (--ollama-endpoint=%s) but initialization failed: %v. Falling back to TFIDF.", cfg.OllamaEndpoint, err)
+			cfg.EmbeddingDim = embedding.GetEmbeddingDim()
+			return embedding.NewEmbedder()
+		}
+		embedding.SetEmbeddingDim(cfg.EmbeddingDim)
+		log.Printf("Ollama embedder initialized (dim=%d, model=%s, endpoint=%s)", cfg.EmbeddingDim, cfg.OllamaModel, cfg.OllamaEndpoint)
+		return ollamaEmb
+	case cfg.OpenAIEndpoint != "":
+		openaiEmb, err := embedding.NewOpenAIEmbedder(cfg.OpenAIEndpoint, cfg.OpenAIModel, cfg.EmbeddingDim)
+		if err != nil {
+			log.Printf("WARNING: OpenAI-compatible endpoint requested (--openai-endpoint=%s) but initialization failed: %v. Falling back to TFIDF.", cfg.OpenAIEndpoint, err)
+			cfg.EmbeddingDim = embedding.GetEmbeddingDim()
+			return embedding.NewEmbedder()
+		}
+		embedding.SetEmbeddingDim(cfg.EmbeddingDim)
+		log.Printf("OpenAI-compatible embedder initialized (dim=%d, model=%s, endpoint=%s)", cfg.EmbeddingDim, cfg.OpenAIModel, cfg.OpenAIEndpoint)
+		return openaiEmb
+	case cfg.LlamaCppEndpoint != "":
+		llamaEmb, err := embedding.NewLlamaCppEmbedder(cfg.LlamaCppEndpoint, cfg.EmbeddingDim)
+		if err != nil {
+			log.Printf("WARNING: llama.cpp requested (--llamacpp-endpoint=%s) but initialization failed: %v. Falling back to TFIDF.", cfg.LlamaCppEndpoint, err)
+			cfg.EmbeddingDim = embedding.GetEmbeddingDim()
+			return embedding.NewEmbedder()
+		}
+		embedding.SetEmbeddingDim(cfg.EmbeddingDim)
+		log.Printf("llama.cpp embedder initialized (dim=%d, endpoint=%s)", cfg.EmbeddingDim, cfg.LlamaCppEndpoint)
+		return llamaEmb
+	default:
+		log.Printf("Embedding engine initialized (TF-IDF, dim=%d)", embedding.GetEmbeddingDim())
+		return embedding.NewEmbedder()
+	}
 }
 
 // indexRepo performs a full index of the repository.
