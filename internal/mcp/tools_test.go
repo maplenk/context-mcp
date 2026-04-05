@@ -747,6 +747,8 @@ func TestAllToolsRegistered(t *testing.T) {
 		"explore",
 		"understand",
 		"assemble_context",
+		"checkpoint_context",
+		"read_delta",
 	}
 
 	tools := server.GetTools()
@@ -1367,7 +1369,7 @@ func TestIsToolInProfile(t *testing.T) {
 	}
 
 	// Extended tools should be in extended and full, not core
-	for _, tool := range []string{"get_architecture_summary", "get_key_symbols", "explore", "search_code"} {
+	for _, tool := range []string{"get_architecture_summary", "get_key_symbols", "explore", "search_code", "checkpoint_context", "read_delta"} {
 		if isToolInProfile(tool, "core") {
 			t.Errorf("%s should NOT be in core profile", tool)
 		}

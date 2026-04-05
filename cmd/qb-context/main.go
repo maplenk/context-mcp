@@ -204,11 +204,12 @@ func main() {
 		return nil
 	}
 	mcp.RegisterTools(server, mcp.ToolDeps{
-		Store:    store,
-		Graph:    graphEngine,
-		Search:   hybridSearch,
-		RepoRoot: cfg.RepoRoot,
-		Profile:  cfg.Profile,
+		Store:       store,
+		Graph:       graphEngine,
+		Search:      hybridSearch,
+		RepoRoot:    cfg.RepoRoot,
+		Profile:     cfg.Profile,
+		Checkpoints: mcp.NewCheckpointStore(),
 	}, indexFn)
 	log.Printf("MCP server ready on stdio")
 
@@ -267,6 +268,7 @@ func runCLI(cfg *config.Config, args []string) {
 		server := mcp.NewServer()
 		mcp.RegisterTools(server, mcp.ToolDeps{
 			Store: store, Graph: graphEngine, Search: hybridSearch, RepoRoot: cfg.RepoRoot,
+			Checkpoints: mcp.NewCheckpointStore(),
 		}, nil)
 
 		fmt.Printf("%-15s %s\n", "TOOL", "DESCRIPTION")
@@ -356,6 +358,7 @@ func runCLI(cfg *config.Config, args []string) {
 	server := mcp.NewServer()
 	mcp.RegisterTools(server, mcp.ToolDeps{
 		Store: store, Graph: graphEngine, Search: hybridSearch, RepoRoot: cfg.RepoRoot,
+		Checkpoints: mcp.NewCheckpointStore(),
 	}, func(path string) error {
 		return indexRepo(cfg, store, p, embedder, graphEngine)
 	})
@@ -499,11 +502,12 @@ func runServeHTTP(cfg *config.Config) {
 		return nil
 	}
 	mcp.RegisterTools(mcpSrv, mcp.ToolDeps{
-		Store:    store,
-		Graph:    graphEngine,
-		Search:   hybridSearch,
-		RepoRoot: cfg.RepoRoot,
-		Profile:  cfg.Profile,
+		Store:       store,
+		Graph:       graphEngine,
+		Search:      hybridSearch,
+		RepoRoot:    cfg.RepoRoot,
+		Profile:     cfg.Profile,
+		Checkpoints: mcp.NewCheckpointStore(),
 	}, indexFn)
 
 	// 10. Create streamable HTTP transport

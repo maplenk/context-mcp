@@ -28,11 +28,12 @@ const Version = "0.3.0"
 
 // ToolDeps holds dependencies needed by MCP tools
 type ToolDeps struct {
-	Store    *storage.Store
-	Graph    *graph.GraphEngine
-	Search   *search.HybridSearch
-	RepoRoot string
-	Profile  string
+	Store       *storage.Store
+	Graph       *graph.GraphEngine
+	Search      *search.HybridSearch
+	RepoRoot    string
+	Profile     string
+	Checkpoints *CheckpointStore // nil-safe, tools skip if nil
 }
 
 // isToolInProfile returns true if a tool should be registered for the MCP SDK
@@ -52,6 +53,8 @@ func isToolInProfile(toolName, profile string) bool {
 		"explore":                  true,
 		"search_code":              true,
 		"assemble_context":         true,
+		"checkpoint_context":       true,
+		"read_delta":               true,
 	}
 	switch profile {
 	case "full":
@@ -174,12 +177,24 @@ type AssembleContextItem struct {
 	Reason   string  `json:"reason,omitempty"`
 }
 
+// CheckpointContextParams are the parameters for the checkpoint_context tool
+type CheckpointContextParams struct {
+	Name string `json:"name,omitempty" jsonschema:"description=Checkpoint name (auto-generated if empty)"`
+}
+
+// ReadDeltaParams are the parameters for the read_delta tool
+type ReadDeltaParams struct {
+	Since string `json:"since" jsonschema:"description=Checkpoint name to compare against,required"`
+	Path  string `json:"path,omitempty" jsonschema:"description=Filter by file path prefix"`
+	Limit int    `json:"limit,omitempty" jsonschema:"description=Maximum items per change type (default: 20)"`
+}
+
 // IndexFunc is the callback for triggering a re-index
 type IndexFunc func(path string) error
 
-// RegisterTools registers all 14 tools for CLI mode and profile-gated tools for MCP SDK mode.
-// CLI tools: all 14 available via GetHandler/GetTools (always).
-// SDK tools (MCP protocol): gated by deps.Profile — "core" (6), "extended" (11), or "full" (14).
+// RegisterTools registers all 16 tools for CLI mode and profile-gated tools for MCP SDK mode.
+// CLI tools: all 16 available via GetHandler/GetTools (always).
+// SDK tools (MCP protocol): gated by deps.Profile — "core" (6), "extended" (13), or "full" (16).
 func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerContextTool(s, deps)
 	registerImpactTool(s, deps)
@@ -195,6 +210,8 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerExploreTool(s, deps)
 	registerUnderstandTool(s, deps)
 	registerAssembleContextTool(s, deps)
+	registerCheckpointContextTool(s, deps)
+	registerReadDeltaTool(s, deps)
 	// M9: Register MCP resources and prompts
 	registerResources(s, deps)
 	registerPrompts(s, deps)
@@ -2849,6 +2866,150 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 				return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
 			}
 			result, err := assembleContextHandler(deps, p)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return toCallToolResult(result)
+		})
+	}
+}
+
+// ----- Tool 15: checkpoint_context -----
+
+func registerCheckpointContextTool(s *Server, deps ToolDeps) {
+	desc := "Create a named checkpoint of the current index state. Use with read_delta to see what changed since this point."
+
+	// CLI handler
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p CheckpointContextParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		if deps.Checkpoints == nil {
+			return nil, fmt.Errorf("checkpoint store not initialized")
+		}
+		cp, err := deps.Checkpoints.CreateCheckpoint(p.Name, deps.RepoRoot, deps.Store)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"name":        cp.Name,
+			"timestamp":   cp.Timestamp.Format(time.RFC3339),
+			"head_commit": cp.HeadCommit,
+			"node_count":  cp.NodeCount,
+			"file_count":  cp.FileCount,
+		}, nil
+	}
+
+	s.RegisterTool(ToolDefinition{
+		Name:        "checkpoint_context",
+		Description: desc,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{"type": "string", "description": "Checkpoint name (auto-generated if empty)"},
+			},
+		},
+	}, cliHandler)
+
+	// SDK handler — gated by profile
+	if isToolInProfile("checkpoint_context", deps.Profile) {
+		tool := mcp.NewTool("checkpoint_context",
+			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Checkpoint Context"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("name", mcp.Description("Checkpoint name (auto-generated if empty)")),
+		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "snapshot current state; use with read_delta to track changes",
+			},
+		}
+		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			var p CheckpointContextParams
+			if err := req.BindArguments(&p); err != nil {
+				return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+			}
+			if deps.Checkpoints == nil {
+				return mcp.NewToolResultError("checkpoint store not initialized"), nil
+			}
+			cp, err := deps.Checkpoints.CreateCheckpoint(p.Name, deps.RepoRoot, deps.Store)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			result := map[string]interface{}{
+				"name":        cp.Name,
+				"timestamp":   cp.Timestamp.Format(time.RFC3339),
+				"head_commit": cp.HeadCommit,
+				"node_count":  cp.NodeCount,
+				"file_count":  cp.FileCount,
+			}
+			return toCallToolResult(result)
+		})
+	}
+}
+
+// ----- Tool 16: read_delta -----
+
+func registerReadDeltaTool(s *Server, deps ToolDeps) {
+	desc := "Compare current index state against a named checkpoint. Shows added, modified, and deleted symbols since the checkpoint was created."
+
+	// CLI handler
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p ReadDeltaParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		if p.Since == "" {
+			return nil, fmt.Errorf("'since' parameter is required")
+		}
+		if deps.Checkpoints == nil {
+			return nil, fmt.Errorf("checkpoint store not initialized")
+		}
+		return deps.Checkpoints.ComputeDelta(p.Since, deps.RepoRoot, deps.Store, p.Path, p.Limit)
+	}
+
+	s.RegisterTool(ToolDefinition{
+		Name:        "read_delta",
+		Description: desc,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"since": map[string]interface{}{"type": "string", "description": "Checkpoint name to compare against"},
+				"path":  map[string]interface{}{"type": "string", "description": "Filter by file path prefix"},
+				"limit": map[string]interface{}{"type": "integer", "description": "Maximum items per change type (default: 20)", "default": 20},
+			},
+			"required": []string{"since"},
+		},
+	}, cliHandler)
+
+	// SDK handler — gated by profile
+	if isToolInProfile("read_delta", deps.Profile) {
+		tool := mcp.NewTool("read_delta",
+			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Read Delta"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("since", mcp.Required(), mcp.Description("Checkpoint name to compare against")),
+			mcp.WithString("path", mcp.Description("Filter by file path prefix")),
+			mcp.WithNumber("limit", mcp.Description("Maximum items per change type (default: 20)")),
+		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "diff index state against a checkpoint; shows added/modified/deleted symbols",
+			},
+		}
+		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			var p ReadDeltaParams
+			if err := req.BindArguments(&p); err != nil {
+				return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+			}
+			if p.Since == "" {
+				return mcp.NewToolResultError("'since' parameter is required"), nil
+			}
+			if deps.Checkpoints == nil {
+				return mcp.NewToolResultError("checkpoint store not initialized"), nil
+			}
+			result, err := deps.Checkpoints.ComputeDelta(p.Since, deps.RepoRoot, deps.Store, p.Path, p.Limit)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
