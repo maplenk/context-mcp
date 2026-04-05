@@ -746,6 +746,7 @@ func TestAllToolsRegistered(t *testing.T) {
 		"get_architecture_summary",
 		"explore",
 		"understand",
+		"assemble_context",
 	}
 
 	tools := server.GetTools()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -500,7 +501,8 @@ func runServeHTTP(cfg *config.Config) {
 	if cfg.HTTPBearerToken != "" {
 		expected := "Bearer " + cfg.HTTPBearerToken
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != expected {
+			auth := r.Header.Get("Authorization")
+			if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -511,10 +513,14 @@ func runServeHTTP(cfg *config.Config) {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", handler)
 
-	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	log.Printf("MCP HTTP server listening on %s", addr)
@@ -522,6 +528,7 @@ func runServeHTTP(cfg *config.Config) {
 	// 12. Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
 	go func() {
 		sig := <-sigCh
 		log.Printf("Received signal %v, shutting down HTTP server...", sig)
@@ -531,11 +538,13 @@ func runServeHTTP(cfg *config.Config) {
 		w.Stop()
 		fileEventsWg.Wait()
 		asyncScoreWg.Wait()
+		close(done)
 	}()
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}
+	<-done // wait for cleanup to finish
 
 	log.Printf("HTTP server stopped")
 }

@@ -61,8 +61,8 @@ type Config struct {
 	GitMaxIntentBytes int
 
 	// Profile selects which tools are registered for MCP SDK mode.
-	// Valid values: "core" (6 tools), "extended" (10 tools), "full" (all 13).
-	// CLI mode always registers all 13 tools regardless of profile.
+	// Valid values: "core" (6 tools), "extended" (11 tools), "full" (all 14).
+	// CLI mode always registers all 14 tools regardless of profile.
 	Profile string
 
 	// OllamaEndpoint is the Ollama API endpoint (e.g., http://localhost:11434).
@@ -137,7 +137,7 @@ func ParseFlags() (*Config, error) {
 	fs.IntVar(&cfg.GitPerFileCommitCap, "git-per-file-cap", cfg.GitPerFileCommitCap, "Maximum commits per file")
 	fs.IntVar(&cfg.GitMaxMessageBytes, "git-max-message", cfg.GitMaxMessageBytes, "Maximum bytes per commit message")
 	fs.IntVar(&cfg.GitMaxIntentBytes, "git-max-intent", cfg.GitMaxIntentBytes, "Maximum bytes per file intent summary")
-	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (6 tools), extended (10 tools), or full (all 13)")
+	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (6 tools), extended (11 tools), or full (all 14)")
 	fs.StringVar(&cfg.OllamaEndpoint, "ollama-endpoint", cfg.OllamaEndpoint, "Ollama API endpoint (e.g., http://localhost:11434)")
 	fs.StringVar(&cfg.OllamaModel, "ollama-model", cfg.OllamaModel, "Ollama embedding model name")
 	fs.StringVar(&cfg.LlamaCppEndpoint, "llamacpp-endpoint", cfg.LlamaCppEndpoint, "llama.cpp server endpoint (e.g., http://localhost:8080)")
@@ -147,6 +147,11 @@ func ParseFlags() (*Config, error) {
 	fs.StringVar(&cfg.HTTPBearerToken, "bearer-token", cfg.HTTPBearerToken, "Bearer token for HTTP authentication")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, fmt.Errorf("parsing flags: %w", err)
+	}
+
+	// M4: Fall back to env var for bearer token
+	if cfg.HTTPBearerToken == "" {
+		cfg.HTTPBearerToken = os.Getenv("QB_CONTEXT_BEARER_TOKEN")
 	}
 
 	// H21: Prevent zero or negative batch-size causing infinite loop
@@ -176,6 +181,11 @@ func ParseFlags() (*Config, error) {
 	}
 	if cfg.GitMaxIntentBytes < 100 {
 		cfg.GitMaxIntentBytes = 1500
+	}
+
+	// Validate port range
+	if cfg.HTTPPort < 1 || cfg.HTTPPort > 65535 {
+		return nil, fmt.Errorf("port must be between 1 and 65535, got %d", cfg.HTTPPort)
 	}
 
 	// Validate profile

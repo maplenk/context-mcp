@@ -24,7 +24,7 @@ import (
 )
 
 // Version is the package-level version string, referenced by server.go.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // ToolDeps holds dependencies needed by MCP tools
 type ToolDeps struct {
@@ -51,6 +51,7 @@ func isToolInProfile(toolName, profile string) bool {
 		"get_key_symbols":          true,
 		"explore":                  true,
 		"search_code":              true,
+		"assemble_context":         true,
 	}
 	switch profile {
 	case "full":
@@ -140,12 +141,45 @@ type UnderstandParams struct {
 	Symbol string `json:"symbol" jsonschema:"required,description=Symbol name to understand"`
 }
 
+// AssembleContextParams are the parameters for the assemble_context tool
+type AssembleContextParams struct {
+	Query            string   `json:"query" jsonschema:"required,description=Search query to find relevant code"`
+	BudgetTokens     int      `json:"budget_tokens,omitempty" jsonschema:"description=Maximum token budget for assembled context (default: 4000)"`
+	Mode             string   `json:"mode,omitempty" jsonschema:"description=Output fidelity: summary, signatures, snippets, bundle, or full (default: snippets)"`
+	ActiveFiles      []string `json:"active_files,omitempty" jsonschema:"description=File paths currently being edited for PPR personalization"`
+	MaxPerFile       int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per file (default: 2)"`
+	IncludeNeighbors bool     `json:"include_neighbors,omitempty" jsonschema:"description=Include callers/callees of top results (default: false)"`
+}
+
+// AssembleContextResponse is the structured response from assemble_context
+type AssembleContextResponse struct {
+	Query        string                `json:"query"`
+	Mode         string                `json:"mode"`
+	BudgetTokens int                   `json:"budget_tokens"`
+	UsedTokens   int                   `json:"used_tokens"`
+	Items        []AssembleContextItem `json:"items"`
+	Excluded     int                   `json:"excluded"`
+	Summary      string                `json:"summary"`
+}
+
+// AssembleContextItem represents a single item in the assembled context
+type AssembleContextItem struct {
+	Rank     int     `json:"rank"`
+	Name     string  `json:"name"`
+	FilePath string  `json:"file_path"`
+	ID       string  `json:"id"`
+	Score    float64 `json:"score"`
+	Content  string  `json:"content"`
+	Tokens   int     `json:"tokens"`
+	Reason   string  `json:"reason,omitempty"`
+}
+
 // IndexFunc is the callback for triggering a re-index
 type IndexFunc func(path string) error
 
-// RegisterTools registers all 13 tools for CLI mode and profile-gated tools for MCP SDK mode.
-// CLI tools: all 13 available via GetHandler/GetTools (always).
-// SDK tools (MCP protocol): gated by deps.Profile — "core" (6), "extended" (10), or "full" (13).
+// RegisterTools registers all 14 tools for CLI mode and profile-gated tools for MCP SDK mode.
+// CLI tools: all 14 available via GetHandler/GetTools (always).
+// SDK tools (MCP protocol): gated by deps.Profile — "core" (6), "extended" (11), or "full" (14).
 func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerContextTool(s, deps)
 	registerImpactTool(s, deps)
@@ -160,6 +194,7 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerArchitectureSummaryTool(s, deps)
 	registerExploreTool(s, deps)
 	registerUnderstandTool(s, deps)
+	registerAssembleContextTool(s, deps)
 	// M9: Register MCP resources and prompts
 	registerResources(s, deps)
 	registerPrompts(s, deps)
@@ -2505,6 +2540,315 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 				return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
 			}
 			result, err := understandHandler(deps, p)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return toCallToolResult(result)
+		})
+	}
+}
+
+// ----- Tool 14: assemble_context -----
+
+// estimateTokens returns a rough token count for a string (~4 chars per token).
+func estimateTokens(text string) int {
+	return len(text) / 4
+}
+
+// readNodeSource reads the byte range [StartByte, EndByte) from a node's file.
+// Returns "" on any error. Caps file size at 5MB to avoid reading huge files.
+func readNodeSource(repoRoot string, node types.ASTNode) string {
+	const maxFileSize = 5 * 1024 * 1024 // 5MB
+
+	filePath := filepath.Join(repoRoot, node.FilePath)
+	f, err := os.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || info.Size() > maxFileSize {
+		return ""
+	}
+
+	start := node.StartByte
+	end := node.EndByte
+	if end <= start || int64(end) > info.Size() {
+		return ""
+	}
+
+	buf := make([]byte, end-start)
+	n, err := f.ReadAt(buf, int64(start))
+	if err != nil && n == 0 {
+		return ""
+	}
+	return string(buf[:n])
+}
+
+// assembleContextHandler implements the greedy budget selector for assemble_context.
+func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}, error) {
+	if p.Query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+
+	// Apply defaults
+	if p.BudgetTokens == 0 {
+		p.BudgetTokens = 4000
+	}
+	if p.Mode == "" {
+		p.Mode = "snippets"
+	}
+	if p.MaxPerFile == 0 {
+		p.MaxPerFile = 2
+	}
+
+	// Validate mode
+	validModes := map[string]bool{
+		"summary": true, "signatures": true, "snippets": true, "bundle": true, "full": true,
+	}
+	if !validModes[p.Mode] {
+		return nil, fmt.Errorf("invalid mode %q: must be one of summary, signatures, snippets, bundle, full", p.Mode)
+	}
+
+	if deps.Search == nil {
+		return nil, fmt.Errorf("search engine not initialized")
+	}
+
+	// Resolve active files to node IDs for PPR personalization
+	var activeFileNodeIDs []string
+	for _, filePath := range p.ActiveFiles {
+		nodeIDs, err := deps.Store.GetNodeIDsByFile(filePath)
+		if err == nil {
+			activeFileNodeIDs = append(activeFileNodeIDs, nodeIDs...)
+		}
+	}
+
+	// Search with generous limit
+	results, err := deps.Search.Search(p.Query, 50, activeFileNodeIDs, p.MaxPerFile)
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+
+	// Build items within budget
+	var items []AssembleContextItem
+	usedTokens := 0
+	excluded := 0
+	rank := 0
+
+	consecutiveSkips := 0
+	for i, r := range results {
+		content := generateModeContent(deps.RepoRoot, r.Node, p.Mode)
+		tokens := estimateTokens(content)
+
+		if usedTokens+tokens > p.BudgetTokens {
+			excluded++
+			consecutiveSkips++
+			if consecutiveSkips > 5 {
+				excluded += len(results) - i - 1
+				break
+			}
+			continue
+		}
+		consecutiveSkips = 0
+
+		rank++
+		items = append(items, AssembleContextItem{
+			Rank:     rank,
+			Name:     r.Node.SymbolName,
+			FilePath: r.Node.FilePath,
+			ID:       r.Node.ID,
+			Score:    r.Score,
+			Content:  content,
+			Tokens:   tokens,
+			Reason:   generateReasonFromBreakdown(r.Breakdown),
+		})
+		usedTokens += tokens
+	}
+
+	// If include_neighbors, add callers/callees of top results
+	if p.IncludeNeighbors && deps.Graph != nil && len(items) > 0 {
+		seen := make(map[string]bool)
+		for _, item := range items {
+			seen[item.ID] = true
+		}
+
+		// Collect neighbor IDs from top 5 items
+		limit := 5
+		if len(items) < limit {
+			limit = len(items)
+		}
+		var neighborIDs []string
+		for _, item := range items[:limit] {
+			callers := deps.Graph.GetCallers(item.ID)
+			callees := deps.Graph.GetCallees(item.ID)
+			neighborIDs = append(neighborIDs, callers...)
+			neighborIDs = append(neighborIDs, callees...)
+		}
+
+		for _, nID := range neighborIDs {
+			if seen[nID] {
+				continue
+			}
+			seen[nID] = true
+
+			node, err := deps.Store.GetNode(nID)
+			if err != nil || node == nil {
+				continue
+			}
+
+			content := generateModeContent(deps.RepoRoot, *node, p.Mode)
+			tokens := estimateTokens(content)
+
+			if usedTokens+tokens > p.BudgetTokens {
+				excluded++
+				continue
+			}
+
+			rank++
+			items = append(items, AssembleContextItem{
+				Rank:     rank,
+				Name:     node.SymbolName,
+				FilePath: node.FilePath,
+				ID:       node.ID,
+				Score:    0,
+				Content:  content,
+				Tokens:   tokens,
+				Reason:   "neighbor (caller/callee)",
+			})
+			usedTokens += tokens
+		}
+	}
+
+	summary := fmt.Sprintf("Assembled %d items (%d tokens / %d budget) for %q [mode=%s]",
+		len(items), usedTokens, p.BudgetTokens, p.Query, p.Mode)
+	if excluded > 0 {
+		summary += fmt.Sprintf(", %d excluded (over budget)", excluded)
+	}
+
+	return AssembleContextResponse{
+		Query:        p.Query,
+		Mode:         p.Mode,
+		BudgetTokens: p.BudgetTokens,
+		UsedTokens:   usedTokens,
+		Items:        items,
+		Excluded:     excluded,
+		Summary:      summary,
+	}, nil
+}
+
+// generateModeContent produces content for a node based on the output fidelity mode.
+func generateModeContent(repoRoot string, node types.ASTNode, mode string) string {
+	switch mode {
+	case "summary":
+		s := node.ContentSum
+		if s == "" {
+			s = fmt.Sprintf("%s %s in %s", node.NodeType.String(), node.SymbolName, node.FilePath)
+		}
+		return s
+	case "signatures":
+		src := readNodeSource(repoRoot, node)
+		if src == "" {
+			return fmt.Sprintf("%s %s", node.NodeType.String(), node.SymbolName)
+		}
+		// Extract first line (typically the signature)
+		firstLine := src
+		if idx := strings.IndexByte(src, '\n'); idx >= 0 {
+			firstLine = src[:idx]
+		}
+		return strings.TrimSpace(firstLine)
+	case "snippets":
+		src := readNodeSource(repoRoot, node)
+		if src == "" {
+			// Fallback to content_sum
+			if node.ContentSum != "" {
+				return node.ContentSum
+			}
+			return fmt.Sprintf("%s %s in %s", node.NodeType.String(), node.SymbolName, node.FilePath)
+		}
+		// Cap snippets at ~50 lines
+		lines := strings.SplitN(src, "\n", 51)
+		if len(lines) > 50 {
+			return strings.Join(lines[:50], "\n") + "\n// ... (truncated)"
+		}
+		return src
+	case "bundle":
+		src := readNodeSource(repoRoot, node)
+		if src == "" {
+			if node.ContentSum != "" {
+				return node.ContentSum
+			}
+			return fmt.Sprintf("%s %s in %s", node.NodeType.String(), node.SymbolName, node.FilePath)
+		}
+		// Bundle: full source with file header
+		return fmt.Sprintf("// %s:%s\n%s", node.FilePath, node.SymbolName, src)
+	case "full":
+		src := readNodeSource(repoRoot, node)
+		if src == "" {
+			if node.ContentSum != "" {
+				return node.ContentSum
+			}
+			return fmt.Sprintf("%s %s in %s", node.NodeType.String(), node.SymbolName, node.FilePath)
+		}
+		return src
+	default:
+		return node.ContentSum
+	}
+}
+
+func registerAssembleContextTool(s *Server, deps ToolDeps) {
+	desc := "Token-budgeted context assembly. Returns ranked code snippets fitted within a token budget. Use when you need to gather context efficiently within a token limit."
+
+	// CLI handler
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p AssembleContextParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		return assembleContextHandler(deps, p)
+	}
+
+	s.RegisterTool(ToolDefinition{
+		Name:        "assemble_context",
+		Description: desc,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query":             map[string]interface{}{"type": "string", "description": "Search query to find relevant code"},
+				"budget_tokens":     map[string]interface{}{"type": "integer", "description": "Maximum token budget (default: 4000)", "default": 4000},
+				"mode":              map[string]interface{}{"type": "string", "description": "Output fidelity: summary, signatures, snippets, bundle, or full (default: snippets)", "default": "snippets"},
+				"active_files":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "File paths currently being edited"},
+				"max_per_file":      map[string]interface{}{"type": "integer", "description": "Maximum results per file (default: 2)", "default": 2},
+				"include_neighbors": map[string]interface{}{"type": "boolean", "description": "Include callers/callees of top results"},
+			},
+			"required": []string{"query"},
+		},
+	}, cliHandler)
+
+	// SDK handler — gated by profile (mark3labs/mcp-go pattern)
+	if isToolInProfile("assemble_context", deps.Profile) {
+		tool := mcp.NewTool("assemble_context",
+			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("Assemble Context"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search query to find relevant code")),
+			mcp.WithNumber("budget_tokens", mcp.Description("Maximum token budget (default: 4000)")),
+			mcp.WithString("mode", mcp.Description("Output fidelity: summary, signatures, snippets, bundle, or full (default: snippets)")),
+			mcp.WithArray("active_files", mcp.Description("File paths currently being edited"), mcp.WithStringItems()),
+			mcp.WithNumber("max_per_file", mcp.Description("Maximum results per file (default: 2)")),
+			mcp.WithBoolean("include_neighbors", mcp.Description("Include callers/callees of top results")),
+		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "token-budgeted context assembly for efficient retrieval",
+			},
+		}
+		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			var p AssembleContextParams
+			if err := req.BindArguments(&p); err != nil {
+				return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+			}
+			result, err := assembleContextHandler(deps, p)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
