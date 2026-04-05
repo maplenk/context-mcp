@@ -48,8 +48,8 @@ func DefaultConfig() SearchConfig {
 		WeightInDegree:    0.00,
 		WeightSemantic:    0.15,
 
-		RouteBoost:       2.5,
-		RouteMethodBoost: 1.3,
+		RouteBoost:       4.0,
+		RouteMethodBoost: 1.5,
 		ClassBoost:       1.5,
 		FunctionBoost:    1.2,
 

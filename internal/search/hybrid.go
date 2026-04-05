@@ -106,6 +106,9 @@ var queryAliases = map[string][]string{
 	"session":     {"sessionhandler", "cookie"},
 	"sync":        {"listener", "event", "dispatch"},
 	"database":    {"migration", "schema", "table"},
+	"endpoint":    {"route", "api", "controller"},
+	"endpoints":   {"route", "api", "controller"},
+	"route":       {"endpoint", "api", "controller"},
 }
 
 // camelCaseRe splits CamelCase identifiers into words.
@@ -213,6 +216,17 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		}
 	}
 
+	// Path 3: Route-specific candidate injection
+	// When query intent is route, do a type-filtered FTS search to ensure
+	// route nodes enter the candidate set even if general FTS ranks them low.
+	kind := detectQueryKind(query)
+	if kind == queryKindRoute {
+		routeResults, err := h.store.SearchLexicalByType(ftsQuery, types.NodeTypeRoute, 50)
+		if err == nil && len(routeResults) > 0 {
+			lexicalResults = append(lexicalResults, routeResults...)
+		}
+	}
+
 	// Collect all candidate nodes
 	candidates := collectCandidates(lexicalResults, semanticResults)
 	if len(candidates) == 0 {
@@ -301,10 +315,7 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// Load betweenness scores (already [0,1] from index time)
 	betweennessScores, _ := h.store.GetAllBetweenness()
 
-	// Detect query kind once for node-type boosting (uses original query, not cleanedQuery)
-	kind := detectQueryKind(query)
-
-	// Compute composite scores
+	// Compute composite scores (kind was already detected above for route injection)
 	var results []types.SearchResult
 	for nodeID, node := range candidates {
 		bm25 := bm25Scores[nodeID]

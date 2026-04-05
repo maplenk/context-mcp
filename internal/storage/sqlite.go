@@ -144,6 +144,21 @@ func BuildSearchTerms(symbolName, filePath string) string {
 			tokens = append(tokens, lower)
 		}
 	}
+
+	// Also split on URL-path characters for route-style symbols
+	// "POST /v1/merchant/{storeID}/order" → ["post", "v1", "merchant", "storeid", "order"]
+	if strings.Contains(symbolName, "/") {
+		for _, segment := range strings.FieldsFunc(symbolName, func(r rune) bool {
+			return r == '/' || r == '{' || r == '}' || r == ' '
+		}) {
+			lower := strings.ToLower(segment)
+			if lower != "" && !seen[lower] {
+				seen[lower] = true
+				tokens = append(tokens, lower)
+			}
+		}
+	}
+
 	return strings.Join(tokens, " ")
 }
 
@@ -656,6 +671,40 @@ func (s *Store) SearchLexicalRaw(query string, limit int) ([]types.SearchResult,
 		}
 		r.Node.NodeType = types.NodeType(nt)
 		// BM25 returns negative scores (lower is better), negate for consistency
+		r.Score = -r.Score
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// SearchLexicalByType performs FTS5 BM25 search filtered to a specific node type.
+// Used for route-specific candidate injection when query intent indicates routes.
+func (s *Store) SearchLexicalByType(query string, nodeType types.NodeType, limit int) ([]types.SearchResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
+		       bm25(nodes_fts, 10.0, 1.0, 1.0, 5.0, 0.0) as score
+		FROM nodes_fts fts
+		JOIN nodes n ON n.id = fts.node_id
+		WHERE nodes_fts MATCH ? AND n.node_type = ?
+		ORDER BY score
+		LIMIT ?`, query, uint8(nodeType), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []types.SearchResult
+	for rows.Next() {
+		var r types.SearchResult
+		var nt uint8
+		if err := rows.Scan(&r.Node.ID, &r.Node.FilePath, &r.Node.SymbolName, &nt,
+			&r.Node.StartByte, &r.Node.EndByte, &r.Node.ContentSum, &r.Score); err != nil {
+			return nil, err
+		}
+		r.Node.NodeType = types.NodeType(nt)
 		r.Score = -r.Score
 		results = append(results, r)
 	}

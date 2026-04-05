@@ -150,8 +150,20 @@ func ExtractRoutes(content []byte, relPath string) ([]types.ASTNode, []types.AST
 		// Create route node
 		symbolName := httpMethod + " " + routePath
 		contentSum := symbolName
+
+		// Extract meaningful path segments for FTS indexing
+		pathTokens := extractRoutePathTokens(routePath)
+		if len(pathTokens) > 0 {
+			contentSum += " " + strings.Join(pathTokens, " ")
+		}
+
+		// Mark versioned API paths as "api endpoint" for search discovery
+		if isAPIRoute(routePath) {
+			contentSum += " api endpoint"
+		}
+
 		if controllerName != "" {
-			contentSum += " -> " + controllerName + "@" + methodName
+			contentSum += " " + controllerName + " " + methodName
 		}
 
 		routeNode := types.ASTNode{
@@ -178,6 +190,32 @@ func ExtractRoutes(content []byte, relPath string) ([]types.ASTNode, []types.AST
 	}
 
 	return nodes, edges
+}
+
+// extractRoutePathTokens splits a route path into meaningful search tokens.
+// "/v1/merchant/{storeID}/order" → ["v1", "merchant", "storeID", "order"]
+func extractRoutePathTokens(path string) []string {
+	var tokens []string
+	for _, segment := range strings.Split(path, "/") {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		// Strip braces from parameters: {storeID} → storeID
+		segment = strings.TrimPrefix(segment, "{")
+		segment = strings.TrimSuffix(segment, "}")
+		tokens = append(tokens, segment)
+	}
+	return tokens
+}
+
+// isAPIRoute returns true if the route path looks like a versioned API endpoint.
+func isAPIRoute(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasPrefix(lower, "/v1/") || strings.HasPrefix(lower, "/v2/") ||
+		strings.HasPrefix(lower, "/v3/") || strings.HasPrefix(lower, "/api/") ||
+		strings.Contains(lower, "/v1/") || strings.Contains(lower, "/v2/") ||
+		strings.Contains(lower, "/v3/") || strings.Contains(lower, "/api/")
 }
 
 // isRouteFile returns true if the file path looks like a Laravel route file.
