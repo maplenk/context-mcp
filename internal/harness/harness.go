@@ -158,6 +158,11 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 
 	// Try the CLI path first.
 	if lookErr == nil {
+		if opts.Force {
+			rmCmd := exec.Command(claudePath, "mcp", "remove", "context-mcp")
+			rmCmd.CombinedOutput() // ignore error (entry might not exist)
+		}
+
 		cmdArgs := []string{
 			"mcp", "add",
 			"--transport", transport,

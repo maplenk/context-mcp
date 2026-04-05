@@ -1481,6 +1481,23 @@ func validateTransport(t string) {
 	}
 }
 
+// validateScope checks --scope flag value.
+func validateScope(scope, client string) {
+	if scope == "" {
+		return
+	}
+	switch scope {
+	case "user", "local", "project":
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid --scope %q, must be user, local, or project\n", scope)
+		os.Exit(1)
+	}
+	if client == "codex" && scope != "" && scope != "user" {
+		fmt.Fprintf(os.Stderr, "Error: --scope is only supported for claude-code\n")
+		os.Exit(1)
+	}
+}
+
 // envFlag collects repeated --env KEY=VALUE flags into a map.
 type envFlag struct {
 	vals map[string]string
@@ -1517,8 +1534,8 @@ func runInstall(args []string) {
 	validateClient(*client, true)
 	validateProfile(*profile)
 	validateTransport(*transport)
+	validateScope(*scope, *client)
 
-	// Validate URL requirement for remote transports.
 	if (*transport == "http" || *transport == "sse") && *url == "" {
 		fmt.Fprintf(os.Stderr, "Error: --url is required when --transport is %s\n", *transport)
 		os.Exit(1)
@@ -1574,6 +1591,15 @@ func runDoctor(args []string) {
 		os.Exit(1)
 	}
 
+	if *repo != "" {
+		absRepo, err := filepath.Abs(*repo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving repo path: %v\n", err)
+			os.Exit(1)
+		}
+		*repo = absRepo
+	}
+
 	validateClient(*client, false)
 
 	checks, err := harness.Doctor(harness.DoctorOpts{
@@ -1619,6 +1645,12 @@ func runPrintConfig(args []string) {
 	validateClient(*client, true)
 	validateProfile(*profile)
 	validateTransport(*transport)
+	validateScope(*scope, *client)
+
+	if (*transport == "http" || *transport == "sse") && *url == "" {
+		fmt.Fprintf(os.Stderr, "Error: --url is required when --transport is %s\n", *transport)
+		os.Exit(1)
+	}
 
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {
