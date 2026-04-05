@@ -113,10 +113,12 @@ func splitFileBasename(name string) []string {
 	})
 }
 
-// BuildSearchTerms produces a space-separated string of lowercase tokens derived from
+// BuildSearchTerms produces a space-separated string of tokens derived from
 // the symbol name (CamelCase-split) and the file basename (split on . _ -).
 // This string is stored in the FTS index so that inner tokens of compound identifiers
 // like "PaymentMappingService" become individually searchable.
+// The original unsplit symbol name and file basename are prepended (preserving case)
+// to enable compound prefix matching, matching the C reference codebase's behavior.
 func BuildSearchTerms(symbolName, filePath string) string {
 	// Split symbolName via CamelCase
 	parts := tokenutil.SplitCamelCase(symbolName)
@@ -127,20 +129,44 @@ func BuildSearchTerms(symbolName, filePath string) string {
 	nameWithoutExt := strings.TrimSuffix(base, ext)
 	fileParts := splitFileBasename(nameWithoutExt)
 
-	// Collect all tokens lowercase, deduplicate preserving order
-	seen := make(map[string]bool)
+	// Collect tokens, deduplicate preserving order.
+	// Track originals separately from lowercase parts so both the compound
+	// identifier and its split parts appear in the output.
+	seenOriginal := make(map[string]bool) // tracks originals (case-insensitive)
+	seenLower := make(map[string]bool)    // tracks lowercase split parts
 	var tokens []string
+
+	// C-style: prepend original symbolName (unsplit) for compound prefix matching.
+	// FTS5 tokenizer is case-insensitive, so "OrderController" enables prefix
+	// queries like "ordercontroller*" to match.
+	if symbolName != "" {
+		lowerSym := strings.ToLower(symbolName)
+		seenOriginal[lowerSym] = true
+		tokens = append(tokens, symbolName)
+	}
+
+	// C-style: prepend original file basename (unsplit) if different
+	if nameWithoutExt != "" {
+		lowerBase := strings.ToLower(nameWithoutExt)
+		if !seenOriginal[lowerBase] {
+			seenOriginal[lowerBase] = true
+			tokens = append(tokens, nameWithoutExt)
+		}
+	}
+
+	// Add lowercase CamelCase-split parts from symbolName
 	for _, p := range parts {
 		lower := strings.ToLower(p)
-		if lower != "" && !seen[lower] {
-			seen[lower] = true
+		if lower != "" && !seenLower[lower] {
+			seenLower[lower] = true
 			tokens = append(tokens, lower)
 		}
 	}
+	// Add lowercase split parts from file basename
 	for _, p := range fileParts {
 		lower := strings.ToLower(p)
-		if lower != "" && !seen[lower] {
-			seen[lower] = true
+		if lower != "" && !seenLower[lower] {
+			seenLower[lower] = true
 			tokens = append(tokens, lower)
 		}
 	}
@@ -152,8 +178,8 @@ func BuildSearchTerms(symbolName, filePath string) string {
 			return r == '/' || r == '{' || r == '}' || r == ' '
 		}) {
 			lower := strings.ToLower(segment)
-			if lower != "" && !seen[lower] {
-				seen[lower] = true
+			if lower != "" && !seenLower[lower] {
+				seenLower[lower] = true
 				tokens = append(tokens, lower)
 			}
 		}
@@ -706,6 +732,117 @@ func (s *Store) SearchLexicalByType(query string, nodeType types.NodeType, limit
 		}
 		r.Node.NodeType = types.NodeType(nt)
 		r.Score = -r.Score
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// SearchLexicalFilteredRaw performs FTS5 BM25 search filtered to specific node types.
+// Like SearchLexicalRaw but adds WHERE n.node_type IN (...) filter.
+// Used to exclude route nodes from general FTS (routes are found via edge-based lookup).
+func (s *Store) SearchLexicalFilteredRaw(query string, nodeTypes []types.NodeType, limit int) ([]types.SearchResult, error) {
+	if len(nodeTypes) == 0 {
+		return nil, nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Build IN clause
+	placeholders := make([]string, len(nodeTypes))
+	args := make([]interface{}, 0, len(nodeTypes)+2)
+	args = append(args, query)
+	for i, nt := range nodeTypes {
+		placeholders[i] = "?"
+		args = append(args, uint8(nt))
+	}
+	args = append(args, limit)
+
+	sqlQuery := fmt.Sprintf(`
+		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
+		       bm25(nodes_fts, 10.0, 1.0, 1.0, 5.0, 0.0) as score
+		FROM nodes_fts fts
+		JOIN nodes n ON n.id = fts.node_id
+		WHERE nodes_fts MATCH ?
+		AND n.node_type IN (%s)
+		ORDER BY score
+		LIMIT ?`, strings.Join(placeholders, ", "))
+
+	rows, err := s.db.Query(sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []types.SearchResult
+	for rows.Next() {
+		var r types.SearchResult
+		var nt uint8
+		if err := rows.Scan(&r.Node.ID, &r.Node.FilePath, &r.Node.SymbolName, &nt,
+			&r.Node.StartByte, &r.Node.EndByte, &r.Node.ContentSum, &r.Score); err != nil {
+			return nil, err
+		}
+		r.Node.NodeType = types.NodeType(nt)
+		r.Score = -r.Score
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// FindRouteNodesByKeywords searches for route-type nodes whose search_terms
+// contain any of the given keywords. Returns matching route nodes with relevance scoring.
+func (s *Store) FindRouteNodesByKeywords(keywords []string, limit int) ([]types.SearchResult, error) {
+	if len(keywords) == 0 {
+		return nil, nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Build OR'd LIKE conditions for each keyword
+	var conditions []string
+	var args []interface{}
+	for _, kw := range keywords {
+		escaped := escapeLIKE(strings.ToLower(kw))
+		conditions = append(conditions, "LOWER(n.search_terms) LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+escaped+"%")
+	}
+	args = append(args, uint8(types.NodeTypeRoute))
+	args = append(args, limit)
+
+	sqlQuery := fmt.Sprintf(`
+		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum, n.search_terms
+		FROM nodes n
+		WHERE (%s)
+		AND n.node_type = ?
+		LIMIT ?`, strings.Join(conditions, " OR "))
+
+	rows, err := s.db.Query(sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []types.SearchResult
+	for rows.Next() {
+		var r types.SearchResult
+		var nt uint8
+		var searchTerms string
+		if err := rows.Scan(&r.Node.ID, &r.Node.FilePath, &r.Node.SymbolName, &nt,
+			&r.Node.StartByte, &r.Node.EndByte, &r.Node.ContentSum, &searchTerms); err != nil {
+			return nil, err
+		}
+		r.Node.NodeType = types.NodeType(nt)
+
+		// Score based on keyword match ratio
+		matchCount := 0
+		lowerTerms := strings.ToLower(searchTerms)
+		for _, kw := range keywords {
+			if strings.Contains(lowerTerms, strings.ToLower(kw)) {
+				matchCount++
+			}
+		}
+		r.Score = float64(matchCount) / float64(len(keywords))
 		results = append(results, r)
 	}
 	return results, rows.Err()

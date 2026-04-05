@@ -189,7 +189,6 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	// Path 1: Lexical search via FTS5 BM25
 	// Use SearchLexicalRaw because buildFTSQuery already sanitizes via sanitizeFTS
 	// and constructs valid FTS5 syntax (OR operators, * prefix wildcards).
-	// SearchLexical would double-sanitize, destroying OR→or and stripping *.
 	lexicalResults, err := h.store.SearchLexicalRaw(ftsQuery, candidateLimit)
 	if err != nil {
 		// FTS5 query syntax errors — try sanitized original as fallback
@@ -216,14 +215,52 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		}
 	}
 
-	// Path 3: Route-specific candidate injection
-	// When query intent is route, do a type-filtered FTS search to ensure
-	// route nodes enter the candidate set even if general FTS ranks them low.
+	// Path 3: Route-specific results (collected separately, injected post-scoring)
+	// Routes are discovered via targeted FTS with route-specific keywords,
+	// then injected into final results AFTER composite scoring to avoid being
+	// outcompeted by methods with richer signals (PPR, betweenness).
 	kind := detectQueryKind(query)
+	var routeInjections []types.SearchResult
 	if kind == queryKindRoute {
-		routeResults, err := h.store.SearchLexicalByType(ftsQuery, types.NodeTypeRoute, 50)
+		routeKeywords := extractRouteKeywords(query)
+		var routeFTS string
+		if len(routeKeywords) > 0 {
+			var routeTerms []string
+			for _, kw := range routeKeywords {
+				if len(kw) >= 2 {
+					routeTerms = append(routeTerms, kw+"*")
+				}
+			}
+			if len(routeTerms) > 0 {
+				routeFTS = strings.Join(routeTerms, " OR ")
+			}
+		}
+		if routeFTS == "" {
+			routeFTS = ftsQuery
+		}
+
+		routeResults, err := h.store.SearchLexicalByType(routeFTS, types.NodeTypeRoute, 50)
 		if err == nil && len(routeResults) > 0 {
-			lexicalResults = append(lexicalResults, routeResults...)
+			for _, rr := range routeResults {
+				routeInjections = append(routeInjections, rr)
+
+				// Follow HANDLES edges to discover handler methods
+				edges, err := h.store.GetEdgesFrom(rr.Node.ID)
+				if err != nil {
+					continue
+				}
+				for _, edge := range edges {
+					if edge.EdgeType == types.EdgeTypeHandles {
+						handlerNode, err := h.store.GetNode(edge.TargetID)
+						if err == nil && handlerNode != nil {
+							routeInjections = append(routeInjections, types.SearchResult{
+								Node:  *handlerNode,
+								Score: rr.Score * 0.8,
+							})
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -365,7 +402,45 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 	})
 
 	// Apply per-file cap
-	results = h.applyPerFileCap(results, perFileCap)
+	results = h.applyPerFileCap(results, perFileCap, kind == queryKindRoute)
+
+	// Inject route results post-scoring: routes from Path 3 bypass composite
+	// scoring and are appended directly. This ensures routes appear in route
+	// queries regardless of BM25/PPR competition from methods.
+	if len(routeInjections) > 0 {
+		// Determine a reference score: use the score of the last result in the
+		// current set, or the top score if the set is small.
+		var refScore float64
+		if len(results) > 0 {
+			refScore = results[0].Score
+		} else {
+			refScore = 1.0
+		}
+
+		// Deduplicate against existing results
+		existingIDs := make(map[string]bool)
+		for _, r := range results {
+			existingIDs[r.Node.ID] = true
+		}
+
+		for _, ri := range routeInjections {
+			if existingIDs[ri.Node.ID] {
+				continue
+			}
+			existingIDs[ri.Node.ID] = true
+			// Give route results a score competitive with top results
+			ri.Score = refScore * h.config.RouteBoost * 0.25
+			results = append(results, ri)
+		}
+
+		// Re-sort after injection
+		sort.Slice(results, func(i, j int) bool {
+			if results[i].Score != results[j].Score {
+				return results[i].Score > results[j].Score
+			}
+			return results[i].Node.ID < results[j].Node.ID
+		})
+	}
 
 	// Trim to limit
 	if len(results) > limit {
@@ -476,6 +551,41 @@ func isAllUpper(s string) bool {
 		}
 	}
 	return true
+}
+
+// extractRouteKeywords extracts URL-path relevant keywords from a route query.
+// Strips HTTP verbs, stop words, and generic route terms to find path-specific keywords.
+func extractRouteKeywords(query string) []string {
+	lower := strings.ToLower(query)
+	words := strings.Fields(lower)
+
+	// Words to skip: HTTP verbs, generic route terms, stop words
+	skip := map[string]bool{
+		"get": true, "post": true, "put": true, "delete": true, "patch": true,
+		"api": true, "endpoint": true, "endpoints": true, "route": true, "routes": true,
+		"url": true, "path": true, "http": true, "request": true,
+	}
+
+	// Also skip standard stop words
+	stopWordsMu.RLock()
+	currentStopWords := stopWords
+	stopWordsMu.RUnlock()
+
+	var keywords []string
+	for _, w := range words {
+		if len(w) < 2 {
+			continue
+		}
+		if skip[w] || currentStopWords[w] {
+			continue
+		}
+		// Strip leading/trailing slashes and braces for path segments
+		w = strings.Trim(w, "/{}")
+		if w != "" {
+			keywords = append(keywords, w)
+		}
+	}
+	return keywords
 }
 
 // nodeTypeBoost returns a scoring multiplier based on the query kind and node type.
@@ -714,7 +824,9 @@ func safeGet(m map[string]float64, key string) float64 {
 // applyPerFileCap limits results to maxPerFile entries per unique file_path.
 // Files with pathPenalty <= NonCoreThreshold (generated, vendor, IDE helpers, tests, migrations)
 // are capped at 1 to prevent large auto-generated files from dominating results.
-func (h *HybridSearch) applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
+// When routeQuery is true, route-type nodes bypass the per-file cap because all routes
+// typically live in a single file (e.g., routes.php) and capping would lose relevant matches.
+func (h *HybridSearch) applyPerFileCap(results []types.SearchResult, maxPerFile int, routeQuery bool) []types.SearchResult {
 	fileCounts := make(map[string]int)
 	var capped []types.SearchResult
 
@@ -722,6 +834,11 @@ func (h *HybridSearch) applyPerFileCap(results []types.SearchResult, maxPerFile 
 		cap := maxPerFile
 		if h.pathPenalty(r.Node.FilePath) <= h.config.NonCoreThreshold {
 			cap = 1 // non-core files (generated/vendor/test/etc): 1 result max
+		}
+		// Route nodes bypass per-file cap when query is route-oriented
+		// (all routes live in routes.php, capping to 1 loses relevant matches)
+		if routeQuery && r.Node.NodeType == types.NodeTypeRoute {
+			cap = 10 // effectively unlimited for route files
 		}
 		count := fileCounts[r.Node.FilePath]
 		if count < cap {
@@ -737,7 +854,7 @@ func (h *HybridSearch) applyPerFileCap(results []types.SearchResult, maxPerFile 
 // Kept for tests that call applyPerFileCap() as a package-level function.
 func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.SearchResult {
 	hs := &HybridSearch{config: defaultConfig}
-	return hs.applyPerFileCap(results, maxPerFile)
+	return hs.applyPerFileCap(results, maxPerFile, false)
 }
 
 // pathPenalty returns a scoring multiplier for a file path.
