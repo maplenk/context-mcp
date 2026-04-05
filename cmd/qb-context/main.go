@@ -1471,18 +1471,61 @@ func validateProfile(p string) {
 	}
 }
 
+// validateTransport checks --transport flag value.
+func validateTransport(t string) {
+	switch t {
+	case "stdio", "http", "sse":
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid --transport %q, must be stdio, http, or sse\n", t)
+		os.Exit(1)
+	}
+}
+
+// validateScope checks --scope flag value.
+func validateScope(scope, client string) {
+	if scope == "" {
+		return
+	}
+	switch scope {
+	case "user", "local", "project":
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid --scope %q, must be user, local, or project\n", scope)
+		os.Exit(1)
+	}
+	if client == "codex" && scope != "" && scope != "user" {
+		fmt.Fprintf(os.Stderr, "Error: --scope is only supported for claude-code\n")
+		os.Exit(1)
+	}
+}
+
 func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
 	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
 	repo := fs.String("repo", ".", "Repository root path")
 	force := fs.Bool("force", false, "Overwrite existing configuration")
+	transport := fs.String("transport", "stdio", "Transport type: stdio, http, or sse")
+	url := fs.String("url", "", "Server URL (required when --transport is http or sse)")
+	scope := fs.String("scope", "", "Installation scope: user, local, or project (claude-code only)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
 	validateClient(*client, true)
 	validateProfile(*profile)
+	validateTransport(*transport)
+	validateScope(*scope, *client)
+
+	if (*transport == "http" || *transport == "sse") && *url == "" {
+		fmt.Fprintf(os.Stderr, "Error: --url is required when --transport is %s\n", *transport)
+		os.Exit(1)
+	}
+
+	// Suppress unused variable warnings — these flags are validated above and
+	// will be wired into InstallOpts when remote transport support is added.
+	_ = transport
+	_ = url
+	_ = scope
 
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {
@@ -1525,14 +1568,25 @@ func runUninstall(args []string) {
 func runDoctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (optional, checks all if omitted)")
+	repo := fs.String("repo", "", "Repository root path to check (optional)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
+	}
+
+	if *repo != "" {
+		absRepo, err := filepath.Abs(*repo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving repo path: %v\n", err)
+			os.Exit(1)
+		}
+		*repo = absRepo
 	}
 
 	validateClient(*client, false)
 
 	checks, err := harness.Doctor(harness.DoctorOpts{
-		Client: harness.Client(*client),
+		Client:   harness.Client(*client),
+		RepoRoot: *repo,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1561,12 +1615,28 @@ func runPrintConfig(args []string) {
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
 	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
 	repo := fs.String("repo", ".", "Repository root path")
+	transport := fs.String("transport", "stdio", "Transport type: stdio, http, or sse")
+	url := fs.String("url", "", "Server URL (required when --transport is http or sse)")
+	scope := fs.String("scope", "", "Installation scope: user, local, or project (claude-code only)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
 	validateClient(*client, true)
 	validateProfile(*profile)
+	validateTransport(*transport)
+	validateScope(*scope, *client)
+
+	if (*transport == "http" || *transport == "sse") && *url == "" {
+		fmt.Fprintf(os.Stderr, "Error: --url is required when --transport is %s\n", *transport)
+		os.Exit(1)
+	}
+
+	// Suppress unused variable warnings — these flags are validated above and
+	// will be wired into PrintConfigOpts when remote transport support is added.
+	_ = transport
+	_ = url
+	_ = scope
 
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {

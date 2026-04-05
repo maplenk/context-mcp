@@ -57,7 +57,8 @@ type DoctorCheck struct {
 
 // DoctorOpts contains options for the doctor command.
 type DoctorOpts struct {
-	Client Client // if empty, check all clients
+	Client   Client // if empty, check all clients
+	RepoRoot string // if non-empty, override repo path for checks (must be absolute)
 }
 
 // ---------------------------------------------------------------------------
@@ -103,13 +104,15 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 
 	// Try the CLI path first.
 	if lookErr == nil {
+		if opts.Force {
+			rmCmd := exec.Command(claudePath, "mcp", "remove", "context-mcp")
+			rmCmd.CombinedOutput() // ignore error (entry might not exist)
+		}
+
 		cmdArgs := []string{
 			"mcp", "add",
 			"--transport", "stdio",
 			"--scope", "user",
-		}
-		if opts.Force {
-			cmdArgs = append(cmdArgs, "--force")
 		}
 		cmdArgs = append(cmdArgs, "context-mcp", "--", bin)
 		cmdArgs = append(cmdArgs, buildArgs(opts)...)
