@@ -1,0 +1,207 @@
+{
+  "benchmark_version": "1.1.0",
+  "qb_context_version": "v0.3.0",
+  "run_date": "2026-04-05T13:24:00Z",
+  "mcp_sdk": "mark3labs/mcp-go v0.47.0",
+  "milestone": "P0+P1 complete (SDK migration, annotations, HTTP transport, assemble_context)",
+  "environment": {
+    "os": "darwin/arm64",
+    "go_version": "1.25",
+    "target_repo": "QBApps/qbapi",
+    "target_repo_branch": "staging",
+    "target_repo_description": "Laravel multi-tenant retail/POS backend",
+    "index_stats": {
+      "total_nodes": 19707,
+      "total_edges": 19622,
+      "graph_nodes": 15205,
+      "graph_edges": 19338
+    },
+    "indexing_time_seconds": 41.9
+  },
+  "results": [
+    {
+      "id": "A1",
+      "category": "Exact Match",
+      "tool": "read_symbol",
+      "query": "FiscalYearController",
+      "elapsed_us": 395,
+      "elapsed_human": "395us",
+      "status": "PASS",
+      "result_summary": {
+        "symbol_name": "FiscalYearController",
+        "node_type": "class",
+        "file_path": "app/Http/Controllers/FiscalYearController.php",
+        "source_length_chars": 11644,
+        "fields_returned": 7
+      }
+    },
+    {
+      "id": "A3",
+      "category": "Exact Match",
+      "tool": "search_code",
+      "query": "POST.*order",
+      "elapsed_us": 62076,
+      "elapsed_human": "62ms",
+      "status": "PASS",
+      "result_summary": {
+        "match_count": 10,
+        "files_matched": [
+          "app/Agriculture.php",
+          "app/Http/Controllers/OrderController.php",
+          "app/Http/Controllers/v2/OrderController.php",
+          "app/JSONSchema.php"
+        ]
+      }
+    },
+    {
+      "id": "B1",
+      "category": "Concept Search",
+      "tool": "context",
+      "query": "payment processing and billing logic",
+      "elapsed_us": 9792,
+      "elapsed_human": "9.8ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 10,
+        "top_5_symbols": [
+          "Billme.createRazorpayInvoice",
+          "BillingWeb.processBulkInvoices",
+          "razorPay.processCurlRequestCall",
+          "POST /v2/merchant/{chainID}/processBulkInvoices",
+          "Municipal.postPryagrajBillPayment"
+        ],
+        "top_score": 0.65,
+        "min_score": 0.0681,
+        "files_spanned": 10
+      }
+    },
+    {
+      "id": "B6",
+      "category": "Concept Search",
+      "tool": "context",
+      "query": "omnichannel integration sync logic",
+      "elapsed_us": 3643,
+      "elapsed_human": "3.6ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 10,
+        "top_5_symbols": [
+          "SlackNotificationListener.handle",
+          "Event.listen",
+          "OnlineOrder.getOrderDispatchDetails",
+          "OnlineOrderController.getOrderDispatchSummary",
+          "EasyEcomOrderDispatchJob"
+        ],
+        "top_score": 0.5031,
+        "min_score": 0.1045,
+        "files_spanned": 10
+      }
+    },
+    {
+      "id": "C1",
+      "category": "Cross-file Flow",
+      "tool": "context",
+      "query": "complete flow of creating a new order end to end",
+      "elapsed_us": 8084,
+      "elapsed_human": "8ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 15,
+        "top_5_symbols": [
+          "UnicommerceCompleteGatePassJob.__construct",
+          "Unicommerce.createAndCompleteManifest",
+          "UnicommerceController.createAndCompleteManifest",
+          "UnicommerceController.createAndCompleteManifest (v2)",
+          "Zomato.newOrderCreate"
+        ],
+        "top_score": 0.65,
+        "min_score": 0.0775,
+        "files_spanned": 14
+      }
+    },
+    {
+      "id": "C5",
+      "category": "Cross-file Flow",
+      "tool": "context",
+      "query": "complete API request to database write flow for inventory",
+      "elapsed_us": 11790,
+      "elapsed_human": "11.8ms",
+      "status": "PASS",
+      "result_summary": {
+        "result_count": 15,
+        "top_5_symbols": [
+          "POST /v1/thirdparty/editInventoryAttributes",
+          "POST /v2/unicommerce/{chainID}/completeGatePass",
+          "POST /v2/unicommerce/{chainID}/markSaleOrderReturnedWithInventoryType",
+          "POST /v1/thirdparty/createInventoryAttributes",
+          "POST /v2/easyecom/inventoryCallback"
+        ],
+        "top_score": 0.817,
+        "min_score": 0.817,
+        "files_spanned": 4
+      }
+    }
+  ],
+  "mcp_harness_tests": {
+    "annotations": {
+      "context_has_alwaysLoad": true,
+      "all_tools_have_readOnlyHint": true,
+      "all_tools_have_searchHint": true,
+      "tests_passed": 3,
+      "tests_failed": 0
+    },
+    "response_size": {
+      "hard_limit_bytes": 8192,
+      "context_bytes": 997,
+      "get_architecture_summary_bytes": 989,
+      "impact_bytes": 347,
+      "detect_changes_bytes": "skipped (no git in test env)",
+      "tests_passed": 4,
+      "tests_skipped": 1,
+      "tests_failed": 0
+    },
+    "assemble_context": {
+      "modes_tested": ["summary", "signatures", "snippets", "bundle", "full"],
+      "budget_enforcement": true,
+      "profile_gating": true,
+      "tests_passed": 7,
+      "tests_failed": 0
+    },
+    "protocol": {
+      "server_accessor": true,
+      "tests_passed": 1,
+      "tests_failed": 0
+    }
+  },
+  "haiku_live_test": {
+    "date": "2026-04-05",
+    "model": "claude-3-5-haiku-latest",
+    "mcp_config": {
+      "command": "qb-context",
+      "args": ["--repo", "/Users/naman/Documents/qb-context", "--profile", "extended"],
+      "transport": "stdio"
+    },
+    "queries_tested": [
+      {
+        "user_query": "What tools are available?",
+        "tools_called": ["context"],
+        "response_contained_live_data": true,
+        "notes": "Returned real commit hashes, scores, why_now git history from live index"
+      },
+      {
+        "user_query": "How does the MCP server work?",
+        "tools_called": ["context"],
+        "response_contained_live_data": true,
+        "notes": "Returned server.go, tools.go results with correct file paths and scores"
+      }
+    ],
+    "verdict": "PASS - Haiku successfully called MCP tools and received live indexed data"
+  },
+  "comparison_vs_v0.9.0": {
+    "note": "v0.3.0 is the MCP harness version number (SDK migration). Search quality unchanged from v0.10.0 C-style refactor.",
+    "queries_all_pass": true,
+    "latency_change": "within noise (+/- 5ms per query)",
+    "index_stats_change": "19707 nodes (was 12653 in v0.9.0 - growth from continued indexing, not migration)"
+  },
+  "qb_context_commit": "a03ee09"
+}

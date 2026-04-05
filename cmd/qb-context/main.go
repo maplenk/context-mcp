@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/maplenk/context-mcp/internal/adr"
 	"github.com/maplenk/context-mcp/internal/config"
+	"github.com/maplenk/context-mcp/internal/harness"
 	"github.com/maplenk/context-mcp/internal/embedding"
 	"github.com/maplenk/context-mcp/internal/gitmeta"
 	"github.com/maplenk/context-mcp/internal/graph"
@@ -63,6 +65,22 @@ func main() {
 				log.Fatalf("Failed to parse flags: %v", err)
 			}
 			runServeHTTP(cfg)
+			return
+		}
+		if arg == "install" {
+			runInstall(os.Args[i+2:])
+			return
+		}
+		if arg == "uninstall" {
+			runUninstall(os.Args[i+2:])
+			return
+		}
+		if arg == "doctor" {
+			runDoctor(os.Args[i+2:])
+			return
+		}
+		if arg == "print-config" {
+			runPrintConfig(os.Args[i+2:])
 			return
 		}
 	}
@@ -1421,4 +1439,145 @@ func processFileEvent(event types.FileEvent, cfg *config.Config, store *storage.
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// P2: Install / Doctor / PrintConfig / Uninstall subcommands
+// ---------------------------------------------------------------------------
+
+// validateClient checks --client flag value.
+func validateClient(c string, required bool) {
+	if c == "" && required {
+		fmt.Fprintf(os.Stderr, "Error: --client is required (claude-code or codex)\n")
+		os.Exit(1)
+	}
+	if c != "" && c != "claude-code" && c != "codex" {
+		fmt.Fprintf(os.Stderr, "Error: invalid --client %q, must be claude-code or codex\n", c)
+		os.Exit(1)
+	}
+}
+
+// validateProfile checks --profile flag value.
+func validateProfile(p string) {
+	switch p {
+	case "core", "extended", "full":
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid --profile %q, must be core, extended, or full\n", p)
+		os.Exit(1)
+	}
+}
+
+func runInstall(args []string) {
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	client := fs.String("client", "", "Target client: claude-code or codex (required)")
+	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
+	repo := fs.String("repo", ".", "Repository root path")
+	force := fs.Bool("force", false, "Overwrite existing configuration")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	validateClient(*client, true)
+	validateProfile(*profile)
+
+	absRepo, err := filepath.Abs(*repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving repo path: %v\n", err)
+		os.Exit(1)
+	}
+
+	msg, err := harness.Install(harness.InstallOpts{
+		Client:   harness.Client(*client),
+		Profile:  *profile,
+		RepoRoot: absRepo,
+		Force:    *force,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(msg)
+}
+
+func runUninstall(args []string) {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	client := fs.String("client", "", "Target client: claude-code or codex (required)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	validateClient(*client, true)
+
+	msg, err := harness.Uninstall(harness.UninstallOpts{
+		Client: harness.Client(*client),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(msg)
+}
+
+func runDoctor(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	client := fs.String("client", "", "Target client: claude-code or codex (optional, checks all if omitted)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	validateClient(*client, false)
+
+	checks, err := harness.Doctor(harness.DoctorOpts{
+		Client: harness.Client(*client),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	anyFailed := false
+	for _, c := range checks {
+		if c.Passed {
+			fmt.Printf("[PASS] %s: %s\n", c.Name, c.Message)
+		} else {
+			anyFailed = true
+			fmt.Printf("[FAIL] %s: %s\n", c.Name, c.Message)
+			if c.Fix != "" {
+				fmt.Printf("       Fix: %s\n", c.Fix)
+			}
+		}
+	}
+	if anyFailed {
+		os.Exit(1)
+	}
+}
+
+func runPrintConfig(args []string) {
+	fs := flag.NewFlagSet("print-config", flag.ContinueOnError)
+	client := fs.String("client", "", "Target client: claude-code or codex (required)")
+	profile := fs.String("profile", "extended", "Tool profile: core, extended, or full")
+	repo := fs.String("repo", ".", "Repository root path")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	validateClient(*client, true)
+	validateProfile(*profile)
+
+	absRepo, err := filepath.Abs(*repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving repo path: %v\n", err)
+		os.Exit(1)
+	}
+
+	output, err := harness.PrintConfig(harness.PrintConfigOpts{
+		Client:   harness.Client(*client),
+		Profile:  *profile,
+		RepoRoot: absRepo,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print(output)
 }
