@@ -592,3 +592,314 @@ args = ["--flag"]
 		t.Fatalf("other section should survive uninstall:\n%s", after)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// buildCodexTOML — HTTP transport
+// ---------------------------------------------------------------------------
+
+func TestBuildCodexTOML_HTTP(t *testing.T) {
+	block := buildCodexTOML("", InstallOpts{
+		Transport: "http",
+		URL:       "http://localhost:8080/mcp",
+	})
+	if !strings.Contains(block, "[mcp_servers.context-mcp]") {
+		t.Fatal("missing section header")
+	}
+	if !strings.Contains(block, `url = "http://localhost:8080/mcp"`) {
+		t.Fatalf("missing url line, got:\n%s", block)
+	}
+	if strings.Contains(block, "command") {
+		t.Fatal("HTTP transport should not have command")
+	}
+	if strings.Contains(block, "args") {
+		t.Fatal("HTTP transport should not have args")
+	}
+}
+
+func TestBuildCodexTOML_EnvVars(t *testing.T) {
+	block := buildCodexTOML("/usr/local/bin/qb", InstallOpts{
+		RepoRoot: "/my/repo",
+		EnvVars: map[string]string{
+			"CONTEXT_MCP_AUTH": "token123",
+			"ANOTHER_VAR":     "value",
+		},
+	})
+	if !strings.Contains(block, `command = "/usr/local/bin/qb"`) {
+		t.Fatal("missing command line")
+	}
+	if !strings.Contains(block, "[mcp_servers.context-mcp.env]") {
+		t.Fatalf("missing env section, got:\n%s", block)
+	}
+	if !strings.Contains(block, `ANOTHER_VAR = "value"`) {
+		t.Fatal("missing ANOTHER_VAR env entry")
+	}
+	if !strings.Contains(block, `CONTEXT_MCP_AUTH = "token123"`) {
+		t.Fatal("missing CONTEXT_MCP_AUTH env entry")
+	}
+}
+
+func TestBuildCodexTOML_HTTPWithEnv(t *testing.T) {
+	block := buildCodexTOML("", InstallOpts{
+		Transport: "http",
+		URL:       "http://localhost:8080/mcp",
+		EnvVars:   map[string]string{"TOKEN": "abc"},
+	})
+	if !strings.Contains(block, `url = "http://localhost:8080/mcp"`) {
+		t.Fatal("missing url")
+	}
+	if !strings.Contains(block, "[mcp_servers.context-mcp.env]") {
+		t.Fatal("missing env section")
+	}
+	if !strings.Contains(block, `TOKEN = "abc"`) {
+		t.Fatal("missing TOKEN env")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildClaudeCodeJSONEntry — various transports
+// ---------------------------------------------------------------------------
+
+func TestBuildClaudeCodeJSONEntry_Stdio(t *testing.T) {
+	entry := buildClaudeCodeJSONEntry("/usr/bin/qb", "stdio", InstallOpts{
+		RepoRoot: "/my/repo",
+		Profile:  "core",
+	})
+	if entry["command"] != "/usr/bin/qb" {
+		t.Fatalf("expected command, got %v", entry)
+	}
+	if _, ok := entry["url"]; ok {
+		t.Fatal("stdio should not have url")
+	}
+}
+
+func TestBuildClaudeCodeJSONEntry_HTTP(t *testing.T) {
+	entry := buildClaudeCodeJSONEntry("", "http", InstallOpts{
+		URL: "http://localhost:8080/mcp",
+	})
+	if entry["url"] != "http://localhost:8080/mcp" {
+		t.Fatalf("expected url, got %v", entry)
+	}
+	if entry["transport"] != "http" {
+		t.Fatalf("expected transport=http, got %v", entry["transport"])
+	}
+	if _, ok := entry["command"]; ok {
+		t.Fatal("HTTP should not have command")
+	}
+}
+
+func TestBuildClaudeCodeJSONEntry_SSE(t *testing.T) {
+	entry := buildClaudeCodeJSONEntry("", "sse", InstallOpts{
+		URL: "http://localhost:9090/sse",
+	})
+	if entry["url"] != "http://localhost:9090/sse" {
+		t.Fatalf("expected url, got %v", entry)
+	}
+	if entry["transport"] != "sse" {
+		t.Fatalf("expected transport=sse, got %v", entry["transport"])
+	}
+}
+
+func TestBuildClaudeCodeJSONEntry_WithEnvVars(t *testing.T) {
+	entry := buildClaudeCodeJSONEntry("/usr/bin/qb", "stdio", InstallOpts{
+		RepoRoot: "/my/repo",
+		EnvVars:  map[string]string{"KEY1": "val1", "KEY2": "val2"},
+	})
+	env, ok := entry["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected env map, got %T", entry["env"])
+	}
+	if env["KEY1"] != "val1" || env["KEY2"] != "val2" {
+		t.Fatalf("unexpected env: %v", env)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PrintConfig — HTTP transport
+// ---------------------------------------------------------------------------
+
+func TestPrintConfig_ClaudeCode_HTTP(t *testing.T) {
+	out, err := PrintConfig(PrintConfigOpts{
+		Client:    ClientClaudeCode,
+		RepoRoot:  "/tmp/myrepo",
+		Profile:   "core",
+		Transport: "http",
+		URL:       "http://localhost:8080/mcp",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "--transport http") {
+		t.Fatal("output should contain --transport http")
+	}
+	if !strings.Contains(out, "--url http://localhost:8080/mcp") {
+		t.Fatal("output should contain --url")
+	}
+	if !strings.Contains(out, `"url"`) {
+		t.Fatal("JSON should contain url key")
+	}
+	if !strings.Contains(out, `"transport"`) {
+		t.Fatal("JSON should contain transport key")
+	}
+}
+
+func TestPrintConfig_ClaudeCode_WithScope(t *testing.T) {
+	out, err := PrintConfig(PrintConfigOpts{
+		Client:   ClientClaudeCode,
+		RepoRoot: "/tmp/myrepo",
+		Profile:  "core",
+		Scope:    "project",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "--scope project") {
+		t.Fatal("output should contain --scope project")
+	}
+}
+
+func TestPrintConfig_ClaudeCode_WithEnvVars(t *testing.T) {
+	out, err := PrintConfig(PrintConfigOpts{
+		Client:   ClientClaudeCode,
+		RepoRoot: "/tmp/myrepo",
+		Profile:  "core",
+		EnvVars:  map[string]string{"MY_TOKEN": "abc123"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "--env MY_TOKEN=abc123") {
+		t.Fatalf("CLI output should contain --env, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"MY_TOKEN"`) {
+		t.Fatal("JSON should contain env var key")
+	}
+}
+
+func TestPrintConfig_Codex_HTTP(t *testing.T) {
+	out, err := PrintConfig(PrintConfigOpts{
+		Client:    ClientCodex,
+		RepoRoot:  "/tmp/myrepo",
+		Profile:   "core",
+		Transport: "http",
+		URL:       "http://localhost:8080/mcp",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, `url = "http://localhost:8080/mcp"`) {
+		t.Fatalf("TOML should contain url, got:\n%s", out)
+	}
+	if strings.Contains(out, "command =") {
+		t.Fatal("HTTP TOML should not have command")
+	}
+}
+
+func TestPrintConfig_Codex_WithEnvVars(t *testing.T) {
+	out, err := PrintConfig(PrintConfigOpts{
+		Client:   ClientCodex,
+		RepoRoot: "/tmp/myrepo",
+		Profile:  "core",
+		EnvVars:  map[string]string{"MY_TOKEN": "abc123"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "[mcp_servers.context-mcp.env]") {
+		t.Fatalf("TOML should contain env section, got:\n%s", out)
+	}
+	if !strings.Contains(out, `MY_TOKEN = "abc123"`) {
+		t.Fatal("TOML should contain env var")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// removeTomlSection — with env sub-section
+// ---------------------------------------------------------------------------
+
+func TestRemoveTomlSection_WithSubSection(t *testing.T) {
+	content := `[server.alpha]
+host = "a"
+
+[mcp_servers.context-mcp]
+command = "/usr/bin/qb"
+args = ["--repo", "/tmp"]
+
+[mcp_servers.context-mcp.env]
+TOKEN = "abc"
+
+[server.beta]
+host = "b"
+`
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
+	if strings.Contains(got, "context-mcp") {
+		t.Fatalf("section and sub-sections not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "[server.alpha]") || !strings.Contains(got, "[server.beta]") {
+		t.Fatalf("surrounding sections damaged:\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// effectiveScope / effectiveTransport / isRemoteTransport helpers
+// ---------------------------------------------------------------------------
+
+func TestEffectiveScope(t *testing.T) {
+	if effectiveScope("") != "user" {
+		t.Fatal("empty should default to user")
+	}
+	if effectiveScope("project") != "project" {
+		t.Fatal("project should stay project")
+	}
+}
+
+func TestEffectiveTransport(t *testing.T) {
+	if effectiveTransport("") != "stdio" {
+		t.Fatal("empty should default to stdio")
+	}
+	if effectiveTransport("http") != "http" {
+		t.Fatal("http should stay http")
+	}
+}
+
+func TestIsRemoteTransport(t *testing.T) {
+	if isRemoteTransport("stdio") {
+		t.Fatal("stdio is not remote")
+	}
+	if !isRemoteTransport("http") {
+		t.Fatal("http is remote")
+	}
+	if !isRemoteTransport("sse") {
+		t.Fatal("sse is remote")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip with env sub-section
+// ---------------------------------------------------------------------------
+
+func TestRemoveTomlSection_RoundTrip_WithEnv(t *testing.T) {
+	existing := `[mcp_servers.other]
+command = "/bin/other"
+args = ["--flag"]
+`
+	block := buildCodexTOML("/usr/bin/qb", InstallOpts{
+		RepoRoot: "/my/repo",
+		EnvVars:  map[string]string{"TOKEN": "abc"},
+	})
+	combined := strings.TrimRight(existing, "\n") + "\n\n" + block
+
+	if !strings.Contains(combined, "[mcp_servers.context-mcp]") {
+		t.Fatal("install should add context-mcp section")
+	}
+	if !strings.Contains(combined, "[mcp_servers.context-mcp.env]") {
+		t.Fatal("install should add context-mcp.env section")
+	}
+
+	after := removeTomlSection(combined, "mcp_servers.context-mcp")
+	if strings.Contains(after, "context-mcp") {
+		t.Fatalf("context-mcp and sub-sections should be removed:\n%s", after)
+	}
+	if !strings.Contains(after, "[mcp_servers.other]") {
+		t.Fatalf("other section should survive:\n%s", after)
+	}
+}
