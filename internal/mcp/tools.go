@@ -212,9 +212,9 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerAssembleContextTool(s, deps)
 	registerCheckpointContextTool(s, deps)
 	registerReadDeltaTool(s, deps)
-	// M9: Register MCP resources and prompts
-	registerResources(s, deps)
-	registerPrompts(s, deps)
+	// P4: Register MCP resources and prompts
+	RegisterResources(s, deps)
+	RegisterPrompts(s, deps)
 }
 
 // ----- Tool 1: context -----
@@ -3018,61 +3018,6 @@ func registerReadDeltaTool(s *Server, deps ToolDeps) {
 }
 
 // ----- Helpers -----
-
-// ----- MCP Resources (M9) -----
-
-func registerResources(s *Server, deps ToolDeps) {
-	// Register codebase graph statistics as a resource
-	resource := mcp.NewResource("qb://graph/stats", "Graph Statistics",
-		mcp.WithResourceDescription("Current codebase graph statistics including node count, edge count, and community info"),
-		mcp.WithMIMEType("application/json"),
-	)
-	s.AddResource(resource, func(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-		var nodeCount, edgeCount int
-		if deps.Graph != nil {
-			nodeCount = deps.Graph.NodeCount()
-			edgeCount = deps.Graph.EdgeCount()
-		}
-		data := map[string]interface{}{
-			"nodes": nodeCount,
-			"edges": edgeCount,
-		}
-		if deps.Graph != nil {
-			communities, modularity := deps.Graph.DetectCommunities()
-			data["communities"] = len(communities)
-			data["modularity"] = modularity
-		}
-		jsonBytes, _ := json.MarshalIndent(data, "", "  ")
-		return []mcp.ResourceContents{
-			mcp.TextResourceContents{
-				URI:      "qb://graph/stats",
-				MIMEType: "application/json",
-				Text:     string(jsonBytes),
-			},
-		}, nil
-	})
-}
-
-// ----- MCP Prompts (M9) -----
-
-func registerPrompts(s *Server, deps ToolDeps) {
-	// Register an "explain symbol" prompt template
-	s.AddPrompt(mcp.NewPrompt("explain_symbol",
-		mcp.WithPromptDescription("Generate a prompt to explain a code symbol in context"),
-		mcp.WithArgument("symbol", mcp.ArgumentDescription("The symbol name to explain"), mcp.RequiredArgument()),
-	), func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-		symbol := req.Params.Arguments["symbol"]
-		promptText := fmt.Sprintf(
-			"Explain the purpose and behavior of the code symbol '%s'. "+
-				"Use the `context` tool to find it, then `read_symbol` to read its source code, "+
-				"and `impact` to understand its blast radius. Provide a clear, concise explanation.",
-			symbol,
-		)
-		return mcp.NewGetPromptResult("Explain: "+symbol, []mcp.PromptMessage{
-			mcp.NewPromptMessage(mcp.RoleUser, mcp.NewTextContent(promptText)),
-		}), nil
-	})
-}
 
 // toCallToolResult converts a generic result (string or anything JSON-serializable)
 // into the SDK's CallToolResult format.

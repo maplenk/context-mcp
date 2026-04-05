@@ -42,7 +42,7 @@ func NewServer() *Server {
 	return &Server{
 		mcpServer: server.NewMCPServer("context-mcp", Version,
 			server.WithToolCapabilities(true),
-			server.WithResourceCapabilities(false, false),
+			server.WithResourceCapabilities(true, false),
 			server.WithPromptCapabilities(false),
 		),
 		handlers: make(map[string]ToolHandler),
@@ -54,7 +54,7 @@ func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 	return &Server{
 		mcpServer: server.NewMCPServer("context-mcp", Version,
 			server.WithToolCapabilities(true),
-			server.WithResourceCapabilities(false, false),
+			server.WithResourceCapabilities(true, false),
 			server.WithPromptCapabilities(false),
 		),
 		handlers: make(map[string]ToolHandler),
