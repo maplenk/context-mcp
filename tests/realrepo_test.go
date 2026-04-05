@@ -134,7 +134,7 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 		return nil, err
 	}
 
-	dbPath := filepath.Join(tmpDir, ".qb-context", "test.db")
+	dbPath := filepath.Join(tmpDir, ".context-mcp", "test.db")
 	store, err := storage.NewStore(dbPath)
 	if err != nil {
 		return nil, err

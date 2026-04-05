@@ -40,7 +40,7 @@ type Server struct {
 // NewServer creates a new MCP server backed by the SDK, using stdin/stdout.
 func NewServer() *Server {
 	return &Server{
-		mcpServer: server.NewMCPServer("qb-context", Version,
+		mcpServer: server.NewMCPServer("context-mcp", Version,
 			server.WithToolCapabilities(true),
 			server.WithResourceCapabilities(false, false),
 			server.WithPromptCapabilities(false),
@@ -52,7 +52,7 @@ func NewServer() *Server {
 // NewServerWithIO creates a new MCP server with custom I/O (for testing).
 func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 	return &Server{
-		mcpServer: server.NewMCPServer("qb-context", Version,
+		mcpServer: server.NewMCPServer("context-mcp", Version,
 			server.WithToolCapabilities(true),
 			server.WithResourceCapabilities(false, false),
 			server.WithPromptCapabilities(false),

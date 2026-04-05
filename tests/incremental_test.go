@@ -30,7 +30,7 @@ func newTestPipeline(t *testing.T) *testPipeline {
 	t.Helper()
 	dir := t.TempDir()
 
-	dbPath := filepath.Join(dir, ".qb-context", "test.db")
+	dbPath := filepath.Join(dir, ".context-mcp", "test.db")
 	store, err := storage.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)

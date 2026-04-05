@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Config holds all configuration for the qb-context daemon
+// Config holds all configuration for the context-mcp daemon
 type Config struct {
 	// RepoRoot is the absolute path to the repository to index
 	RepoRoot string
@@ -95,12 +95,12 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		RepoRoot:           ".",
-		DBPath:             ".qb-context/index.db",
+		DBPath:             ".context-mcp/index.db",
 		DebounceInterval:   500 * time.Millisecond,
 		MaxBFSDepth:        5,
 		EmbeddingBatchSize: 32,
 		WorkerCount:        4,
-		ExcludedDirs:       []string{".git", ".qb-context"},
+		ExcludedDirs:       []string{".git", ".context-mcp"},
 		ONNXModelDir:        detectDefaultONNXModel(),
 		EmbeddingDim:       384,
 		ColdStartEnabled:    true,
@@ -116,13 +116,13 @@ func DefaultConfig() *Config {
 }
 
 // ParseFlags populates the config from command-line flags.
-// Uses a dedicated FlagSet so qb-context can be embedded in programs that also
+// Uses a dedicated FlagSet so context-mcp can be embedded in programs that also
 // use the global flag package, and returns an error on unknown flags instead of
 // calling os.Exit(2).
 func ParseFlags() (*Config, error) {
 	cfg := DefaultConfig()
 
-	fs := flag.NewFlagSet("qb-context", flag.ContinueOnError)
+	fs := flag.NewFlagSet("context-mcp", flag.ContinueOnError)
 	fs.StringVar(&cfg.RepoRoot, "repo", cfg.RepoRoot, "Path to the repository root")
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to the SQLite database file")
 	fs.DurationVar(&cfg.DebounceInterval, "debounce", cfg.DebounceInterval, "Filesystem event debounce interval")

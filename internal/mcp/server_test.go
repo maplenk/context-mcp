@@ -307,8 +307,8 @@ func TestSDKServe_Initialize(t *testing.T) {
 	if !ok {
 		t.Fatalf("serverInfo missing or wrong type: %v", result["serverInfo"])
 	}
-	if serverInfo["name"] != "qb-context" {
-		t.Errorf("expected server name 'qb-context', got %v", serverInfo["name"])
+	if serverInfo["name"] != "context-mcp" {
+		t.Errorf("expected server name 'context-mcp', got %v", serverInfo["name"])
 	}
 }
 

@@ -27,7 +27,7 @@ const (
 	ClientCodex      Client = "codex"
 )
 
-// InstallOpts contains options for installing qb-context into a client.
+// InstallOpts contains options for installing context-mcp into a client.
 type InstallOpts struct {
 	Client   Client
 	Profile  string // core, extended, full
@@ -64,7 +64,7 @@ type DoctorOpts struct {
 // Install
 // ---------------------------------------------------------------------------
 
-// Install configures qb-context as an MCP server for the given client.
+// Install configures context-mcp as an MCP server for the given client.
 // Returns a human-readable status message.
 func Install(opts InstallOpts) (string, error) {
 	switch opts.Client {
@@ -111,7 +111,7 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 		if opts.Force {
 			cmdArgs = append(cmdArgs, "--force")
 		}
-		cmdArgs = append(cmdArgs, "qb-context", "--", bin)
+		cmdArgs = append(cmdArgs, "context-mcp", "--", bin)
 		cmdArgs = append(cmdArgs, buildArgs(opts)...)
 
 		cmd := exec.Command(claudePath, cmdArgs...)
@@ -143,15 +143,15 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 	if servers == nil {
 		servers = make(map[string]any)
 	}
-	if _, exists := servers["qb-context"]; exists && !opts.Force {
-		return "", fmt.Errorf("qb-context already configured in %s (use --force to overwrite)", cfgPath)
+	if _, exists := servers["context-mcp"]; exists && !opts.Force {
+		return "", fmt.Errorf("context-mcp already configured in %s (use --force to overwrite)", cfgPath)
 	}
 
 	entry := map[string]any{
 		"command": bin,
 		"args":    buildArgs(opts),
 	}
-	servers["qb-context"] = entry
+	servers["context-mcp"] = entry
 	root["mcpServers"] = servers
 
 	out, err := json.MarshalIndent(root, "", "  ")
@@ -185,12 +185,12 @@ func installCodex(opts InstallOpts) (string, error) {
 		return "", fmt.Errorf("cannot read %s: %w", cfgPath, err)
 	}
 
-	if strings.Contains(content, "[mcp_servers.qb-context]") {
+	if strings.Contains(content, "[mcp_servers.context-mcp]") {
 		if !opts.Force {
-			return "", fmt.Errorf("qb-context already configured in %s (use --force to overwrite)", cfgPath)
+			return "", fmt.Errorf("context-mcp already configured in %s (use --force to overwrite)", cfgPath)
 		}
 		// Remove the existing block before re-adding.
-		content = removeTomlSection(content, "mcp_servers.qb-context")
+		content = removeTomlSection(content, "mcp_servers.context-mcp")
 	}
 
 	block := buildCodexTOML(bin, opts)
@@ -213,7 +213,7 @@ func installCodex(opts InstallOpts) (string, error) {
 
 func buildCodexTOML(bin string, opts InstallOpts) string {
 	args := buildArgs(opts)
-	return fmt.Sprintf("[mcp_servers.qb-context]\ncommand = %q\nargs = %s\n", bin, tomlStringArray(args))
+	return fmt.Sprintf("[mcp_servers.context-mcp]\ncommand = %q\nargs = %s\n", bin, tomlStringArray(args))
 }
 
 // tomlStringArray formats a Go string slice as a TOML inline array.
@@ -229,7 +229,7 @@ func tomlStringArray(ss []string) string {
 // Uninstall
 // ---------------------------------------------------------------------------
 
-// Uninstall removes qb-context configuration from the given client.
+// Uninstall removes context-mcp configuration from the given client.
 func Uninstall(opts UninstallOpts) (string, error) {
 	switch opts.Client {
 	case ClientClaudeCode:
@@ -244,7 +244,7 @@ func Uninstall(opts UninstallOpts) (string, error) {
 func uninstallClaudeCode() (string, error) {
 	claudePath, lookErr := exec.LookPath("claude")
 	if lookErr == nil {
-		cmd := exec.Command(claudePath, "mcp", "remove", "qb-context")
+		cmd := exec.Command(claudePath, "mcp", "remove", "context-mcp")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("claude mcp remove failed: %w\n%s", err, string(out))
@@ -276,10 +276,10 @@ func uninstallClaudeCode() (string, error) {
 	if servers == nil {
 		return "Nothing to uninstall: no mcpServers in ~/.claude.json.", nil
 	}
-	if _, exists := servers["qb-context"]; !exists {
-		return "Nothing to uninstall: qb-context not found in ~/.claude.json.", nil
+	if _, exists := servers["context-mcp"]; !exists {
+		return "Nothing to uninstall: context-mcp not found in ~/.claude.json.", nil
 	}
-	delete(servers, "qb-context")
+	delete(servers, "context-mcp")
 	if len(servers) == 0 {
 		delete(root, "mcpServers")
 	}
@@ -310,11 +310,11 @@ func uninstallCodex() (string, error) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, "[mcp_servers.qb-context]") {
-		return "Nothing to uninstall: qb-context not found in ~/.codex/config.toml.", nil
+	if !strings.Contains(content, "[mcp_servers.context-mcp]") {
+		return "Nothing to uninstall: context-mcp not found in ~/.codex/config.toml.", nil
 	}
 
-	content = removeTomlSection(content, "mcp_servers.qb-context")
+	content = removeTomlSection(content, "mcp_servers.context-mcp")
 
 	if err := atomicWriteFile(cfgPath, []byte(content), 0600); err != nil {
 		return "", fmt.Errorf("failed to write %s: %w", cfgPath, err)
@@ -389,7 +389,7 @@ func printConfigClaudeCode(bin string, opts PrintConfigOpts) string {
 		"claude", "mcp", "add",
 		"--transport", "stdio",
 		"--scope", "user",
-		"qb-context", "--", bin,
+		"context-mcp", "--", bin,
 	}
 	cmdParts = append(cmdParts, args...)
 
@@ -400,7 +400,7 @@ func printConfigClaudeCode(bin string, opts PrintConfigOpts) string {
 	}
 	snippet := map[string]any{
 		"mcpServers": map[string]any{
-			"qb-context": entry,
+			"context-mcp": entry,
 		},
 	}
 	jsonBytes, _ := json.MarshalIndent(snippet, "", "  ")
@@ -442,7 +442,7 @@ func Doctor(opts DoctorOpts) ([]DoctorCheck, error) {
 			Name:    "binary",
 			Passed:  false,
 			Message: fmt.Sprintf("Cannot resolve binary: %v", binErr),
-			Fix:     "Ensure qb-context is installed and accessible on PATH.",
+			Fix:     "Ensure context-mcp is installed and accessible on PATH.",
 		})
 	} else {
 		info, err := os.Stat(bin)
@@ -451,7 +451,7 @@ func Doctor(opts DoctorOpts) ([]DoctorCheck, error) {
 				Name:    "binary",
 				Passed:  false,
 				Message: fmt.Sprintf("Binary not found at %s", bin),
-				Fix:     "Reinstall qb-context.",
+				Fix:     "Reinstall context-mcp.",
 			})
 		} else if info.Mode()&0111 == 0 {
 			checks = append(checks, DoctorCheck{
@@ -512,7 +512,7 @@ func doctorClaudeCode(prefix, cfgPath string) []DoctorCheck {
 			Name:    prefix + "/config",
 			Passed:  false,
 			Message: fmt.Sprintf("Config file not found: %s", cfgPath),
-			Fix:     "Run: qb-context install --client claude-code --repo <path>",
+			Fix:     "Run: context-mcp install --client claude-code --repo <path>",
 		})
 		return checks
 	}
@@ -535,20 +535,20 @@ func doctorClaudeCode(prefix, cfgPath string) []DoctorCheck {
 	}
 
 	servers, _ := root["mcpServers"].(map[string]any)
-	entry, _ := servers["qb-context"].(map[string]any)
+	entry, _ := servers["context-mcp"].(map[string]any)
 	if entry == nil {
 		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/entry",
 			Passed:  false,
-			Message: "qb-context not found in mcpServers",
-			Fix:     "Run: qb-context install --client claude-code --repo <path>",
+			Message: "context-mcp not found in mcpServers",
+			Fix:     "Run: context-mcp install --client claude-code --repo <path>",
 		})
 		return checks
 	}
 	checks = append(checks, DoctorCheck{
 		Name:    prefix + "/entry",
 		Passed:  true,
-		Message: "qb-context entry found in mcpServers",
+		Message: "context-mcp entry found in mcpServers",
 	})
 
 	// Extract repo path from args.
@@ -567,7 +567,7 @@ func doctorCodex(prefix, cfgPath string) []DoctorCheck {
 			Name:    prefix + "/config",
 			Passed:  false,
 			Message: fmt.Sprintf("Config file not found: %s", cfgPath),
-			Fix:     "Run: qb-context install --client codex --repo <path>",
+			Fix:     "Run: context-mcp install --client codex --repo <path>",
 		})
 		return checks
 	}
@@ -578,19 +578,19 @@ func doctorCodex(prefix, cfgPath string) []DoctorCheck {
 	})
 
 	content := string(data)
-	if !strings.Contains(content, "[mcp_servers.qb-context]") {
+	if !strings.Contains(content, "[mcp_servers.context-mcp]") {
 		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/entry",
 			Passed:  false,
-			Message: "qb-context section not found in config",
-			Fix:     "Run: qb-context install --client codex --repo <path>",
+			Message: "context-mcp section not found in config",
+			Fix:     "Run: context-mcp install --client codex --repo <path>",
 		})
 		return checks
 	}
 	checks = append(checks, DoctorCheck{
 		Name:    prefix + "/entry",
 		Passed:  true,
-		Message: "qb-context section found in config",
+		Message: "context-mcp section found in config",
 	})
 
 	// Extract repo path from TOML args line.
@@ -619,7 +619,7 @@ func extractRepoArgFromTOML(content string) string {
 	inSection := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "[mcp_servers.qb-context]" {
+		if trimmed == "[mcp_servers.context-mcp]" {
 			inSection = true
 			continue
 		}
@@ -688,13 +688,13 @@ func doctorRepoPaths(prefix, repoPath string) []DoctorCheck {
 	})
 
 	// Index check.
-	dbPath := filepath.Join(repoPath, ".qb-context", "index.db")
+	dbPath := filepath.Join(repoPath, ".context-mcp", "index.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/index",
 			Passed:  false,
 			Message: fmt.Sprintf("Index database not found: %s", dbPath),
-			Fix:     fmt.Sprintf("Run qb-context once to create the index: qb-context --repo %s", repoPath),
+			Fix:     fmt.Sprintf("Run context-mcp once to create the index: context-mcp --repo %s", repoPath),
 		})
 	} else {
 		checks = append(checks, DoctorCheck{

@@ -16,15 +16,15 @@ func TestRemoveTomlSection_Middle(t *testing.T) {
 	content := `[server.alpha]
 host = "a"
 
-[mcp_servers.qb-context]
+[mcp_servers.context-mcp]
 command = "/usr/bin/qb"
 args = ["--repo", "/tmp"]
 
 [server.beta]
 host = "b"
 `
-	got := removeTomlSection(content, "mcp_servers.qb-context")
-	if strings.Contains(got, "qb-context") {
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
+	if strings.Contains(got, "context-mcp") {
 		t.Fatalf("section not removed:\n%s", got)
 	}
 	if !strings.Contains(got, "[server.alpha]") || !strings.Contains(got, "[server.beta]") {
@@ -33,14 +33,14 @@ host = "b"
 }
 
 func TestRemoveTomlSection_Start(t *testing.T) {
-	content := `[mcp_servers.qb-context]
+	content := `[mcp_servers.context-mcp]
 command = "/usr/bin/qb"
 
 [other]
 key = "val"
 `
-	got := removeTomlSection(content, "mcp_servers.qb-context")
-	if strings.Contains(got, "qb-context") {
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
+	if strings.Contains(got, "context-mcp") {
 		t.Fatalf("section not removed:\n%s", got)
 	}
 	if !strings.Contains(got, "[other]") {
@@ -52,12 +52,12 @@ func TestRemoveTomlSection_End(t *testing.T) {
 	content := `[other]
 key = "val"
 
-[mcp_servers.qb-context]
+[mcp_servers.context-mcp]
 command = "/usr/bin/qb"
 args = ["--repo", "/tmp"]
 `
-	got := removeTomlSection(content, "mcp_servers.qb-context")
-	if strings.Contains(got, "qb-context") {
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
+	if strings.Contains(got, "context-mcp") {
 		t.Fatalf("section not removed:\n%s", got)
 	}
 	if !strings.Contains(got, "[other]") {
@@ -69,18 +69,18 @@ func TestRemoveTomlSection_NotFound(t *testing.T) {
 	content := `[other]
 key = "val"
 `
-	got := removeTomlSection(content, "mcp_servers.qb-context")
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
 	if !strings.Contains(got, "[other]") {
 		t.Fatalf("content should be unchanged:\n%s", got)
 	}
 }
 
 func TestRemoveTomlSection_OnlySection(t *testing.T) {
-	content := `[mcp_servers.qb-context]
+	content := `[mcp_servers.context-mcp]
 command = "/usr/bin/qb"
 args = ["--repo", "/tmp"]
 `
-	got := removeTomlSection(content, "mcp_servers.qb-context")
+	got := removeTomlSection(content, "mcp_servers.context-mcp")
 	if strings.TrimSpace(got) != "" {
 		t.Fatalf("expected empty result, got:\n%s", got)
 	}
@@ -160,7 +160,7 @@ func TestBuildArgs(t *testing.T) {
 
 func TestBuildCodexTOML(t *testing.T) {
 	block := buildCodexTOML("/usr/local/bin/qb", InstallOpts{RepoRoot: "/my/repo", Profile: "extended"})
-	if !strings.Contains(block, "[mcp_servers.qb-context]") {
+	if !strings.Contains(block, "[mcp_servers.context-mcp]") {
 		t.Fatal("missing section header")
 	}
 	if !strings.Contains(block, `command = "/usr/local/bin/qb"`) {
@@ -221,7 +221,7 @@ func TestExtractRepoArgFromTOML(t *testing.T) {
 	content := `[other]
 key = "val"
 
-[mcp_servers.qb-context]
+[mcp_servers.context-mcp]
 command = "/usr/bin/qb"
 args = ["--repo", "/my/repo", "--profile", "core"]
 
@@ -233,13 +233,13 @@ key2 = "val2"
 		t.Fatalf("extractRepoArgFromTOML = %q, want %q", got, "/my/repo")
 	}
 
-	// No qb-context section.
+	// No context-mcp section.
 	if extractRepoArgFromTOML("[other]\nkey = \"val\"\n") != "" {
 		t.Fatal("expected empty when section missing")
 	}
 
 	// Section without args line.
-	noArgs := "[mcp_servers.qb-context]\ncommand = \"/usr/bin/qb\"\n"
+	noArgs := "[mcp_servers.context-mcp]\ncommand = \"/usr/bin/qb\"\n"
 	if extractRepoArgFromTOML(noArgs) != "" {
 		t.Fatal("expected empty when args line missing")
 	}
@@ -319,7 +319,7 @@ func TestPrintConfig_Codex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "[mcp_servers.qb-context]") {
+	if !strings.Contains(out, "[mcp_servers.context-mcp]") {
 		t.Fatal("output should contain TOML section header")
 	}
 	if !strings.Contains(out, "--repo") {
@@ -354,8 +354,8 @@ func TestDoctor_BinaryCheck(t *testing.T) {
 
 func TestDoctorRepoPaths_ValidRepo(t *testing.T) {
 	tmp := t.TempDir()
-	// Create the .qb-context/index.db file.
-	dbDir := filepath.Join(tmp, ".qb-context")
+	// Create the .context-mcp/index.db file.
+	dbDir := filepath.Join(tmp, ".context-mcp")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestDoctorRepoPaths_EmptyPath(t *testing.T) {
 
 func TestDoctorRepoPaths_MissingIndex(t *testing.T) {
 	tmp := t.TempDir()
-	// No .qb-context/index.db.
+	// No .context-mcp/index.db.
 	checks := doctorRepoPaths("test", tmp)
 	if len(checks) != 2 {
 		t.Fatalf("expected 2 checks (repo + index), got %d", len(checks))
@@ -466,14 +466,14 @@ func TestDoctorClaudeCode_NoQBEntry(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("expected entry check to fail when qb-context not present")
+		t.Fatal("expected entry check to fail when context-mcp not present")
 	}
 }
 
 func TestDoctorClaudeCode_ValidEntry(t *testing.T) {
 	tmp := t.TempDir()
 	repoDir := filepath.Join(tmp, "repo")
-	dbDir := filepath.Join(repoDir, ".qb-context")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestDoctorClaudeCode_ValidEntry(t *testing.T) {
 	cfgPath := filepath.Join(tmp, ".claude.json")
 	data, _ := json.Marshal(map[string]any{
 		"mcpServers": map[string]any{
-			"qb-context": map[string]any{
+			"context-mcp": map[string]any{
 				"command": "/usr/bin/qb",
 				"args":    []any{"--repo", repoDir},
 			},
@@ -531,14 +531,14 @@ func TestDoctorCodex_NoQBSection(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("expected entry check to fail when qb-context section missing")
+		t.Fatal("expected entry check to fail when context-mcp section missing")
 	}
 }
 
 func TestDoctorCodex_ValidEntry(t *testing.T) {
 	tmp := t.TempDir()
 	repoDir := filepath.Join(tmp, "repo")
-	dbDir := filepath.Join(repoDir, ".qb-context")
+	dbDir := filepath.Join(repoDir, ".context-mcp")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +547,7 @@ func TestDoctorCodex_ValidEntry(t *testing.T) {
 	}
 
 	cfgPath := filepath.Join(tmp, "config.toml")
-	content := `[mcp_servers.qb-context]
+	content := `[mcp_servers.context-mcp]
 command = "/usr/bin/qb"
 args = ["--repo", "` + repoDir + `"]
 `
@@ -576,17 +576,17 @@ args = ["--flag"]
 	block := buildCodexTOML("/usr/bin/qb", InstallOpts{RepoRoot: "/my/repo"})
 	combined := strings.TrimRight(existing, "\n") + "\n" + block
 
-	if !strings.Contains(combined, "[mcp_servers.qb-context]") {
-		t.Fatal("install should add qb-context section")
+	if !strings.Contains(combined, "[mcp_servers.context-mcp]") {
+		t.Fatal("install should add context-mcp section")
 	}
 	if !strings.Contains(combined, "[mcp_servers.other]") {
 		t.Fatal("existing section should survive install")
 	}
 
 	// Now remove.
-	after := removeTomlSection(combined, "mcp_servers.qb-context")
-	if strings.Contains(after, "qb-context") {
-		t.Fatalf("qb-context should be removed:\n%s", after)
+	after := removeTomlSection(combined, "mcp_servers.context-mcp")
+	if strings.Contains(after, "context-mcp") {
+		t.Fatalf("context-mcp should be removed:\n%s", after)
 	}
 	if !strings.Contains(after, "[mcp_servers.other]") {
 		t.Fatalf("other section should survive uninstall:\n%s", after)

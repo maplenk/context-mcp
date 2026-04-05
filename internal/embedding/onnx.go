@@ -105,7 +105,7 @@ func NewONNXEmbedder(modelDir string, dim int, libPath string) (*ONNXEmbedder, e
 		return nil, fmt.Errorf("initializing ONNX Runtime: %w", err)
 	}
 
-	env, err := rt.NewEnv("qb-context", ort.LoggingLevelWarning)
+	env, err := rt.NewEnv("context-mcp", ort.LoggingLevelWarning)
 	if err != nil {
 		rt.Close()
 		return nil, fmt.Errorf("creating ONNX environment: %w", err)

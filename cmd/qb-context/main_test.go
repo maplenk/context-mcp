@@ -17,7 +17,7 @@ import (
 func buildTestBinary(t *testing.T) string {
 	t.Helper()
 
-	binary := filepath.Join(t.TempDir(), "qb-context-test")
+	binary := filepath.Join(t.TempDir(), "context-mcp-test")
 	cmd := exec.Command("go", "build", "-tags", "fts5", "-o", binary, ".")
 	cmd.Dir = filepath.Join(getModuleRoot(t), "cmd", "qb-context")
 	if output, err := cmd.CombinedOutput(); err != nil {

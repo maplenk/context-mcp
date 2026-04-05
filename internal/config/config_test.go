@@ -8,12 +8,12 @@ import (
 )
 
 // setArgs replaces os.Args for the duration of a test and restores them on
-// cleanup. The first element is always set to "qb-context" (the program name).
+// cleanup. The first element is always set to "context-mcp" (the program name).
 func setArgs(t *testing.T, args ...string) {
 	t.Helper()
 	orig := os.Args
 	t.Cleanup(func() { os.Args = orig })
-	os.Args = append([]string{"qb-context"}, args...)
+	os.Args = append([]string{"context-mcp"}, args...)
 }
 
 // ---- DefaultConfig tests ----
@@ -24,8 +24,8 @@ func TestDefaultConfig_Values(t *testing.T) {
 	if cfg.RepoRoot != "." {
 		t.Errorf("RepoRoot: got %q, want %q", cfg.RepoRoot, ".")
 	}
-	if cfg.DBPath != ".qb-context/index.db" {
-		t.Errorf("DBPath: got %q, want %q", cfg.DBPath, ".qb-context/index.db")
+	if cfg.DBPath != ".context-mcp/index.db" {
+		t.Errorf("DBPath: got %q, want %q", cfg.DBPath, ".context-mcp/index.db")
 	}
 	if cfg.DebounceInterval != 500*time.Millisecond {
 		t.Errorf("DebounceInterval: got %v, want %v", cfg.DebounceInterval, 500*time.Millisecond)
@@ -49,7 +49,7 @@ func TestDefaultConfig_Values(t *testing.T) {
 		t.Errorf("ONNXLibPath: got %q, want empty", cfg.ONNXLibPath)
 	}
 
-	wantExcluded := []string{".git", ".qb-context"}
+	wantExcluded := []string{".git", ".context-mcp"}
 	if len(cfg.ExcludedDirs) != len(wantExcluded) {
 		t.Fatalf("ExcludedDirs length: got %d, want %d", len(cfg.ExcludedDirs), len(wantExcluded))
 	}

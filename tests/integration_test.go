@@ -87,7 +87,7 @@ class UserService {
 	}
 
 	// 2. Initialize all components
-	dbPath := filepath.Join(tmpDir, ".qb-context", "test.db")
+	dbPath := filepath.Join(tmpDir, ".context-mcp", "test.db")
 	store, err := storage.NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)

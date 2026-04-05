@@ -90,7 +90,7 @@ func main() {
 		log.Fatalf("Failed to parse flags: %v", err)
 	}
 
-	log.Printf("qb-context daemon starting — repo: %s", cfg.RepoRoot)
+	log.Printf("context-mcp daemon starting — repo: %s", cfg.RepoRoot)
 
 	// 1. Initialize embedding engine — priority: ONNX → Ollama → OpenAI-compat → llama.cpp → TF-IDF
 	embedder := initEmbedder(cfg)
@@ -290,8 +290,8 @@ func runCLI(cfg *config.Config, args []string) {
 	args = filteredArgs
 
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: qb-context cli [--reindex] <tool_name> [json_args]\n")
-		fmt.Fprintf(os.Stderr, "       qb-context cli --list\n")
+		fmt.Fprintf(os.Stderr, "Usage: context-mcp cli [--reindex] <tool_name> [json_args]\n")
+		fmt.Fprintf(os.Stderr, "       context-mcp cli --list\n")
 		fmt.Fprintf(os.Stderr, "\nFlags:\n")
 		fmt.Fprintf(os.Stderr, "  --reindex   Force full re-parse and re-index of the repository\n")
 		os.Exit(1)
@@ -414,7 +414,7 @@ func runServeHTTP(cfg *config.Config) {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	log.Printf("qb-context HTTP server starting — repo: %s, port: %d", cfg.RepoRoot, cfg.HTTPPort)
+	log.Printf("context-mcp HTTP server starting — repo: %s, port: %d", cfg.RepoRoot, cfg.HTTPPort)
 
 	// 1. Initialize embedding engine
 	embedder := initEmbedder(cfg)
