@@ -1,8 +1,8 @@
-# Human Evaluation: qb-context vs C-reference vs Human Answers
+# Human Evaluation: context-mcp vs C-reference vs Human Answers
 
 **Date:** 2026-04-03
-**Repo:** qbapi (18,655 nodes, 24,882 edges in qb-context; 33,576 nodes, 77,157 edges in C-ref)
-**qb-context version:** commit 4b13987 (post DA-round-14 fixes)
+**Repo:** qbapi (18,655 nodes, 24,882 edges in context-mcp; 33,576 nodes, 77,157 edges in C-ref)
+**context-mcp version:** commit 4b13987 (post DA-round-14 fixes)
 **C-reference version:** codebase-memory-mcp v0.10.0
 **Raw output artifacts:**
 - `benchmarks/results/v0.10.0-4b13987-qbapi-raw.txt` -- core 6 queries (A1, A3, B1, B6, C1, C5)
@@ -11,11 +11,11 @@
 
 ## Scoring Methodology
 
-Each query in `benchmarks/human-answers.md` lists specific files, classes, methods, endpoints, and jobs as the expected answer. Every distinct item in the answer key is counted as one rubric item. A result is a HIT if the exact file or a method/class within that file appears in the qb-context or C-ref results. API endpoints (e.g. `POST /v1/merchant/{storeID}/order`) are counted as HITs if a result references the controller that serves them.
+Each query in `benchmarks/human-answers.md` lists specific files, classes, methods, endpoints, and jobs as the expected answer. Every distinct item in the answer key is counted as one rubric item. A result is a HIT if the exact file or a method/class within that file appears in the context-mcp or C-ref results. API endpoints (e.g. `POST /v1/merchant/{storeID}/order`) are counted as HITs if a result references the controller that serves them.
 
 ## Scorecard
 
-| Query | Category | Rubric Items | qb-context | C-ref | Winner |
+| Query | Category | Rubric Items | context-mcp | C-ref | Winner |
 |-------|----------|-------------|------------|-------|--------|
 | A1 | Exact | 1 | **1/1** | -- | **qb** |
 | A2 | Exact | 3 | 1/3 | -- | -- |
@@ -30,12 +30,12 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 | C1 | Cross-file | 11 | **0/11** | **2/11** | C-ref |
 | C2 | Cross-file | 8 | **1/8** | **5/8** | C-ref |
 | C3 | Cross-file | 11 | **0/11** | **4/11** | C-ref |
-| C4 | Cross-file | 8 | **5/8** | **3/8** | **qb-context** |
+| C4 | Cross-file | 8 | **5/8** | **3/8** | **context-mcp** |
 | C5 | Cross-file | 8 | **0/8** | **5/8** | C-ref |
 
 ### Aggregate Hit Rates
 
-| Category | qb-context | Denominator | Rate |
+| Category | context-mcp | Denominator | Rate |
 |----------|-----------|-------------|------|
 | Concept (B1-B6) | 7 | 56 | **12.5%** |
 | Cross-file (C1-C5) | 6 | 46 | **13.0%** |
@@ -57,7 +57,7 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 
 | Tool | Result | Grade |
 |------|--------|-------|
-| qb-context `read_symbol` | Exact match, 581us | **1/1** |
+| context-mcp `read_symbol` | Exact match, 581us | **1/1** |
 
 ### A2 -- Exact: OrderController
 
@@ -65,7 +65,7 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 
 | Tool | Result | Grade |
 |------|--------|-------|
-| qb-context `read_symbol` | Returns only v1 `app/Http/Controllers/OrderController.php` | **1/3** |
+| context-mcp `read_symbol` | Returns only v1 `app/Http/Controllers/OrderController.php` | **1/3** |
 
 ### A3 -- Regex: POST.*order
 
@@ -73,7 +73,7 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 
 | Tool | Result | Grade |
 |------|--------|-------|
-| qb-context `search_code` | Found /v3 order endpoint, OrderController, v2/OrderController, OrderDeletionController. Missing /v1/order/update, /v1/order/cancel | **3/5** |
+| context-mcp `search_code` | Found /v3 order endpoint, OrderController, v2/OrderController, OrderDeletionController. Missing /v1/order/update, /v1/order/cancel | **3/5** |
 
 ### A4 -- Regex: payment|razorpay|billing
 
@@ -81,7 +81,7 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 
 | Tool | Result | Grade |
 |------|--------|-------|
-| qb-context `search_code` | 15 matches in AUMMunicipal, Account.php -- only `payment` hits, no razorpay/billing files | **partial** |
+| context-mcp `search_code` | 15 matches in AUMMunicipal, Account.php -- only `payment` hits, no razorpay/billing files | **partial** |
 
 ### B1 -- Concept: Payment processing and billing logic
 
@@ -107,7 +107,7 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 19. app/Http/Controllers/BillingWeb.php
 20. app/Http/Controllers/v3/OrderController.php
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | OrderPaymentsService | HIT (#1,5,6) | MISS |
 | BillingWeb | HIT (#2-4) | HIT (#1,3-6) |
@@ -138,7 +138,7 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 8. POST /v2/user/loginCheck
 9. POST /oauth/token
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | OauthMiddleware | MISS | MISS |
 | webMiddlewareV2 | MISS | MISS |
@@ -152,7 +152,7 @@ Each query in `benchmarks/human-answers.md` lists specific files, classes, metho
 | Authenticate.php (not in rubric) | found (#1) | MISS |
 | **Grade** | **0/9** | **1/9** |
 
-Note: qb-context found Authenticate.php (#1) which is related but NOT in the answer key. Not counted.
+Note: context-mcp found Authenticate.php (#1) which is related but NOT in the answer key. Not counted.
 
 ### B3 -- Concept: Loyalty points and rewards
 
@@ -167,7 +167,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 8. app/MQLoyal.php
 9. app/EasyRewardz.php + app/Mobiquest.php
 
-| Item | qb-context |
+| Item | context-mcp |
 |------|------------|
 | Order.php manageLoyaltyPoint | MISS |
 | crmSettings table | MISS |
@@ -190,7 +190,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 4. cloud_schema/chain.sql
 5. cloud_schema/store.sql
 
-| Item | qb-context |
+| Item | context-mcp |
 |------|------------|
 | database/migrations/* | HIT (#2-9) |
 | UpdateSchema.php | MISS |
@@ -206,7 +206,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 2. Sentry integration (app('sentry')->captureException)
 3. Log facade
 
-| Item | qb-context |
+| Item | context-mcp |
 |------|------------|
 | Exceptions/Handler.php | MISS |
 | Sentry integration | MISS |
@@ -227,7 +227,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 9. app/Jobs/EasyEcom*.php
 10. app/Controllers/OrderController.php
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | OrderCreated event | MISS | MISS |
 | EasyEcomSaleOrderListener | MISS | MISS |
@@ -256,7 +256,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 10. app/Services/InvoiceNumberService.php + PaymentMappingService + OrderSummaryBuilder + OrderDetailBuilder
 11. app/Services/JobDispatcher.php
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | v1 order endpoint | MISS | MISS |
 | v2 order endpoint | MISS | MISS |
@@ -272,7 +272,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 | v3/OrderProcessingContext (bonus) | MISS | HIT (#1 orderData, #7 orderDataValue) |
 | **Grade** | **0/11** | **2/11** |
 
-**qb-context failure:** Top result is test code (V3OrderApiTest). Ranks 4-9 are openspout `.end()` methods. Ranks 10-15 are Flight.endTrip, endLeg, endSession -- all noise from "end to end" in query.
+**context-mcp failure:** Top result is test code (V3OrderApiTest). Ranks 4-9 are openspout `.end()` methods. Ranks 10-15 are Flight.endTrip, endLeg, endSession -- all noise from "end to end" in query.
 
 ### C2 -- Cross-file: Stock transaction API to database
 
@@ -286,7 +286,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 7. InventoryController.php
 8. InventoryWeb.php
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | stockTransaction endpoint (v1) | MISS | MISS |
 | stockTransactionWeb endpoint (v2) | MISS | MISS |
@@ -313,7 +313,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 10. app/WebhookTestModel.php
 11. app/Http/Controllers/WebhookController.php
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | routes.webhooks.php | MISS | MISS |
 | routes.php | MISS | MISS |
@@ -329,7 +329,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 | Scripts.WebhookbyOrderID (bonus) | HIT (#10) -- not in rubric | HIT (#8) |
 | **Grade** | **0/11** | **4/11** |
 
-**qb-context failure:** All top 10 results are middleware `.handle()` methods. The word "handling" in the query matched every middleware's handle method.
+**context-mcp failure:** All top 10 results are middleware `.handle()` methods. The word "handling" in the query matched every middleware's handle method.
 
 ### C4 -- Cross-file: OpenTelemetry tracing
 
@@ -343,7 +343,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 7. app/Services/InstrumentedClickHouseService.php
 8. config/opentelemetry.php
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | OpenTelemetryMiddleware | HIT (#2) | MISS |
 | OpenTelemetryTracer | HIT (#1, #7, #13) | HIT (#6) |
@@ -367,7 +367,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 7. InventoryController.php
 8. InventoryWeb.php
 
-| Item | qb-context | C-ref |
+| Item | context-mcp | C-ref |
 |------|------------|-------|
 | stockTransaction endpoint (v1) | MISS | MISS |
 | stockTransactionWeb endpoint (v2) | MISS | MISS |
@@ -379,7 +379,7 @@ Note: qb-context found Authenticate.php (#1) which is related but NOT in the ans
 | InventoryWeb.php | MISS | HIT (#5-6) |
 | **Grade** | **0/8** | **5/8** |
 
-**qb-context failure:** Top 4 hits are migration files. Test file at #6. inventory class appears at #13 but wrong method (formatAttributeMappingOptionsForResponse, not stockTransaction).
+**context-mcp failure:** Top 4 hits are migration files. Test file at #6. inventory class appears at #13 but wrong method (formatAttributeMappingOptionsForResponse, not stockTransaction).
 
 ---
 
@@ -395,7 +395,7 @@ FTS5 BM25 matches common method names in queries:
 Test files (V3OrderApiTest at C1 #1, ApiMonitorMiddlewareTest at C2 #6), migration files (C5 #1-4), and vendor/lib code (openspout at C1 #4-9) rank equally with production source code.
 
 ### 3. Index Size Gap
-qb-context: 18,655 nodes / 24,882 edges. C-ref: 33,576 / 77,157. The 1.8x node gap and 3.1x edge gap mean weaker graph signals for PPR, betweenness, and in-degree.
+context-mcp: 18,655 nodes / 24,882 edges. C-ref: 33,576 / 77,157. The 1.8x node gap and 3.1x edge gap mean weaker graph signals for PPR, betweenness, and in-degree.
 
 ### 4. Business Vocabulary Gap
 "Omnichannel" is domain jargon mapping to EasyEcom/Unicommerce/OnlineOrder. Neither tool bridges this.
@@ -407,7 +407,7 @@ Results are scored independently. Related symbols (StockLedger.stockTransaction 
 
 ## Latency
 
-| Query | qb-context |
+| Query | context-mcp |
 |-------|-----------|
 | A1 exact | 581us |
 | A3 regex | 111ms |

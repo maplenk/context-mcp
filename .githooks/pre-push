@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Pre-push hook for qb-context
+# Pre-push hook for context-mcp
 # Detects version/schema changes in pushed commits and prompts for benchmarks.
 #
 # Skip: QB_SKIP_BENCH=1 git push   or   git push --no-verify

@@ -44,7 +44,7 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
 
 ```bash
 # Build
-go build -tags "fts5" -o context-mcp ./cmd/qb-context
+go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 
 # Index and query your repo via CLI
 ./context-mcp -repo /path/to/your/project cli context '{"query": "authentication"}'
@@ -67,7 +67,7 @@ go build -tags "fts5" -o context-mcp ./cmd/qb-context
 ```bash
 git clone https://github.com/maplenk/context-mcp.git
 cd context-mcp
-go build -tags "fts5" -o context-mcp ./cmd/qb-context
+go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 ```
 
 The `-tags "fts5"` flag is **required** -- it enables SQLite full-text search.
@@ -845,7 +845,7 @@ The Codex smoke test uses `codex exec --json` with an isolated temp MCP config o
 
 If the client CLI exposes usage or cost telemetry, the scripts record it in `summary.json`. Missing usage fields are treated as informational, not fatal.
 
-For a publishable release artifact in [`benchmarks/results/`](/Users/naman/Documents/qb-context/benchmarks/results), run [`benchmarks/run_mcp_usage.sh`](/Users/naman/Documents/qb-context/benchmarks/run_mcp_usage.sh) against the canonical benchmark repo. By default it runs both `with MCP` and `without MCP` variants and emits both a JSON artifact and a Markdown comparison-table report.
+For a publishable release artifact in [`benchmarks/results/`](/Users/naman/Documents/context-mcp/benchmarks/results), run [`benchmarks/run_mcp_usage.sh`](/Users/naman/Documents/context-mcp/benchmarks/run_mcp_usage.sh) against the canonical benchmark repo. By default it runs both `with MCP` and `without MCP` variants and emits both a JSON artifact and a Markdown comparison-table report.
 
 ---
 
@@ -890,7 +890,7 @@ Download the default pre-quantized CodeRankEmbed model (~490MB) with the provide
 
 ```bash
 ./scripts/download-model.sh
-go build -tags "fts5 onnx" -o context-mcp ./cmd/qb-context
+go build -tags "fts5 onnx" -o context-mcp ./cmd/context-mcp
 
 # Explicit model path
 ./context-mcp -onnx-model models/CodeRankEmbed-onnx-int8 -onnx-lib /path/to/libonnxruntime.dylib
@@ -967,7 +967,7 @@ All signals are normalized to [0, 1] before weighting. FTS5 queries are enhanced
 ## Troubleshooting
 
 **Build fails with "undefined: sqlite3"**
-Ensure CGO is enabled: `CGO_ENABLED=1 go build -tags "fts5" -o context-mcp ./cmd/qb-context`
+Ensure CGO is enabled: `CGO_ENABLED=1 go build -tags "fts5" -o context-mcp ./cmd/context-mcp`
 
 **No search results**
 Run `cli query '{"sql": "SELECT COUNT(*) FROM nodes"}'` to verify the index has data. If empty, check that your repo contains supported file types (.go, .js, .ts, .php).

@@ -30,7 +30,7 @@ LLM coding agents waste tokens brute-forcing through grep and glob results with 
 ```bash
 git clone https://github.com/maplenk/context-mcp.git
 cd context-mcp
-go build -tags "fts5" -o context-mcp ./cmd/qb-context
+go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 
 # CLI mode -- query directly
 ./context-mcp -repo /path/to/your/project cli context '{"query": "authentication"}'
@@ -51,7 +51,7 @@ go build -tags "fts5" -o context-mcp ./cmd/qb-context
 ```bash
 git clone https://github.com/maplenk/context-mcp.git
 cd context-mcp
-go build -tags "fts5" -o context-mcp ./cmd/qb-context
+go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 ```
 
 The `-tags "fts5"` flag is **required** -- it enables SQLite full-text search.
@@ -68,7 +68,7 @@ By default, context-mcp uses TF-IDF for embeddings. For higher-quality local sem
 
 ```bash
 ./scripts/download-model.sh
-go build -tags "fts5 onnx" -o context-mcp ./cmd/qb-context
+go build -tags "fts5 onnx" -o context-mcp ./cmd/context-mcp
 
 # Explicit model path
 ./context-mcp -repo /path/to/project -onnx-model models/CodeRankEmbed-onnx-int8 -onnx-lib /path/to/libonnxruntime.dylib

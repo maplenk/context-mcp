@@ -1,6 +1,6 @@
 {
   "benchmark_version": "1.1.0",
-  "qb_context_version": "v0.3.0",
+  "context_mcp_version": "v0.3.0",
   "run_date": "2026-04-05T13:24:00Z",
   "mcp_sdk": "mark3labs/mcp-go v0.47.0",
   "milestone": "P0+P1 complete (SDK migration, annotations, HTTP transport, assemble_context)",
@@ -177,8 +177,8 @@
     "date": "2026-04-05",
     "model": "claude-3-5-haiku-latest",
     "mcp_config": {
-      "command": "qb-context",
-      "args": ["--repo", "/Users/naman/Documents/qb-context", "--profile", "extended"],
+      "command": "context-mcp",
+      "args": ["--repo", "/Users/naman/Documents/context-mcp", "--profile", "extended"],
       "transport": "stdio"
     },
     "queries_tested": [
@@ -203,5 +203,5 @@
     "latency_change": "within noise (+/- 5ms per query)",
     "index_stats_change": "19707 nodes (was 12653 in v0.9.0 - growth from continued indexing, not migration)"
   },
-  "qb_context_commit": "a03ee09"
+  "context_mcp_commit": "a03ee09"
 }

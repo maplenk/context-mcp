@@ -1,8 +1,8 @@
 {
   "benchmark_version": "1.0.0",
-  "qb_context_version": "v0.8.0",
-  "qb_context_commit": "fab5104",
-  "qb_context_commit_message": "Merge branch 'worktree-agent-a0422449' (last commit before Cold Start Phase 9)",
+  "context_mcp_version": "v0.8.0",
+  "context_mcp_commit": "fab5104",
+  "context_mcp_commit_message": "Merge branch 'worktree-agent-a0422449' (last commit before Cold Start Phase 9)",
   "run_date": "2026-04-02T13:57:00Z",
   "environment": {
     "os": "darwin/arm64",

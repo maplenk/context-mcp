@@ -64,7 +64,7 @@ else
   BINARY="$OUT_DIR/context-mcp"
   (
     cd "$PROJECT_ROOT"
-    go build -tags "fts5" -o "$BINARY" ./cmd/qb-context
+    go build -tags "fts5" -o "$BINARY" ./cmd/context-mcp
   )
 fi
 

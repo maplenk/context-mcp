@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# benchmarks/run.sh — Run the full qb-context benchmark suite
+# benchmarks/run.sh — Run the full context-mcp benchmark suite
 # Usage: ./benchmarks/run.sh [qbapi-path]
 set -euo pipefail
 
@@ -8,7 +8,7 @@ TARGET_REPO="${1:-${QB_TEST_REPO:-/path/to/test/repo}}"
 RESULTS_DIR="$REPO_ROOT/benchmarks/results"
 TIMESTAMP=$(date +%Y%m%dT%H%M%S)
 
-echo "=== qb-context Benchmark Suite ==="
+echo "=== context-mcp Benchmark Suite ==="
 echo "Target repo: $TARGET_REPO"
 echo "Timestamp:   $TIMESTAMP"
 echo ""
@@ -22,7 +22,7 @@ fi
 mkdir -p "$RESULTS_DIR"
 
 # 1. Build
-echo "--- Building qb-context ---"
+echo "--- Building context-mcp ---"
 cd "$REPO_ROOT"
 go build -tags "fts5" ./...
 echo "Build: OK"

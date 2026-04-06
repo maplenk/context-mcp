@@ -359,7 +359,7 @@ PYEOF
 # ─── Main ───────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${BOLD}║         qb-context Benchmark Comparison Tool            ║${RESET}"
+echo -e "${BOLD}║         context-mcp Benchmark Comparison Tool            ║${RESET}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════╝${RESET}"
 echo ""
 echo -e "  Commit:    ${BOLD}$COMMIT_SHA${RESET} — $COMMIT_MSG"

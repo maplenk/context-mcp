@@ -1,7 +1,7 @@
-# qb-context Benchmark Suite
+# context-mcp Benchmark Suite
 
 Release-level benchmarks for validating search quality, query performance, and graph
-operations across qb-context versions. The suite indexes a real-world codebase, runs
+operations across context-mcp versions. The suite indexes a real-world codebase, runs
 26 queries across 5 categories, and measures latency, ranking quality, and graph
 algorithm performance.
 
@@ -69,7 +69,7 @@ git push --no-verify               # skip all hooks
 
 ## Overview
 
-The benchmark suite measures three dimensions of qb-context quality:
+The benchmark suite measures three dimensions of context-mcp quality:
 
 | Dimension            | What It Measures                              | Tools Used                       |
 |----------------------|-----------------------------------------------|----------------------------------|
@@ -211,7 +211,7 @@ building, and running the full suite. Worktrees are auto-cleaned after the run.
 **How it works:**
 1. Resolves the git ref to a short SHA
 2. Creates a worktree at `/tmp/qb-bench-<sha>-<pid>`
-3. Builds `qb-context` from that worktree
+3. Builds `context-mcp` from that worktree
 4. Runs graph benchmarks, query benchmarks, and quality tests
 5. Saves structured JSON to `results/bench-<sha>-<timestamp>.json`
 6. If `--baseline` was given, repeats for the baseline commit and prints a comparison table
@@ -576,14 +576,14 @@ python3 benchmarks/dashboard.py benchmarks/results/*.json
 
 ---
 
-### Cross-Engine Comparison: qb-context vs codebase-memory-mcp
+### Cross-Engine Comparison: context-mcp vs codebase-memory-mcp
 
-Head-to-head benchmark of **qb-context v0.9.0** vs **codebase-memory-mcp v0.8.0**
+Head-to-head benchmark of **context-mcp v0.9.0** vs **codebase-memory-mcp v0.8.0**
 (CLI mode), both run against the canonical qbapi target.
 
 #### Index Comparison
 
-| Dimension           | qb-context      | CBM              | Notes      |
+| Dimension           | context-mcp      | CBM              | Notes      |
 |---------------------|-----------------|------------------|------------|
 | Nodes indexed       | 12,653          | 16,806           | CBM +33%   |
 | Edges indexed       | 16,294          | 35,189           | CBM +116%  |
@@ -604,55 +604,55 @@ CBM queries use the **equivalent** tool for each category — `explore` for conc
 | C1 | Order flow (cross-file)| `context` (PPR+BM25)| **3.0ms**| `explore`      | 764.7ms   | **255× faster**  |
 | C5 | API→DB flow           | `context` (PPR+BM25)| **2.2ms**| `explore`      | 905.4ms   | **411× faster**  |
 
-**Scoreboard: qb-context 6 — 0 CBM**
+**Scoreboard: context-mcp 6 — 0 CBM**
 
 #### Query Result Quality
 
 **A1 — Symbol Lookup**
-- qb-context (`read_symbol`): Returns **full source** (14,373 chars) for
+- context-mcp (`read_symbol`): Returns **full source** (14,373 chars) for
   `FiscalYearController` @ `app/Http/Controllers/FiscalYearController.php`
 - CBM (`understand`): Returns metadata + truncated source, pagerank=0.00005,
   0 callers, 0 callees, `is_key_symbol=False`
 
 **A3 — Regex Code Search**
-- qb-context (`search_code`): 10 matches — `Agriculture.php`, `OrderController.php`,
+- context-mcp (`search_code`): 10 matches — `Agriculture.php`, `OrderController.php`,
   `OrderDeletionController.php`, `v2/OrderController.php`
 - CBM (`search_graph`): 119.5ms — regex name-pattern match on graph nodes
 
 **B1 — Payment Concept**
-- qb-context (`context`): 10 results, scored 0.44–0.62 —
+- context-mcp (`context`): 10 results, scored 0.44–0.62 —
   `BillingWeb.generateUTAPToken` (0.617), `partner.payment` (0.451)
 - CBM (`explore`): 20 matches, scored 0.43–0.56 —
   `__construct` (0.557) ⚠️ generic, `fetchPaymentValues` (0.456),
   `getStorePaymentSetting` (0.454). **0 dependencies, 0 hotspots, 0 entry_points.**
 
 **B6 — Omnichannel Concept** *(CBM wins on quality)*
-- qb-context (`context`): 10 results, scored 0.43–0.53 —
+- context-mcp (`context`): 10 results, scored 0.43–0.53 —
   `integrationBilling.handle` (0.531), `SyncInventoryJob` (0.521)
 - CBM (`explore`): 20 matches, scored 0.52–0.70 —
   **`syncBrevoContact` (0.699)**, `syncZOHOItem` (0.571), `syncBrevoWebsiteContact` (0.554).
   Higher scores and more relevant top results.
 
 **C1 — Order Flow** *(CBM wins on quality)*
-- qb-context (`context`): 15 results — `Flight.endLeg` (0.617),
+- context-mcp (`context`): 15 results — `Flight.endLeg` (0.617),
   `appController.endSession` — some results unrelated to orders
 - CBM (`explore`): 20 matches, scored 0.65–0.66 —
   **`orderCheck` (0.664)**, `OrderRequestTracker` (0.656), `orders` (0.649).
   More relevant to "order flow" query.
 
 **C5 — API→DB Flow**
-- qb-context (`context`): 15 results —
+- context-mcp (`context`): 15 results —
   `create_global_nector_api_usage_tracker_table`, `Unicommerce.APIRequestTracker`
 - CBM (`explore`): 20 matches, scored 0.49–0.55 —
   `write` (0.552) ⚠️ generic, `writeStderr` (0.509). Less relevant top results.
 
 #### Tool Parity
 
-Both engines implement the same compound tool set. qb-context tools were developed
+Both engines implement the same compound tool set. context-mcp tools were developed
 independently with the same design goals (blast radius, architecture summary,
 explore/understand, key symbols, call tracing).
 
-| Tool                     | qb-context         | CBM                   |
+| Tool                     | context-mcp         | CBM                   |
 |--------------------------|--------------------|-----------------------|
 | `impact` / blast radius  | ✅ `impact`         | ✅ `get_impact_analysis` |
 | Architecture overview    | ✅ `get_architecture_summary` | ✅ `get_architecture` |
@@ -665,24 +665,24 @@ explore/understand, key symbols, call tracing).
 
 #### Key Takeaways
 
-1. **qb-context wins all 6 queries on speed** — 2× to 1,322× faster
+1. **context-mcp wins all 6 queries on speed** — 2× to 1,322× faster
 2. **CBM wins on result quality for 2/6 queries** (B6 omnichannel, C1 order flow) —
    CBM's `explore` finds more contextually relevant symbols in those cases
-3. **qb-context's PPR+BM25 hybrid** understands natural language concepts but
+3. **context-mcp's PPR+BM25 hybrid** understands natural language concepts but
    sometimes drifts (C1: returns `Flight.endLeg` for "order flow")
 4. **CBM's `explore`** returns scored results but includes generics (`__construct`,
    `write`) and leaves dependencies/hotspots/entry_points empty
 5. **CBM extracts richer structure** — 33% more nodes and 116% more edges via
    tree-sitter (66 langs vs 6)
 6. **CBM CLI overhead** — ~15ms subprocess spawn + ~600-900ms for `explore` compound
-   queries vs qb-context's in-process 1-6ms
+   queries vs context-mcp's in-process 1-6ms
 7. **Near-full tool parity** — only `prepare_change` and `get_session_context` are
    CBM-exclusive; all other compound tools exist in both engines
 
 #### Reproduce
 
 ```bash
-# Run qb-context benchmarks
+# Run context-mcp benchmarks
 go test -tags "fts5,realrepo" -v -run "TestBenchmarkQueries" ./tests/ -count=1
 
 # Run CBM benchmarks (requires codebase-memory-mcp installed)
@@ -690,7 +690,7 @@ codebase-memory-mcp cli search_graph \
   '{"name_pattern":"FiscalYearController","label":"Class","project":"Users-naman-Documents-QBApps-qbapi"}'
 
 # Result files
-# qb-context: benchmarks/results/v0.9.0-e1a93bc-qbapi.json
+# context-mcp: benchmarks/results/v0.9.0-e1a93bc-qbapi.json
 # CBM:        benchmarks/results/cbm-v0.8.0-qbapi.json
 ```
 
@@ -706,8 +706,8 @@ handles both automatically):
 ```json
 {
   "benchmark_version": "1.0.0",
-  "qb_context_version": "v0.8.0",
-  "qb_context_commit": "3be18d3",
+  "context_mcp_version": "v0.8.0",
+  "context_mcp_commit": "3be18d3",
   "run_date": "2026-04-02T13:34:00Z",
   "environment": {
     "os": "darwin/arm64",
@@ -761,8 +761,8 @@ handles both automatically):
 {
   "benchmark_version": "1.0.0",
   "kind": "mcp_usage",
-  "qb_context_version": "v0.3.0",
-  "qb_context_commit": "43c04a0",
+  "context_mcp_version": "v0.3.0",
+  "context_mcp_commit": "43c04a0",
   "run_date": "2026-04-06T08:12:00Z",
   "environment": {
     "os": "darwin/arm64",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install git hooks for qb-context
+# Install git hooks for context-mcp
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

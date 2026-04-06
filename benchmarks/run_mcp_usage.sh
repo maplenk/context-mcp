@@ -155,7 +155,7 @@ echo ""
 echo "--- Building context-mcp ---"
 (
     cd "$REPO_ROOT"
-    go build -tags "fts5" -o "$BINARY" ./cmd/qb-context
+    go build -tags "fts5" -o "$BINARY" ./cmd/context-mcp
 )
 echo "Build: OK"
 echo ""
@@ -333,8 +333,8 @@ for result in results.values():
 artifact = {
     "benchmark_version": "1.0.0",
     "kind": "mcp_usage",
-    "qb_context_version": f"v{version}",
-    "qb_context_commit": commit,
+    "context_mcp_version": f"v{version}",
+    "context_mcp_commit": commit,
     "run_date": datetime.now(timezone.utc).isoformat(),
     "environment": {
         "os": f"{platform.system().lower()}/{platform.machine().lower()}",

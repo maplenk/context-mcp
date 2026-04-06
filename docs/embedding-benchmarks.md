@@ -1,7 +1,7 @@
 # Embedding Backend Benchmarks (2026-04-05)
 
 ## Test Setup
-- **Repo:** qb-context self-repo (55 source files, 924 nodes, 5993 edges)
+- **Repo:** context-mcp self-repo (55 source files, 924 nodes, 5993 edges)
 - **Hardware:** macOS (Apple Silicon)
 - **Queries:** 5 benchmark queries on the `context` tool
 

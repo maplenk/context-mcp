@@ -1,5 +1,5 @@
 # Binaries
-qb-context
+context-mcp
 *.exe
 *.dll
 *.so
@@ -29,7 +29,7 @@ Thumbs.db
 
 # Project index database
 .context-mcp/
-.qb-context/
+.context-mcp/
 
 # Agent tool configs and worktrees
 .claude/

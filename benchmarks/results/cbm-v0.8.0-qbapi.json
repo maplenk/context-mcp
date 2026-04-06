@@ -44,5 +44,5 @@
     "D3": {"status": "pass"},
     "D4": {"status": "pass", "results": 10}
   },
-  "notes": "CLI mode adds process startup overhead (~15ms). explore adds ~600-900ms for compound queries. Correct CLI param is 'project' not 'repo_path'. CBM uses tree-sitter (66 langs) vs qb-context regex (6 langs). CBM indexes 16.8K nodes vs qb-context 12.7K for same repo. Quality: CBM wins B6 (omnichannel) and C1 (order flow) on relevance; qb-context wins B1 and C5."
+  "notes": "CLI mode adds process startup overhead (~15ms). explore adds ~600-900ms for compound queries. Correct CLI param is 'project' not 'repo_path'. CBM uses tree-sitter (66 langs) vs context-mcp regex (6 langs). CBM indexes 16.8K nodes vs context-mcp 12.7K for same repo. Quality: CBM wins B6 (omnichannel) and C1 (order flow) on relevance; context-mcp wins B1 and C5."
 }

@@ -47,8 +47,8 @@ def render_summary(data: dict) -> None:
 
     print("# MCP Usage Benchmark Report")
     print()
-    print(f"- qb-context: `{data['qb_context_version']}`")
-    print(f"- commit: `{data['qb_context_commit']}`")
+    print(f"- context-mcp: `{data['context_mcp_version']}`")
+    print(f"- commit: `{data['context_mcp_commit']}`")
     print(f"- run date: `{data['run_date']}`")
     print(f"- target repo: `{env['target_repo']}`")
     print(f"- clients: `{', '.join(env['clients'])}`")

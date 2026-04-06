@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "description": "qb-context release benchmark query suite",
+  "description": "context-mcp release benchmark query suite",
   "target_repo": "qbapi (Laravel multi-tenant retail/POS backend, ~12.6K nodes, ~16.3K edges)",
   "categories": {
     "A": {

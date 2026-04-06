@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-benchmarks/dashboard.py — Compare qb-context benchmark results side-by-side.
+benchmarks/dashboard.py — Compare context-mcp benchmark results side-by-side.
 
 Usage:
   python3 benchmarks/dashboard.py                           # compare all results in results/
@@ -44,8 +44,8 @@ def load_result(path: str) -> dict:
     # Normalize: old baseline format vs new compare.sh format
     result = {
         "file": os.path.basename(path),
-        "commit": data.get("qb_context_commit", data.get("commit", "unknown")),
-        "version": data.get("qb_context_version", data.get("label", "")),
+        "commit": data.get("context_mcp_commit", data.get("commit", "unknown")),
+        "version": data.get("context_mcp_version", data.get("label", "")),
         "date": data.get("run_date", data.get("timestamp", "")),
         "nodes": 0,
         "edges": 0,
@@ -237,7 +237,7 @@ def print_dashboard(results: list[dict]):
     # ── Title ──
     print()
     print(f"  {C.BOLD}╔{'═' * 60}╗{C.RESET}")
-    print(f"  {C.BOLD}║{'qb-context Benchmark Comparison Dashboard':^60}║{C.RESET}")
+    print(f"  {C.BOLD}║{'context-mcp Benchmark Comparison Dashboard':^60}║{C.RESET}")
     print(f"  {C.BOLD}╚{'═' * 60}╝{C.RESET}")
 
     # ── Overview ──
@@ -424,7 +424,7 @@ def export_html(results: list[dict]) -> str:
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>qb-context Benchmark Report</title>
+<title>context-mcp Benchmark Report</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
          max-width: 960px; margin: 40px auto; padding: 0 20px; color: #1a1a2e; background: #f8f9fa; }}
@@ -441,7 +441,7 @@ def export_html(results: list[dict]) -> str:
 </style>
 </head>
 <body>
-<h1>qb-context Benchmark Report</h1>
+<h1>context-mcp Benchmark Report</h1>
 <p class="meta">Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} · {n} version(s) compared</p>
 
 <h2>Overview</h2>
@@ -461,7 +461,7 @@ def export_html(results: list[dict]) -> str:
 
 # ─── Main ───────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Compare qb-context benchmark results")
+    parser = argparse.ArgumentParser(description="Compare context-mcp benchmark results")
     parser.add_argument("files", nargs="*", help="Result JSON files to compare")
     parser.add_argument("--latest", type=int, default=0, help="Compare N most recent results")
     parser.add_argument("--html", action="store_true", help="Output HTML report")
