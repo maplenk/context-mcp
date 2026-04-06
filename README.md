@@ -21,7 +21,7 @@ LLM coding agents waste tokens brute-forcing through grep and glob results with 
 - **Multi-language AST parsing**: Go (native go/ast), JavaScript, TypeScript, PHP (tree-sitter)
 - **Graph analysis**: Louvain community detection, betweenness centrality, blast radius, Personalized PageRank
 - **Incremental indexing** with filesystem watching (.gitignore-aware, hot-reload)
-- **Optional ONNX neural embeddings** (Qwen2 model, Matryoshka dimensions)
+- **Optional ONNX neural embeddings** (CodeRankEmbed by default; legacy Qwen2/Jina models still supported)
 - **Single statically-linked binary** -- SQLite + FTS5 + sqlite-vec, no external databases
 - **Cold Start**: Git history intent enrichment for better first-query results
 
@@ -64,23 +64,88 @@ The `-tags "fts5"` flag is **required** -- it enables SQLite full-text search.
 
 ### Optional: ONNX Neural Embeddings
 
-By default, context-mcp uses TF-IDF for embeddings. For higher-quality semantic search, you can use an ONNX code embedding model (Qwen2-based, ~500MB):
+By default, context-mcp uses TF-IDF for embeddings. For higher-quality local semantic search, build with the `onnx` tag and use CodeRankEmbed, the repo's default ONNX model (NomicBERT, INT8):
 
 ```bash
-# Install optimum-cli
-pip install optimum[onnxruntime]
+./scripts/download-model.sh
+go build -tags "fts5 onnx" -o context-mcp ./cmd/qb-context
 
-# Export and quantize the model
-optimum-cli export onnx --model jinaai/jina-embeddings-v2-base-code onnx_model/
-optimum-cli onnxruntime quantize --onnx_model onnx_model --arm64 -o quantized_model/
+# Explicit model path
+./context-mcp -repo /path/to/project -onnx-model models/CodeRankEmbed-onnx-int8 -onnx-lib /path/to/libonnxruntime.dylib
 
-# Run with ONNX embeddings
-./context-mcp -repo /path/to/project -onnx-model ./quantized_model -onnx-lib /path/to/libonnxruntime.dylib
+# If the model is at the default path, context-mcp auto-detects it
+./context-mcp -repo /path/to/project -onnx-lib /path/to/libonnxruntime.dylib
 ```
 
-Supported Matryoshka dimensions: 64, 128, 256, 512, 896 (set via `-embedding-dim`).
+CodeRankEmbed uses 768 dimensions. Legacy Qwen2/Jina ONNX exports are still supported; if you use one, set `-embedding-dim` to a model-compatible value.
 
-## MCP Integration
+## Harness Integration
+
+### Stdio Transport
+
+Run the default MCP server over stdio:
+
+```bash
+./context-mcp -repo /path/to/your/project
+```
+
+### Streamable HTTP Transport
+
+Serve MCP over streamable HTTP on `http://127.0.0.1:8080/mcp`:
+
+```bash
+./context-mcp -repo /path/to/your/project serve-http -port 8080
+
+# Optional bearer auth
+./context-mcp -repo /path/to/your/project serve-http -port 8080 -bearer-token dev-token
+```
+
+You can also set the bearer token with `QB_CONTEXT_BEARER_TOKEN`. Current `install` and `print-config` helpers do not emit client-specific HTTP auth/header settings, so bearer-token setups are still a manual advanced path.
+
+### Install, Print, Doctor, Uninstall
+
+The binary includes helper subcommands for Claude Code and Codex:
+
+```bash
+./context-mcp install --client claude-code --repo /absolute/path/to/your/project --profile extended
+./context-mcp install --client codex --repo /absolute/path/to/your/project --profile extended
+
+./context-mcp print-config --client claude-code --repo /absolute/path/to/your/project --transport http --url http://127.0.0.1:8080/mcp
+./context-mcp doctor --repo /absolute/path/to/your/project
+./context-mcp uninstall --client claude-code --scope local
+```
+
+### Claude Code
+
+Claude Code supports `user`, `local`, and `project` scopes. `install` defaults to `user`; use `--scope local` or `--scope project` when needed.
+
+**Project-scoped stdio config (`.mcp.json`):**
+
+```json
+{
+  "mcpServers": {
+    "context-mcp": {
+      "command": "/absolute/path/to/context-mcp",
+      "args": ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
+    }
+  }
+}
+```
+
+**Project-scoped HTTP config (`.mcp.json`):**
+
+```json
+{
+  "mcpServers": {
+    "context-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+`doctor` checks user, local, and project-scoped Claude Code installs, including local-scope entries stored in Claude's global `projects[...]` config.
 
 ### Claude Desktop
 
@@ -101,19 +166,23 @@ Add to your Claude Desktop config:
 
 Restart Claude Desktop after editing the config. All tools will appear in Claude's tool list.
 
-### Claude Code
+### Codex
 
-Add to your project's `.mcp.json`:
+The helper installs Codex entries into `~/.codex/config.toml`. Codex also supports repo-local `.codex/config.toml` if you prefer project-scoped manual configuration.
 
-```json
-{
-  "mcpServers": {
-    "context-mcp": {
-      "command": "/absolute/path/to/context-mcp",
-      "args": ["-repo", "."]
-    }
-  }
-}
+**User-scoped stdio config (`~/.codex/config.toml` or `.codex/config.toml`):**
+
+```toml
+[mcp_servers.context-mcp]
+command = "/absolute/path/to/context-mcp"
+args = ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
+```
+
+**User-scoped HTTP config (`~/.codex/config.toml` or `.codex/config.toml`):**
+
+```toml
+[mcp_servers.context-mcp]
+url = "http://127.0.0.1:8080/mcp"
 ```
 
 ## Tools Overview
@@ -187,7 +256,7 @@ Highlights from the query suite:
 - B4 Database schema: 3/3 rubric items (perfect)
 - C5 Inventory writes: 5-6/8 rubric items
 
-See [benchmarks/](benchmarks/) for full methodology, query suite, and per-query scoring.
+See [benchmarks/](benchmarks/) for full methodology, query suite, per-query scoring, and the live Claude/Codex MCP usage benchmark runner.
 
 ## Configuration
 
@@ -203,9 +272,16 @@ All options are set via CLI flags:
 | `-workers` | `4` | Number of parallel file-parsing workers |
 | `-onnx-model` | (empty) | Path to ONNX model directory (enables neural embeddings) |
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
-| `-embedding-dim` | `384` | Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896) |
+| `-embedding-dim` | `384` | Embedding vector dimension. TF-IDF defaults to 384; CodeRankEmbed uses 768 |
 | `-profile` | `core` | Tool profile for MCP SDK: `core` (6 tools), `extended` (13), or `full` (16) |
 | `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
+| `-ollama-endpoint` | (empty) | Ollama API endpoint for embedding backend |
+| `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |
+| `-llamacpp-endpoint` | (empty) | llama.cpp embedding server endpoint |
+| `-openai-endpoint` | (empty) | OpenAI-compatible embeddings endpoint |
+| `-openai-model` | `text-embedding-nomic-embed-code` | OpenAI-compatible embeddings model name |
+| `-port` | `8080` | HTTP port for `serve-http` |
+| `-bearer-token` | (empty) | Optional bearer token for HTTP auth |
 
 ## Development
 
@@ -214,6 +290,23 @@ go build -tags "fts5" ./...           # build (FTS5 tag required)
 go test -tags "fts5" -count=1 ./...   # run tests
 go vet -tags "fts5" ./...             # static analysis
 ```
+
+Manual client smoke tests are available on demand:
+
+```bash
+./scripts/smoke-claude-mcp.sh all /absolute/path/to/your/project
+./scripts/smoke-codex-mcp.sh all /absolute/path/to/your/project
+```
+
+They are intentionally not part of CI. Each script builds a temporary binary, runs Claude Code (`--model haiku`) or Codex (`-m gpt-5.4-mini`) against isolated `stdio` and `http` MCP configs, and saves raw logs plus extracted summaries to a temp directory.
+
+For a publishable benchmark artifact under `benchmarks/results/` with both `MCP` and `no MCP` runs, use:
+
+```bash
+./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
+```
+
+That run now emits both a machine-readable JSON artifact and a Markdown report with token, cost, pass-rate, and output-size comparison tables.
 
 CI: GitHub Actions runs build, vet, and race-detector tests on every push. Weekly security scanning with govulncheck, gosec, and trivy.
 

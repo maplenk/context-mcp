@@ -1,0 +1,26 @@
+[
+  {
+    "id": "context",
+    "expected_tools": ["context"],
+    "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. Use the context tool first. Identify the main indexing entrypoints in this repository. Return exactly three symbol and file path pairs with one short sentence on why each matters.",
+    "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Identify the main indexing entrypoints in this repository. Return exactly three symbol and file path pairs with one short sentence on why each matters."
+  },
+  {
+    "id": "assemble_context",
+    "expected_tools": ["assemble_context"],
+    "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. Use assemble_context with a token budget around 1200 and mode snippets to gather minimal context for explaining how HTTP MCP serving works in this repo. Report used_tokens, excluded, and the top returned items.",
+    "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Gather the minimal code context needed to explain how HTTP MCP serving works in this repo. Keep the answer concise and list the top files or symbols you relied on."
+  },
+  {
+    "id": "read_symbol",
+    "expected_tools": ["read_symbol"],
+    "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. Use read_symbol to inspect the runServeHTTP function and summarize its responsibilities in exactly three short bullets. If you need to locate it first, keep that brief, but you must call read_symbol.",
+    "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Find the runServeHTTP function and summarize its responsibilities in exactly three short bullets."
+  },
+  {
+    "id": "checkpoint_delta",
+    "expected_tools": ["checkpoint_context", "read_delta"],
+    "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. Create a checkpoint named %CHECKPOINT_NAME% with checkpoint_context, then immediately call read_delta against that checkpoint. Report whether any symbols changed, explain what the checkpoint or delta feature is for, and include the checkpoint name.",
+    "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Explain how checkpoint_context and read_delta are implemented in this repo, what they are for, and name the key files or symbols involved."
+  }
+]

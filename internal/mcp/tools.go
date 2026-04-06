@@ -502,10 +502,10 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 	}
 
 	// Group affected nodes by risk level based on hop depth
-	var direct []impactNode    // depth 1 = CRITICAL
-	var highRisk []impactNode  // depth 2 = HIGH
+	var direct []impactNode     // depth 1 = CRITICAL
+	var highRisk []impactNode   // depth 2 = HIGH
 	var mediumRisk []impactNode // depth 3 = MEDIUM
-	var lowRisk []impactNode   // depth 4+ = LOW
+	var lowRisk []impactNode    // depth 4+ = LOW
 	var affectedTests []impactNode
 
 	for id, depth := range affectedWithDepth {
@@ -3079,13 +3079,17 @@ func toCallToolResult(result interface{}) (*mcp.CallToolResult, error) {
 			text = `{"truncated":true,"message":"Response exceeded 1MB size limit","partial_data":"` + escaped + `"}`
 		} else {
 			// Plain text: truncate at a valid UTF-8 boundary.
-			truncated := text[:maxResponseSize]
+			const suffix = "\n... [truncated, response exceeded 1MB]"
+			budget := maxResponseSize - len(suffix)
+			if budget < 0 {
+				budget = 0
+			}
+			truncated := text[:budget]
 			for !utf8.ValidString(truncated) && len(truncated) > 0 {
 				truncated = truncated[:len(truncated)-1]
 			}
-			text = truncated + "\n... [truncated, response exceeded 1MB]"
+			text = truncated + suffix
 		}
 	}
 	return mcp.NewToolResultText(text), nil
 }
-

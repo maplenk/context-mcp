@@ -9,6 +9,7 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
 - [Quick Start](#quick-start)
 - [Installation](#installation)
 - [Running the Daemon](#running-the-daemon)
+- [Harness Commands](#harness-commands)
 - [CLI Mode](#cli-mode)
 - [MCP Tools Reference](#mcp-tools-reference)
   - [context](#context--search--discover-code)
@@ -30,6 +31,9 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
 - [MCP Prompts](#mcp-prompts)
 - [MCP Resources](#mcp-resources)
 - [Connecting to Claude Desktop](#connecting-to-claude-desktop)
+- [Connecting to Claude Code](#connecting-to-claude-code)
+- [Connecting to Codex](#connecting-to-codex)
+- [Manual Smoke Tests](#manual-smoke-tests)
 - [Configuration](#configuration)
 - [How Indexing Works](#how-indexing-works)
 - [Supported Languages](#supported-languages)
@@ -55,7 +59,7 @@ go build -tags "fts5" -o context-mcp ./cmd/qb-context
 
 ### Prerequisites
 
-- Go 1.24+ with CGO enabled (required for SQLite FTS5)
+- Go 1.25+ with CGO enabled (required for SQLite FTS5)
 - A C compiler (gcc/clang) -- needed by `go-sqlite3`
 
 ### Build from Source
@@ -101,7 +105,9 @@ read_delta                 Compare current index against a named checkpoint.
 
 ## Running the Daemon
 
-The daemon runs as an MCP server over stdio. It indexes your repo on startup, watches for file changes, and serves tool requests.
+### Stdio
+
+The default daemon mode runs as an MCP server over stdio. It indexes your repo on startup, watches for file changes, and serves tool requests.
 
 ```bash
 ./context-mcp -repo /path/to/your/project
@@ -118,9 +124,63 @@ On startup it will:
 
 The SQLite database is stored at `<repo>/.context-mcp/index.db` by default.
 
+### Streamable HTTP
+
+Use `serve-http` when you want a local MCP endpoint on `http://127.0.0.1:<port>/mcp`:
+
+```bash
+./context-mcp -repo /path/to/your/project serve-http -port 8080
+
+# Optional bearer auth
+./context-mcp -repo /path/to/your/project serve-http -port 8080 -bearer-token dev-token
+```
+
+If `-bearer-token` is set, clients must send `Authorization: Bearer <token>`. You can also provide the token with `QB_CONTEXT_BEARER_TOKEN`.
+
 ### Stopping
 
 Send `SIGINT` (Ctrl+C) or `SIGTERM` for graceful shutdown.
+
+---
+
+## Harness Commands
+
+`context-mcp` includes helper subcommands for Claude Code and Codex configuration:
+
+- `install` writes or registers a client config entry
+- `print-config` prints a manual config snippet without mutating client state
+- `doctor` verifies binary resolution, client config, repo path, and index presence
+- `uninstall` removes the generated client entry
+
+### Transport Modes
+
+- `stdio` is the default and launches `context-mcp` as a subprocess
+- `http` and `sse` expect `--url` and point the client at an already-running MCP endpoint
+- Claude Code supports `user`, `local`, and `project` scopes
+- Codex helper install writes to `~/.codex/config.toml`; project-local `.codex/config.toml` remains a manual option
+
+### Examples
+
+```bash
+# Claude Code stdio install
+./context-mcp install --client claude-code --repo /absolute/path/to/your/project --profile extended
+
+# Claude Code local-scope install
+./context-mcp install --client claude-code --repo /absolute/path/to/your/project --scope local
+
+# Codex stdio install
+./context-mcp install --client codex --repo /absolute/path/to/your/project --profile extended
+
+# Print an HTTP snippet instead of installing it
+./context-mcp print-config --client codex --repo /absolute/path/to/your/project --transport http --url http://127.0.0.1:8080/mcp
+
+# Verify installs
+./context-mcp doctor --repo /absolute/path/to/your/project
+./context-mcp doctor --client claude-code --repo /absolute/path/to/your/project
+
+# Remove a Claude Code local-scope install
+./context-mcp uninstall --client claude-code --scope local
+```
 
 ---
 
@@ -692,18 +752,100 @@ Restart Claude Desktop after editing the config. All 16 tools will appear in Cla
 
 ### Connecting to Claude Code
 
-Add to your project's `.mcp.json`:
+Claude Code supports `user`, `local`, and `project` scopes. The helper defaults to `user`; use `--scope local` or `--scope project` when needed.
+
+**Helper install (user scope):**
+
+```bash
+./context-mcp install --client claude-code --repo /absolute/path/to/your/project --profile extended
+```
+
+**Helper install (local scope):**
+
+```bash
+./context-mcp install --client claude-code --repo /absolute/path/to/your/project --scope local
+```
+
+**Project-scoped stdio config (`.mcp.json`):**
 
 ```json
 {
   "mcpServers": {
     "context-mcp": {
       "command": "/absolute/path/to/context-mcp",
-      "args": ["-repo", "."]
+      "args": ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
     }
   }
 }
 ```
+
+**Project-scoped HTTP config (`.mcp.json`):**
+
+```json
+{
+  "mcpServers": {
+    "context-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+`doctor` checks user, local, and project-scoped Claude Code installs, including local-scope entries persisted in Claude's global `projects[...]` config.
+
+### Connecting to Codex
+
+The helper installs Codex config into `~/.codex/config.toml`. Codex also supports project-local `.codex/config.toml` if you prefer to keep the config in the repository.
+
+**Helper install:**
+
+```bash
+./context-mcp install --client codex --repo /absolute/path/to/your/project --profile extended
+```
+
+**User-scoped stdio config (`~/.codex/config.toml` or `.codex/config.toml`):**
+
+```toml
+[mcp_servers.context-mcp]
+command = "/absolute/path/to/context-mcp"
+args = ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
+```
+
+**User-scoped HTTP config (`~/.codex/config.toml` or `.codex/config.toml`):**
+
+```toml
+[mcp_servers.context-mcp]
+url = "http://127.0.0.1:8080/mcp"
+```
+
+---
+
+## Manual Smoke Tests
+
+These scripts are on-demand harness checks, not CI. They build a temporary `context-mcp` binary, create isolated MCP configs, run a small benchmark-style scenario set from [`benchmarks/mcp_smoke_tasks.json`](benchmarks/mcp_smoke_tasks.json), and write raw event logs plus `summary.json` to a temp directory.
+
+**Claude Code (`--model haiku`):**
+
+```bash
+./scripts/smoke-claude-mcp.sh all /absolute/path/to/your/project
+./scripts/smoke-claude-mcp.sh http /absolute/path/to/your/project /tmp/context-mcp-smoke-claude
+```
+
+By default the Claude smoke test uses `--output-format stream-json`, `--strict-mcp-config`, and exercises `context`, `assemble_context`, `read_symbol`, `checkpoint_context`, and `read_delta`.
+
+**Codex (`-m gpt-5.4-mini`):**
+
+```bash
+./scripts/smoke-codex-mcp.sh all /absolute/path/to/your/project
+./scripts/smoke-codex-mcp.sh stdio /absolute/path/to/your/project /tmp/context-mcp-smoke-codex
+```
+
+The Codex smoke test uses `codex exec --json` with an isolated temp MCP config override. Both scripts support `stdio`, `http`, or `all` as the first argument.
+
+If the client CLI exposes usage or cost telemetry, the scripts record it in `summary.json`. Missing usage fields are treated as informational, not fatal.
+
+For a publishable release artifact in [`benchmarks/results/`](/Users/naman/Documents/qb-context/benchmarks/results), run [`benchmarks/run_mcp_usage.sh`](/Users/naman/Documents/qb-context/benchmarks/run_mcp_usage.sh) against the canonical benchmark repo. By default it runs both `with MCP` and `without MCP` variants and emits both a JSON artifact and a Markdown comparison-table report.
 
 ---
 
@@ -721,10 +863,16 @@ All options are set via CLI flags:
 | `-workers` | `4` | Number of parallel file-parsing workers |
 | `-onnx-model` | (empty) | Path to ONNX model directory (enables neural embeddings) |
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
-| `-embedding-dim` | `384` | Embedding vector dimension (ONNX Matryoshka: 64/128/256/512/896) |
+| `-embedding-dim` | `384` | Embedding vector dimension. TF-IDF defaults to 384; CodeRankEmbed uses 768 |
+| `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
+| `-profile` | `core` | Tool profile for MCP mode: `core` (6 tools), `extended` (13), `full` (16) |
 | `-ollama-endpoint` | (empty) | Ollama API endpoint (e.g., `http://localhost:11434`) |
 | `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |
 | `-llamacpp-endpoint` | (empty) | llama.cpp server endpoint (e.g., `http://localhost:8080`) |
+| `-openai-endpoint` | (empty) | OpenAI-compatible embeddings endpoint |
+| `-openai-model` | `text-embedding-nomic-embed-code` | OpenAI-compatible embeddings model name |
+| `-port` | `8080` | HTTP port for `serve-http` |
+| `-bearer-token` | (empty) | Optional bearer token for HTTP auth |
 
 **Example with custom settings:**
 
@@ -738,14 +886,20 @@ context-mcp supports three embedding backends beyond the built-in TF-IDF fallbac
 
 **Option 1: Pre-quantized ONNX model (recommended for best quality)**
 
-Download the pre-quantized Jina Code model (~488MB) with the provided script:
+Download the default pre-quantized CodeRankEmbed model (~490MB) with the provided script:
 
 ```bash
-./scripts/download-model.sh                        # downloads to models/jina-code-int8/
-./context-mcp -onnx-model models/jina-code-int8 -onnx-lib /path/to/libonnxruntime.dylib
+./scripts/download-model.sh
+go build -tags "fts5 onnx" -o context-mcp ./cmd/qb-context
+
+# Explicit model path
+./context-mcp -onnx-model models/CodeRankEmbed-onnx-int8 -onnx-lib /path/to/libonnxruntime.dylib
+
+# If the model is at the default path, it is auto-detected
+./context-mcp -onnx-lib /path/to/libonnxruntime.dylib
 ```
 
-Or export manually via `optimum-cli` (see the ONNX model export documentation).
+CodeRankEmbed uses 768 dimensions. Legacy Qwen2 or Jina ONNX exports are still supported, but you must set `-embedding-dim` to match the model you exported.
 
 **Option 2: Ollama (easiest setup, no compilation needed)**
 

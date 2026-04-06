@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 MODEL_DIR="${1:-models/CodeRankEmbed-onnx-int8}"
@@ -30,8 +30,9 @@ echo ""
 echo "Model downloaded to $MODEL_DIR"
 echo ""
 echo "Usage:"
-echo "  qb-context -onnx-model $MODEL_DIR -onnx-lib /path/to/libonnxruntime.dylib"
+echo "  go build -tags \"fts5 onnx\" -o context-mcp ./cmd/qb-context"
+echo "  ./context-mcp -onnx-model $MODEL_DIR -onnx-lib /path/to/libonnxruntime.dylib"
 echo ""
 echo "If the model is at the default path (models/CodeRankEmbed-onnx-int8),"
 echo "it will be auto-detected and you only need to specify the ONNX Runtime library:"
-echo "  qb-context -onnx-lib /path/to/libonnxruntime.dylib"
+echo "  ./context-mcp -onnx-lib /path/to/libonnxruntime.dylib"

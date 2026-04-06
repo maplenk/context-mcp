@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // buildTestBinary compiles the CLI binary for subprocess testing.
@@ -45,7 +47,7 @@ func getModuleRoot(t *testing.T) string {
 	}
 }
 
-// TestCLIListTools verifies that "cli --list" prints all 13 registered tools.
+// TestCLIListTools verifies that "cli --list" prints all 16 registered tools.
 func TestCLIListTools(t *testing.T) {
 	binary := buildTestBinary(t)
 
@@ -62,7 +64,7 @@ func TestCLIListTools(t *testing.T) {
 		t.Errorf("expected header row with TOOL and DESCRIPTION, got:\n%s", outStr)
 	}
 
-	// All 13 registered tool names must appear
+	// All 16 registered tool names must appear
 	expectedTools := []string{
 		"context",
 		"impact",
@@ -77,6 +79,9 @@ func TestCLIListTools(t *testing.T) {
 		"get_architecture_summary",
 		"explore",
 		"understand",
+		"assemble_context",
+		"checkpoint_context",
+		"read_delta",
 	}
 	for _, tool := range expectedTools {
 		if !strings.Contains(outStr, tool) {
@@ -84,7 +89,7 @@ func TestCLIListTools(t *testing.T) {
 		}
 	}
 
-	// Sanity-check: count non-empty, non-header lines to confirm at least 13 tools
+	// Sanity-check: count non-empty, non-header lines to confirm at least 16 tools
 	lines := strings.Split(strings.TrimSpace(outStr), "\n")
 	toolLines := 0
 	for _, line := range lines {
@@ -98,8 +103,48 @@ func TestCLIListTools(t *testing.T) {
 		}
 		toolLines++
 	}
-	if toolLines < 13 {
-		t.Errorf("expected at least 13 tool lines, got %d\nOutput: %s", toolLines, outStr)
+	if toolLines < 16 {
+		t.Errorf("expected at least 16 tool lines, got %d\nOutput: %s", toolLines, outStr)
+	}
+}
+
+func TestTruncateCLIOutput_JSONEnvelope(t *testing.T) {
+	payload, err := json.Marshal(map[string]string{
+		"data": strings.Repeat(`\"`, maxCLIOutput),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	truncated := truncateCLIOutput(string(payload))
+	if len(truncated) > maxCLIOutput {
+		t.Fatalf("truncated JSON output exceeds cap: %d > %d", len(truncated), maxCLIOutput)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(truncated), &parsed); err != nil {
+		t.Fatalf("truncated JSON output must remain valid JSON: %v", err)
+	}
+	if parsed["truncated"] != true {
+		t.Fatalf("expected truncated marker, got %v", parsed["truncated"])
+	}
+	if partial, _ := parsed["partial_data"].(string); partial == "" {
+		t.Fatal("expected non-empty partial_data")
+	}
+}
+
+func TestTruncateCLIOutput_PlainTextUTF8(t *testing.T) {
+	raw := strings.Repeat("🙂", (maxCLIOutput/4)+32)
+	truncated := truncateCLIOutput(raw)
+
+	if len(truncated) > maxCLIOutput {
+		t.Fatalf("truncated plain-text output exceeds cap: %d > %d", len(truncated), maxCLIOutput)
+	}
+	if !utf8.ValidString(truncated) {
+		t.Fatal("truncated plain-text output must remain valid UTF-8")
+	}
+	if !strings.Contains(truncated, "[truncated, output exceeded 5MB]") {
+		t.Fatalf("expected truncation suffix, got %q", truncated[len(truncated)-64:])
 	}
 }
 

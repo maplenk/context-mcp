@@ -15,6 +15,7 @@ algorithm performance.
 - [Benchmark Tools](#benchmark-tools)
   - [run.sh — Benchmark Current HEAD](#runsh--benchmark-current-head)
   - [compare.sh — Benchmark Any Commit](#comparesh--benchmark-any-commit)
+  - [run_mcp_usage.sh — Live MCP Usage Benchmarks](#run_mcp_usagesh--live-mcp-usage-benchmarks)
   - [dashboard.py — Comparison View](#dashboardpy--comparison-view)
 - [Query Suite (26 queries)](#query-suite-26-queries)
   - [Category A: Exact Match](#category-a-exact-match-4-queries)
@@ -75,6 +76,7 @@ The benchmark suite measures three dimensions of qb-context quality:
 | **Query Latency**    | Response time for 26 real-world queries        | `TestBenchmarkQueries`           |
 | **Search Quality**   | Relevance of results for domain keyword search | `TestRealRepo_SearchQuality`     |
 | **Graph Performance**| PageRank, blast radius, betweenness centrality | `BenchmarkPageRank`, etc.        |
+| **Harness Usage**    | Live MCP tool choice, token usage, and output size in Claude/Codex | `run_mcp_usage.sh` + smoke scripts |
 
 **Canonical benchmark target**: **QBApps/qbapi** (set via `QB_TEST_REPO` env var)
 
@@ -100,12 +102,15 @@ project: "Users-naman-Documents-QBApps-qbapi"
 ```
 benchmarks/
 ├── README.md              This file — comprehensive reference
+├── mcp_smoke_tasks.json   Canonical live MCP smoke scenarios
 ├── queries.json           Canonical query definitions (26 queries, 5 categories)
 ├── run.sh                 Run full suite for current HEAD
 ├── compare.sh             Benchmark any git ref; compare two commits side-by-side
+├── run_mcp_usage.sh       Run live Claude/Codex MCP usage benchmarks
 ├── dashboard.py           Terminal + HTML comparison dashboard
 └── results/
     ├── baseline-v0.6.0-qbapi.json          Baseline (earliest benchmarked release)
+    ├── mcp-usage-v0.3.0-a03ee09-qbapi.json Published MCP usage artifact
     ├── v0.7.0-c608668-qbapi.json           Search quality release
     ├── v0.8.0-fab5104-qbapi.json           Cross-file + DA hardening
     ├── v0.9.0-e1a93bc-qbapi.json           Cold Start release (current)
@@ -131,6 +136,9 @@ python3 benchmarks/dashboard.py
 
 # 5. Export HTML report
 python3 benchmarks/dashboard.py --html > report.html
+
+# 6. Run live Claude/Codex MCP usage benchmarks
+./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
 ```
 
 ---
@@ -208,6 +216,71 @@ building, and running the full suite. Worktrees are auto-cleaned after the run.
 5. Saves structured JSON to `results/bench-<sha>-<timestamp>.json`
 6. If `--baseline` was given, repeats for the baseline commit and prints a comparison table
 7. Removes worktrees on exit (via `trap`)
+
+---
+
+### run_mcp_usage.sh — Live MCP Usage Benchmarks
+
+Runs the publishable live benchmark flow for Claude Code and Codex using the pinned low-cost models, across both `with MCP` and `without MCP` variants by default:
+
+- Claude Code: `--model haiku`
+- Codex: `-m gpt-5.4-mini`
+
+This script is separate from `run.sh` because it requires authenticated paid client CLIs.
+
+```bash
+./benchmarks/run_mcp_usage.sh [target-repo-path] [options]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--client all|claude|codex` | Select which live client(s) to run |
+| `--variant all|mcp|nomcp` | Select MCP, no-MCP, or both |
+| `--transport all|stdio|http` | Select transport mode(s) |
+| `--output <file>` | Publishable JSON artifact path |
+| `--report <file>` | Publishable Markdown table report path |
+| `--raw-dir <dir>` | Directory for raw logs and intermediate client summaries |
+
+**Examples:**
+
+```bash
+# Full live benchmark on the canonical qbapi target
+./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
+
+# No-MCP baseline only
+./benchmarks/run_mcp_usage.sh --variant nomcp
+
+# Claude only, HTTP only
+./benchmarks/run_mcp_usage.sh --client claude --transport http
+
+# Custom output path
+./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi \
+  --output benchmarks/results/mcp-usage-custom.json
+```
+
+**What it records:**
+
+- `claude-mcp`, `claude-nomcp`, `codex-mcp`, and `codex-nomcp` style runs
+- intended MCP tool coverage for each scenario
+- actual tool calls observed from each client
+- whether no-MCP runs stayed MCP-free
+- estimated tokens and cost when the client exposes them
+- output bytes and line counts
+- per-client, per-variant, and per-transport aggregate summaries
+- a Markdown sidecar report with comparison tables for pass rate, token usage, cost, bytes, and line counts
+
+**Outputs:**
+
+- `mcp-usage-...json` — publishable machine-readable artifact
+- `mcp-usage-...md` — publishable comparison tables
+
+**What it does not do:**
+
+- it does not run in CI
+- it does not replace the retrieval benchmark suite
+- it does not embed raw local log paths into the publishable artifact
 
 ---
 
@@ -682,6 +755,61 @@ handles both automatically):
 }
 ```
 
+### run_mcp_usage.sh format (live client artifact)
+
+```json
+{
+  "benchmark_version": "1.0.0",
+  "kind": "mcp_usage",
+  "qb_context_version": "v0.3.0",
+  "qb_context_commit": "43c04a0",
+  "run_date": "2026-04-06T08:12:00Z",
+  "environment": {
+    "os": "darwin/arm64",
+    "target_repo": "/Users/naman/Documents/QBApps/qbapi",
+    "clients": ["claude_code", "codex"],
+    "transport": "all",
+    "variant": "all",
+    "task_count": 4,
+    "task_ids": ["context", "assemble_context", "read_symbol", "checkpoint_delta"],
+    "scenario_file": "benchmarks/mcp_smoke_tasks.json"
+  },
+  "models": {
+    "claude_code": "haiku",
+    "codex": "gpt-5.4-mini"
+  },
+  "summary": {
+    "total_runs": 16,
+    "passed_runs": 16,
+    "expected_tool_coverage_runs": 16,
+    "total_est_tokens": 12345,
+    "total_cost_usd": 0.0821,
+    "all_passed": true
+  },
+  "results": {
+    "claude_code": {
+      "total_runs": 12,
+      "passed_runs": 12,
+      "mode_summary": {
+        "mcp": { "transport_summary": { "stdio": { "...": "..." }, "http": { "...": "..." } } },
+        "nomcp": { "transport_summary": { "none": { "...": "..." } } }
+      },
+      "runs": [
+        {
+          "id": "context",
+          "mode": "mcp",
+          "transport": "stdio",
+          "status": "PASS",
+          "expected_tools": ["context"],
+          "tool_calls": ["context"],
+          "est_tokens": 512
+        }
+      ]
+    }
+  }
+}
+```
+
 ---
 
 ## Interpreting Results
@@ -783,7 +911,10 @@ python3 benchmarks/dashboard.py
 # 5. (Optional) Generate HTML report for the release notes
 python3 benchmarks/dashboard.py --html > benchmarks/results/release-report.html
 
-# 6. Commit the new baseline
+# 6. Run live MCP vs no-MCP usage benchmarks and save the publishable artifact
+./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
+
+# 7. Commit the new baseline and usage artifact
 git add benchmarks/results/
 git commit -m "Add benchmark baseline for <version>"
 ```

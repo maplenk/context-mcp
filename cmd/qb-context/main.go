@@ -18,19 +18,19 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/maplenk/context-mcp/internal/adr"
 	"github.com/maplenk/context-mcp/internal/config"
-	"github.com/maplenk/context-mcp/internal/harness"
 	"github.com/maplenk/context-mcp/internal/embedding"
 	"github.com/maplenk/context-mcp/internal/gitmeta"
 	"github.com/maplenk/context-mcp/internal/graph"
+	"github.com/maplenk/context-mcp/internal/harness"
 	"github.com/maplenk/context-mcp/internal/mcp"
 	"github.com/maplenk/context-mcp/internal/parser"
 	"github.com/maplenk/context-mcp/internal/search"
 	"github.com/maplenk/context-mcp/internal/storage"
 	"github.com/maplenk/context-mcp/internal/types"
 	"github.com/maplenk/context-mcp/internal/watcher"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 // indexMu prevents concurrent index operations (M8)
@@ -39,6 +39,8 @@ var indexMu sync.Mutex
 // asyncScoreWg tracks in-flight async betweenness/PageRank goroutines (H42)
 // so the shutdown path can wait for them before closing the store.
 var asyncScoreWg sync.WaitGroup
+
+const maxCLIOutput = 5 * 1024 * 1024
 
 func main() {
 	// Route all logging to stderr to avoid corrupting MCP JSON-RPC on stdout
@@ -128,12 +130,10 @@ func main() {
 	// 5. Initialize hybrid search
 	hybridSearch := search.New(store, embedder, graphEngine)
 
-	// 6. Run initial indexing
-	log.Printf("Starting initial index...")
-	if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+	// 6. Run initial indexing only when the DB is empty.
+	if err := ensureIndexReady(cfg, store, p, embedder, graphEngine); err != nil {
 		log.Printf("WARNING: Initial index encountered critical errors: %v", err)
 	}
-	log.Printf("Initial index complete")
 
 	// 7. Initialize filesystem watcher
 	w, err := watcher.New(cfg.RepoRoot, cfg.DebounceInterval, cfg.ExcludedDirs)
@@ -221,9 +221,9 @@ func main() {
 	go func() {
 		sig := <-sigCh
 		log.Printf("Received signal %v, shutting down...", sig)
-		w.Stop()                // closes Events channel, causing handleFileEvents to return
-		fileEventsWg.Wait()     // H35: wait for handleFileEvents to finish before cleanup
-		asyncScoreWg.Wait()     // H42: wait for in-flight async score goroutines before closing store
+		w.Stop()            // closes Events channel, causing handleFileEvents to return
+		fileEventsWg.Wait() // H35: wait for handleFileEvents to finish before cleanup
+		asyncScoreWg.Wait() // H42: wait for in-flight async score goroutines before closing store
 		close(done)
 	}()
 
@@ -326,23 +326,14 @@ func runCLI(cfg *config.Config, args []string) {
 
 	// Skip full indexing if DB already has data (use --reindex to force)
 	if !forceReindex {
-		nodeIDs, _ := store.GetAllNodeIDs()
-		if len(nodeIDs) > 0 {
-			// Build valid node ID set for ghost-node filtering
-			validIDs := make(map[string]bool, len(nodeIDs))
-			for _, id := range nodeIDs {
-				validIDs[id] = true
+		if loaded, err := loadExistingIndex(store, graphEngine); err != nil {
+			log.Printf("Failed to load existing index: %v", err)
+			if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: Index encountered critical errors: %v\n", err)
 			}
-			// Rebuild in-memory graph from stored edges
-			edges, edgeErr := store.GetAllEdges()
-			if edgeErr != nil {
-				log.Printf("Failed to load edges from DB: %v", edgeErr)
-			} else {
-				graphEngine.BuildFromEdges(edges, validIDs)
-			}
-			log.Printf("Loaded %d nodes from existing index (use --reindex to force)", len(nodeIDs))
+		} else if loaded {
+			log.Printf("Loaded existing index (use --reindex to force)")
 		} else {
-			// Empty DB — must index
 			if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
 				fmt.Fprintf(os.Stderr, "WARNING: Index encountered critical errors: %v\n", err)
 			}
@@ -380,36 +371,51 @@ func runCLI(cfg *config.Config, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to marshal result: %v\n", err)
 		os.Exit(1)
 	}
-	// M3/M12: Truncate oversized output while preserving valid JSON.
-	// The output from json.MarshalIndent is always JSON, so we wrap truncated
-	// content in a valid JSON envelope.
-	const maxCLIOutput = 5 * 1024 * 1024
-	outStr := string(out)
-	if len(outStr) > maxCLIOutput {
-		trimmed := strings.TrimSpace(outStr)
-		isJSON := len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
-		if isJSON {
-			const envelope = `{"truncated":true,"message":"Output exceeded 5MB size limit","partial_data":""}`
-			budget := maxCLIOutput - len(envelope)
-			if budget < 0 {
-				budget = 0
-			}
-			partial := outStr[:budget]
-			for !utf8.ValidString(partial) && len(partial) > 0 {
-				partial = partial[:len(partial)-1]
-			}
-			escapedBytes, _ := json.Marshal(partial)
-			escaped := string(escapedBytes[1 : len(escapedBytes)-1])
-			outStr = `{"truncated":true,"message":"Output exceeded 5MB size limit","partial_data":"` + escaped + `"}`
-		} else {
-			truncated := outStr[:maxCLIOutput]
-			for !utf8.ValidString(truncated) && len(truncated) > 0 {
-				truncated = truncated[:len(truncated)-1]
-			}
-			outStr = truncated + "\n... [truncated, output exceeded 5MB]"
+	outStr := truncateCLIOutput(string(out))
+	fmt.Println(outStr)
+}
+
+func truncateCLIOutput(outStr string) string {
+	if len(outStr) <= maxCLIOutput {
+		return outStr
+	}
+
+	trimmed := strings.TrimSpace(outStr)
+	isJSON := len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
+	if !isJSON {
+		const suffix = "\n... [truncated, output exceeded 5MB]"
+		budget := maxCLIOutput - len(suffix)
+		if budget < 0 {
+			budget = 0
+		}
+		truncated := outStr[:budget]
+		for !utf8.ValidString(truncated) && len(truncated) > 0 {
+			truncated = truncated[:len(truncated)-1]
+		}
+		return truncated + suffix
+	}
+
+	const envelope = `{"truncated":true,"message":"Output exceeded 5MB size limit","partial_data":""}`
+	budget := maxCLIOutput - len(envelope)
+	if budget < 0 {
+		budget = 0
+	}
+	partial := outStr[:budget]
+	for !utf8.ValidString(partial) && len(partial) > 0 {
+		partial = partial[:len(partial)-1]
+	}
+	escapedBytes, _ := json.Marshal(partial)
+	escaped := string(escapedBytes[1 : len(escapedBytes)-1])
+	if len(escaped) > budget {
+		escaped = escaped[:budget]
+		for len(escaped) > 0 && escaped[len(escaped)-1] == '\\' {
+			escaped = escaped[:len(escaped)-1]
+		}
+		if idx := strings.LastIndex(escaped, `\u`); idx >= 0 && idx+6 > len(escaped) {
+			escaped = escaped[:idx]
 		}
 	}
-	fmt.Println(outStr)
+	return `{"truncated":true,"message":"Output exceeded 5MB size limit","partial_data":"` + escaped + `"}`
 }
 
 // runServeHTTP starts the MCP server over streamable HTTP transport.
@@ -448,12 +454,10 @@ func runServeHTTP(cfg *config.Config) {
 	// 5. Initialize hybrid search
 	hybridSearch := search.New(store, embedder, graphEngine)
 
-	// 6. Run initial indexing
-	log.Printf("Starting initial index...")
-	if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+	// 6. Run initial indexing only when the DB is empty.
+	if err := ensureIndexReady(cfg, store, p, embedder, graphEngine); err != nil {
 		log.Printf("WARNING: Initial index encountered critical errors: %v", err)
 	}
-	log.Printf("Initial index complete")
 
 	// 7. Initialize filesystem watcher
 	w, err := watcher.New(cfg.RepoRoot, cfg.DebounceInterval, cfg.ExcludedDirs)
@@ -625,6 +629,44 @@ func initEmbedder(cfg *config.Config) embedding.Embedder {
 		log.Printf("Embedding engine initialized (TF-IDF, dim=%d)", embedding.GetEmbeddingDim())
 		return embedding.NewEmbedder()
 	}
+}
+
+func loadExistingIndex(store *storage.Store, graphEngine *graph.GraphEngine) (bool, error) {
+	nodeIDs, err := store.GetAllNodeIDs()
+	if err != nil {
+		return false, err
+	}
+	if len(nodeIDs) == 0 {
+		return false, nil
+	}
+
+	validIDs := make(map[string]bool, len(nodeIDs))
+	for _, id := range nodeIDs {
+		validIDs[id] = true
+	}
+
+	edges, err := store.GetAllEdges()
+	if err != nil {
+		return false, err
+	}
+	graphEngine.BuildFromEdges(edges, validIDs)
+	log.Printf("Loaded %d nodes from existing index", len(nodeIDs))
+	return true, nil
+}
+
+func ensureIndexReady(cfg *config.Config, store *storage.Store, p *parser.Parser, embedder embedding.Embedder, graphEngine *graph.GraphEngine) error {
+	if loaded, err := loadExistingIndex(store, graphEngine); err != nil {
+		log.Printf("Failed to load existing index: %v", err)
+	} else if loaded {
+		return nil
+	}
+
+	log.Printf("Starting initial index...")
+	if err := indexRepo(cfg, store, p, embedder, graphEngine); err != nil {
+		return err
+	}
+	log.Printf("Initial index complete")
+	return nil
 }
 
 // indexRepo performs a full index of the repository.
@@ -1567,12 +1609,13 @@ func runInstall(args []string) {
 func runUninstall(args []string) {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	client := fs.String("client", "", "Target client: claude-code or codex (required)")
-	scope := fs.String("scope", "", "Claude Code scope: user or project (optional)")
+	scope := fs.String("scope", "", "Claude Code scope: user, local, or project (optional)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
 	validateClient(*client, true)
+	validateScope(*scope, *client)
 
 	msg, err := harness.Uninstall(harness.UninstallOpts{
 		Client: harness.Client(*client),

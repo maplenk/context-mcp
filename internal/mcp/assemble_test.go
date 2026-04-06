@@ -83,7 +83,14 @@ func TestAssembleContext_BudgetEnforcement(t *testing.T) {
 	RegisterTools(server, deps, nil)
 
 	handler, _ := server.GetHandler("assemble_context")
-	params, _ := json.Marshal(AssembleContextParams{Query: "order", BudgetTokens: 100, Mode: "snippets"})
+	fullParams, _ := json.Marshal(AssembleContextParams{Query: "order", BudgetTokens: 4000, Mode: "snippets"})
+	fullResult, err := handler(fullParams)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	fullResp := fullResult.(AssembleContextResponse)
+
+	params, _ := json.Marshal(AssembleContextParams{Query: "order", BudgetTokens: 20, Mode: "snippets"})
 	result, err := handler(params)
 	if err != nil {
 		t.Fatalf("error: %v", err)
@@ -92,7 +99,41 @@ func TestAssembleContext_BudgetEnforcement(t *testing.T) {
 	if resp.UsedTokens > resp.BudgetTokens {
 		t.Errorf("used %d > budget %d", resp.UsedTokens, resp.BudgetTokens)
 	}
+	if len(resp.Items) > len(fullResp.Items) {
+		t.Fatalf("small budget returned more items than large budget: %d > %d", len(resp.Items), len(fullResp.Items))
+	}
+	if resp.Excluded == 0 && len(resp.Items) == len(fullResp.Items) && resp.UsedTokens == fullResp.UsedTokens {
+		t.Fatal("small budget did not reduce the assembled context")
+	}
 	t.Logf("Budget: %d items, %d/%d tokens, %d excluded", len(resp.Items), resp.UsedTokens, resp.BudgetTokens, resp.Excluded)
+}
+
+func TestAssembleContext_TokenAccounting(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, _ := server.GetHandler("assemble_context")
+	params, _ := json.Marshal(AssembleContextParams{
+		Query:        "order",
+		BudgetTokens: 4000,
+		Mode:         "snippets",
+	})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	resp := result.(AssembleContextResponse)
+	sum := 0
+	for _, item := range resp.Items {
+		sum += item.Tokens
+	}
+	if resp.UsedTokens != sum {
+		t.Fatalf("used_tokens = %d, want sum(items[].tokens) = %d", resp.UsedTokens, sum)
+	}
 }
 
 func TestAssembleContext_AllModes(t *testing.T) {
