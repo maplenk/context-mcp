@@ -10,12 +10,12 @@ A local-first MCP daemon that gives LLM coding agents surgical, token-efficient 
 
 ## The Problem
 
-LLM coding agents waste tokens brute-forcing through grep and glob results with no structural understanding of the codebase. They read entire files hoping to stumble on the right function, missing cross-file relationships and architectural context entirely. context-mcp builds a live AST graph and semantic index of your codebase and exposes 16 MCP tools, 5 prompt templates, and 4 resources for ranked, context-aware code discovery. Single binary, zero cloud dependencies, local-first.
+LLM coding agents waste tokens brute-forcing through grep and glob results with no structural understanding of the codebase. They read entire files hoping to stumble on the right function, missing cross-file relationships and architectural context entirely. context-mcp builds a live AST graph and semantic index of your codebase and exposes 17 MCP tools, 5 prompt templates, and 4 resources for ranked, context-aware code discovery. Single binary, zero cloud dependencies, local-first.
 
 ## Key Features
 
 - **Hybrid ranked search** -- PPR + BM25 + Betweenness Centrality + Semantic Similarity with optimized weights
-- **16 MCP tools**: context, impact, read\_symbol, query, index, health, trace\_call\_path, get\_key\_symbols, search\_code, detect\_changes, get\_architecture\_summary, explore, understand, assemble\_context, checkpoint\_context, read\_delta
+- **17 MCP tools**: context, impact, read\_symbol, list\_file\_symbols, query, index, health, trace\_call\_path, get\_key\_symbols, search\_code, detect\_changes, get\_architecture\_summary, explore, understand, assemble\_context, checkpoint\_context, read\_delta
 - **5 MCP prompts**: review\_changes, trace\_impact, prepare\_fix\_context, onboard\_repo, collect\_minimal\_context
 - **4 MCP resources**: repo\_summary, index\_stats, changed\_symbols, hot\_paths
 - **Multi-language AST parsing**: Go (native go/ast), JavaScript, TypeScript, PHP (tree-sitter)
@@ -126,7 +126,7 @@ Claude Code supports `user`, `local`, and `project` scopes. `install` defaults t
   "mcpServers": {
     "context-mcp": {
       "command": "/absolute/path/to/context-mcp",
-      "args": ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
+      "args": ["-repo", "/absolute/path/to/your/project", "-profile", "extended"]
     }
   }
 }
@@ -175,7 +175,7 @@ The helper installs Codex entries into `~/.codex/config.toml`. Codex also suppor
 ```toml
 [mcp_servers.context-mcp]
 command = "/absolute/path/to/context-mcp"
-args = ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
+args = ["-repo", "/absolute/path/to/your/project", "-profile", "extended"]
 ```
 
 **User-scoped HTTP config (`~/.codex/config.toml` or `.codex/config.toml`):**
@@ -191,7 +191,8 @@ url = "http://127.0.0.1:8080/mcp"
 |------|-------------|
 | `context` | Hybrid ranked search combining lexical, semantic, and graph signals |
 | `impact` | Blast radius analysis -- traces downstream dependents with risk classification |
-| `read_symbol` | Reads exact source code of a symbol by byte range |
+| `read_symbol` | Safely inspects a symbol with bounded, signature, section, flow-summary, and explicit full modes |
+| `list_file_symbols` | Lists indexed symbols in a file in source order with safe `read_symbol` follow-up args |
 | `query` | Executes read-only SQL against the structural database |
 | `index` | Triggers a full re-index of the repository |
 | `health` | Returns system health: uptime, node/edge counts, database size |
@@ -273,7 +274,7 @@ All options are set via CLI flags:
 | `-onnx-model` | (empty) | Path to ONNX model directory (enables neural embeddings) |
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
 | `-embedding-dim` | `384` | Embedding vector dimension. TF-IDF defaults to 384; CodeRankEmbed uses 768 |
-| `-profile` | `core` | Tool profile for MCP SDK: `core` (6 tools), `extended` (13), or `full` (16) |
+| `-profile` | `core` | Tool profile for MCP SDK: `core` (7 tools), `extended` (14), or `full` (17) |
 | `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
 | `-ollama-endpoint` | (empty) | Ollama API endpoint for embedding backend |
 | `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |

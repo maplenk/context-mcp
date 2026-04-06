@@ -110,7 +110,12 @@ benchmarks/
 ├── dashboard.py           Terminal + HTML comparison dashboard
 └── results/
     ├── baseline-v0.6.0-qbapi.json          Baseline (earliest benchmarked release)
-    ├── mcp-usage-v0.3.0-a03ee09-qbapi.json Published MCP usage artifact
+    ├── mcp-usage-v<version>-<sha>-qbapi.json Published MCP usage artifact
+    ├── mcp-usage-v<version>-<sha>-qbapi.md   Published MCP usage Markdown report
+    ├── go-bench-<timestamp>.txt              Raw Go graph benchmark output
+    ├── queries-<timestamp>.txt               Real-repo benchmark query output
+    ├── search-quality-<timestamp>.txt        Real-repo search quality output
+    ├── tools-<timestamp>.txt                 Real-repo tool smoke output
     ├── v0.7.0-c608668-qbapi.json           Search quality release
     ├── v0.8.0-fab5104-qbapi.json           Cross-file + DA hardening
     ├── v0.9.0-e1a93bc-qbapi.json           Cold Start release (current)
@@ -123,7 +128,7 @@ benchmarks/
 
 ```bash
 # 1. Run benchmarks for current HEAD
-./benchmarks/run.sh
+./benchmarks/run.sh /Users/naman/Documents/QBApps/qbapi
 
 # 2. Benchmark a specific commit
 ./benchmarks/compare.sh fab5104
@@ -153,6 +158,10 @@ results to `results/`.
 ```bash
 ./benchmarks/run.sh [target-repo-path]
 ```
+
+The positional target repo path is treated as canonical for the full suite. `run.sh` exports it to `QB_TEST_REPO` before invoking the real-repo tests, so the query, quality, and tool phases all run against the same qbapi target.
+
+A clean `run.sh` execution exits `0` only when the summed `FAIL:` counts across the query, search-quality, and tool output files are zero.
 
 **Steps performed:**
 1. `go build -tags "fts5" ./...` — compile check
@@ -275,6 +284,13 @@ This script is separate from `run.sh` because it requires authenticated paid cli
 
 - `mcp-usage-...json` — publishable machine-readable artifact
 - `mcp-usage-...md` — publishable comparison tables
+
+**Latest qbapi snapshot (2026-04-06):**
+
+- Full suite: benchmark queries `7/7` passed, search quality `8/8` passed, comprehensive tool tests `9/9` passed
+- Claude Code live usage: `2/3` passed overall, `2/2` for MCP, `0/1` for no-MCP, `260633` tokens, `$0.129555`
+- Codex live usage: `11/12` passed overall, `7/8` for MCP, `4/4` for no-MCP, `1641931` tokens
+- Overall live usage: `13/15` passed, `1902564` tokens, `$0.129555`
 
 **What it does not do:**
 

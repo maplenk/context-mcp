@@ -208,8 +208,8 @@ func TestBuildArgs(t *testing.T) {
 	}
 
 	got2 := buildArgs(InstallOpts{RepoRoot: "/my/repo"})
-	if len(got2) != 2 || got2[0] != "--repo" || got2[1] != "/my/repo" {
-		t.Fatalf("unexpected args without profile: %v", got2)
+	if len(got2) != 4 || got2[0] != "--repo" || got2[1] != "/my/repo" || got2[2] != "--profile" || got2[3] != "extended" {
+		t.Fatalf("unexpected args with default profile: %v", got2)
 	}
 }
 
@@ -350,7 +350,6 @@ func TestPrintConfig_ClaudeCode(t *testing.T) {
 	out, err := PrintConfig(PrintConfigOpts{
 		Client:   ClientClaudeCode,
 		RepoRoot: "/tmp/myrepo",
-		Profile:  "core",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -367,13 +366,15 @@ func TestPrintConfig_ClaudeCode(t *testing.T) {
 	if !strings.Contains(out, "/tmp/myrepo") {
 		t.Fatal("output should contain the repo path")
 	}
+	if !strings.Contains(out, "extended") {
+		t.Fatal("output should default to extended profile")
+	}
 }
 
 func TestPrintConfig_Codex(t *testing.T) {
 	out, err := PrintConfig(PrintConfigOpts{
 		Client:   ClientCodex,
 		RepoRoot: "/tmp/myrepo",
-		Profile:  "extended",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -383,6 +384,9 @@ func TestPrintConfig_Codex(t *testing.T) {
 	}
 	if !strings.Contains(out, "--repo") {
 		t.Fatal("output should contain --repo")
+	}
+	if !strings.Contains(out, "extended") {
+		t.Fatal("output should default to extended profile")
 	}
 }
 

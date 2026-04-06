@@ -93,9 +93,10 @@ func registerPrepareFixContextPrompt(s *Server) {
 
 Steps:
 1. Call context with the bug description to find relevant code symbols
-2. Call read_symbol on the top 3 results to read their source code
-3. Call understand on the most relevant symbol to see its relationships and dependencies
-4. Prepare a concise summary of the code area, the likely root cause, and a suggested fix approach`, description, fileHint))),
+2. If a likely file is identified, call list_file_symbols on that file to inventory the available symbols
+3. Call read_symbol with mode="bounded" on the top 3 relevant symbols to inspect them safely
+4. Call understand on the most relevant symbol to see its relationships and dependencies
+5. Prepare a concise summary of the code area, the likely root cause, and a suggested fix approach`, description, fileHint))),
 				},
 			), nil
 		},

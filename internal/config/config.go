@@ -61,8 +61,8 @@ type Config struct {
 	GitMaxIntentBytes int
 
 	// Profile selects which tools are registered for MCP SDK mode.
-	// Valid values: "core" (6 tools), "extended" (13 tools), "full" (all 16).
-	// CLI mode always registers all 16 tools regardless of profile.
+	// Valid values: "core" (7 tools), "extended" (14 tools), "full" (all 17).
+	// CLI mode always registers all 17 tools regardless of profile.
 	Profile string
 
 	// OllamaEndpoint is the Ollama API endpoint (e.g., http://localhost:11434).
@@ -94,15 +94,15 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
-		RepoRoot:           ".",
-		DBPath:             ".context-mcp/index.db",
-		DebounceInterval:   500 * time.Millisecond,
-		MaxBFSDepth:        5,
-		EmbeddingBatchSize: 32,
-		WorkerCount:        4,
-		ExcludedDirs:       []string{".git", ".context-mcp"},
+		RepoRoot:            ".",
+		DBPath:              ".context-mcp/index.db",
+		DebounceInterval:    500 * time.Millisecond,
+		MaxBFSDepth:         5,
+		EmbeddingBatchSize:  32,
+		WorkerCount:         4,
+		ExcludedDirs:        []string{".git", ".context-mcp"},
 		ONNXModelDir:        detectDefaultONNXModel(),
-		EmbeddingDim:       384,
+		EmbeddingDim:        384,
 		ColdStartEnabled:    true,
 		GitHistoryDepth:     500,
 		GitPerFileCommitCap: 20,
@@ -110,8 +110,8 @@ func DefaultConfig() *Config {
 		GitMaxIntentBytes:   1500,
 		Profile:             "core",
 		OllamaModel:         "nomic-embed-code",
-		OpenAIModel:          "text-embedding-nomic-embed-code",
-		HTTPPort:             8080,
+		OpenAIModel:         "text-embedding-nomic-embed-code",
+		HTTPPort:            8080,
 	}
 }
 
@@ -137,7 +137,7 @@ func ParseFlags() (*Config, error) {
 	fs.IntVar(&cfg.GitPerFileCommitCap, "git-per-file-cap", cfg.GitPerFileCommitCap, "Maximum commits per file")
 	fs.IntVar(&cfg.GitMaxMessageBytes, "git-max-message", cfg.GitMaxMessageBytes, "Maximum bytes per commit message")
 	fs.IntVar(&cfg.GitMaxIntentBytes, "git-max-intent", cfg.GitMaxIntentBytes, "Maximum bytes per file intent summary")
-	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (6 tools), extended (13 tools), or full (all 16)")
+	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (7 tools), extended (14 tools), or full (all 17)")
 	fs.StringVar(&cfg.OllamaEndpoint, "ollama-endpoint", cfg.OllamaEndpoint, "Ollama API endpoint (e.g., http://localhost:11434)")
 	fs.StringVar(&cfg.OllamaModel, "ollama-model", cfg.OllamaModel, "Ollama embedding model name")
 	fs.StringVar(&cfg.LlamaCppEndpoint, "llamacpp-endpoint", cfg.LlamaCppEndpoint, "llama.cpp server endpoint (e.g., http://localhost:8080)")

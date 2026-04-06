@@ -40,12 +40,13 @@ type ToolDeps struct {
 // based on the given profile. CLI tools are always registered regardless.
 func isToolInProfile(toolName, profile string) bool {
 	coreTools := map[string]bool{
-		"context":         true,
-		"read_symbol":     true,
-		"understand":      true,
-		"impact":          true,
-		"detect_changes":  true,
-		"trace_call_path": true,
+		"context":           true,
+		"read_symbol":       true,
+		"list_file_symbols": true,
+		"understand":        true,
+		"impact":            true,
+		"detect_changes":    true,
+		"trace_call_path":   true,
 	}
 	extendedTools := map[string]bool{
 		"get_architecture_summary": true,
@@ -84,7 +85,20 @@ type ImpactParams struct {
 
 // ReadSymbolParams are the parameters for the read_symbol tool.
 type ReadSymbolParams struct {
-	SymbolID string `json:"symbol_id" jsonschema:"required,description=The ID or name of the symbol to read"`
+	SymbolID  string `json:"symbol_id" jsonschema:"required,description=The ID or name of the symbol to read"`
+	Mode      string `json:"mode,omitempty" jsonschema:"description=Read mode: bounded (default), signature, section, flow_summary, or full"`
+	MaxChars  int    `json:"max_chars,omitempty" jsonschema:"description=Maximum characters to return for source-bearing modes (default: 6000, hard cap: 20000)"`
+	MaxLines  int    `json:"max_lines,omitempty" jsonschema:"description=Maximum lines to return for source-bearing modes (default: 60, hard cap: 200)"`
+	StartLine int    `json:"start_line,omitempty" jsonschema:"description=Optional 1-based file-relative start line for section reads"`
+	EndLine   int    `json:"end_line,omitempty" jsonschema:"description=Optional 1-based file-relative end line for section reads"`
+	Section   string `json:"section,omitempty" jsonschema:"description=Section selector for section reads: top, middle, bottom, auto"`
+}
+
+// ListFileSymbolsParams are the parameters for the list_file_symbols tool.
+type ListFileSymbolsParams struct {
+	Path  string   `json:"path" jsonschema:"required,description=Repo-relative or absolute-under-repo file path to inspect"`
+	Limit int      `json:"limit,omitempty" jsonschema:"description=Maximum symbols to return (default: 200)"`
+	Kinds []string `json:"kinds,omitempty" jsonschema:"description=Optional node-type filters such as function, method, class, struct, interface, route"`
 }
 
 // QueryParams are the parameters for the query tool.
@@ -192,13 +206,14 @@ type ReadDeltaParams struct {
 // IndexFunc is the callback for triggering a re-index
 type IndexFunc func(path string) error
 
-// RegisterTools registers all 16 tools for CLI mode and profile-gated tools for MCP SDK mode.
-// CLI tools: all 16 available via GetHandler/GetTools (always).
-// SDK tools (MCP protocol): gated by deps.Profile — "core" (6), "extended" (13), or "full" (16).
+// RegisterTools registers all 17 tools for CLI mode and profile-gated tools for MCP SDK mode.
+// CLI tools: all 17 available via GetHandler/GetTools (always).
+// SDK tools (MCP protocol): gated by deps.Profile — "core" (7), "extended" (14), or "full" (17).
 func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerContextTool(s, deps)
 	registerImpactTool(s, deps)
 	registerReadSymbolTool(s, deps)
+	registerListFileSymbolsTool(s, deps)
 	registerQueryTool(s, deps)
 	registerHealthTool(s, deps)
 	registerIndexTool(s, deps, indexFn)
@@ -306,12 +321,7 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 			symbolRef = r.Node.SymbolName
 		}
 		// Use correct key for each tool: explore uses "symbol", others use "symbol_id"
-		var nextArgs map[string]string
-		if nextTool == "explore" {
-			nextArgs = map[string]string{"symbol": symbolRef}
-		} else {
-			nextArgs = map[string]string{"symbol_id": symbolRef}
-		}
+		nextArgs := defaultSymbolNextArgs(nextTool, symbolRef)
 
 		item := types.Inspectable{
 			Rank:       i + 1,
@@ -520,7 +530,7 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 			SymbolName: node.SymbolName,
 			FilePath:   node.FilePath,
 			NextTool:   "read_symbol",
-			NextArgs:   map[string]string{"symbol_id": node.ID},
+			NextArgs:   defaultReadSymbolArgs(node.ID),
 		}
 		if strings.Contains(node.SymbolName, "test") || strings.Contains(node.SymbolName, "Test") {
 			affectedTests = append(affectedTests, testNode)
@@ -544,7 +554,7 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 				SymbolName: node.SymbolName,
 				FilePath:   node.FilePath,
 				NextTool:   "read_symbol",
-				NextArgs:   map[string]string{"symbol_id": node.ID},
+				NextArgs:   defaultReadSymbolArgs(node.ID),
 			}
 			highRisk = append(highRisk, n)
 		case 3:
@@ -553,7 +563,7 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 				SymbolName: node.SymbolName,
 				FilePath:   node.FilePath,
 				NextTool:   "read_symbol",
-				NextArgs:   map[string]string{"symbol_id": node.ID},
+				NextArgs:   defaultReadSymbolArgs(node.ID),
 			}
 			mediumRisk = append(mediumRisk, n)
 		default:
@@ -562,7 +572,7 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 				SymbolName: node.SymbolName,
 				FilePath:   node.FilePath,
 				NextTool:   "read_symbol",
-				NextArgs:   map[string]string{"symbol_id": node.ID},
+				NextArgs:   defaultReadSymbolArgs(node.ID),
 			}
 			lowRisk = append(lowRisk, n)
 		}
@@ -670,97 +680,135 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 
 // ----- Tool 3: read_symbol -----
 
+func resolveSymbolNode(deps ToolDeps, symbolID string) (*types.ASTNode, error) {
+	if symbolID == "" {
+		return nil, fmt.Errorf("'symbol_id' is required")
+	}
+	if node, err := deps.Store.GetNodeByName(symbolID); err == nil {
+		return node, nil
+	}
+	node, err := deps.Store.GetNode(symbolID)
+	if err != nil {
+		return nil, fmt.Errorf("symbol not found: %s", symbolID)
+	}
+	return node, nil
+}
+
 func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
-	// Try by name first, then by ID
-	node, err := deps.Store.GetNodeByName(p.SymbolID)
+	node, err := resolveSymbolNode(deps, p.SymbolID)
 	if err != nil {
-		node, err = deps.Store.GetNode(p.SymbolID)
-		if err != nil {
-			return nil, fmt.Errorf("symbol not found: %s", p.SymbolID)
-		}
+		return nil, err
 	}
-
-	// Read the exact byte range from the file
-	absPath := filepath.Join(deps.RepoRoot, node.FilePath)
-	// Prevent path traversal
-	absPath, err = filepath.Abs(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolving path: %w", err)
-	}
-	// Resolve symlinks to prevent symlink-based path traversal bypass
-	absPath, err = filepath.EvalSymlinks(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolving symlinks in path: %w", err)
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(deps.RepoRoot)
-	if err != nil {
-		return nil, fmt.Errorf("resolving repo root symlinks: %w", err)
-	}
-	absPath = filepath.Clean(absPath)
-	if absPath != resolvedRoot && !strings.HasPrefix(absPath, resolvedRoot+string(filepath.Separator)) {
-		return nil, fmt.Errorf("path traversal detected: %s is outside repo root", node.FilePath)
-	}
-	f, err := os.Open(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("opening file %s: %w", node.FilePath, err)
-	}
-	defer f.Close()
-
-	// Check for stale byte offsets (file may have changed since indexing)
-	fi, statErr := f.Stat()
-	if statErr != nil {
-		return nil, fmt.Errorf("stat file %s: %w", node.FilePath, statErr)
-	}
-	if int64(node.EndByte) > fi.Size() {
-		return map[string]interface{}{
-			"symbol_name": node.SymbolName,
-			"file_path":   node.FilePath,
-			"error":       "file modified since indexing — byte offsets are stale",
-			"stale":       true,
-		}, nil
-	}
-
 	if node.EndByte <= node.StartByte {
 		return nil, fmt.Errorf("invalid byte range for %s: start=%d end=%d", node.SymbolName, node.StartByte, node.EndByte)
 	}
-	length := node.EndByte - node.StartByte
-	if length > 5*1024*1024 { // 5MB safety cap
-		return nil, fmt.Errorf("symbol too large: %d bytes", length)
+
+	requestedMode := p.Mode
+	if requestedMode == "" {
+		requestedMode = defaultReadSymbolMode
 	}
-	buf := make([]byte, length)
-	_, err = f.ReadAt(buf, int64(node.StartByte))
+	if !readSymbolModes[requestedMode] {
+		return nil, fmt.Errorf("invalid mode %q: must be one of bounded, signature, section, flow_summary, full", requestedMode)
+	}
+	if p.Section != "" && !readSymbolSections[p.Section] {
+		return nil, fmt.Errorf("invalid section %q: must be one of top, middle, bottom, auto", p.Section)
+	}
+
+	fileCtx, err := loadSymbolFileContext(deps.RepoRoot, node.FilePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading bytes: %w", err)
+		return nil, err
 	}
+	inspection := buildSymbolInspection(*node, fileCtx)
+	limits := clampReadSymbolLimits(p.MaxChars, p.MaxLines)
 
-	response := map[string]interface{}{
-		"symbol_name": node.SymbolName,
-		"file_path":   node.FilePath,
-		"node_type":   node.NodeType.String(),
-		"start_byte":  node.StartByte,
-		"end_byte":    node.EndByte,
-		"source":      string(buf),
-	}
-
-	// Heuristic staleness check: verify extracted content contains the symbol's base name.
-	// If the file changed since indexing, the byte offsets may be stale.
-	baseName := symbolBaseName(node.SymbolName)
-	if baseName != "" && !strings.Contains(string(buf), baseName) {
-		response["stale"] = true
-		response["warning"] = "file may have changed since indexing"
-	}
-
-	// Add chaining hints
 	symbolRef := node.ID
 	if symbolRef == "" {
 		symbolRef = node.SymbolName
 	}
 	symbolRefJSON, _ := json.Marshal(symbolRef)
-	response["next_tools"] = []map[string]string{
-		{"tool": "understand", "args_hint": `{"symbol": ` + string(symbolRefJSON) + `}`},
-		{"tool": "impact", "args_hint": `{"symbol_id": ` + string(symbolRefJSON) + `}`},
+	filePathJSON, _ := json.Marshal(node.FilePath)
+
+	response := map[string]interface{}{
+		"symbol_name":          node.SymbolName,
+		"file_path":            node.FilePath,
+		"node_type":            node.NodeType.String(),
+		"start_byte":           node.StartByte,
+		"end_byte":             node.EndByte,
+		"symbol_start_line":    inspection.SymbolStartLine,
+		"symbol_end_line":      inspection.SymbolEndLine,
+		"mode_requested":       requestedMode,
+		"mode_used":            requestedMode,
+		"truncated":            false,
+		"downgraded":           false,
+		"downgrade_reason":     "",
+		"signature":            inspection.Signature,
+		"signature_start_line": inspection.SignatureStartLine,
+		"signature_end_line":   inspection.SignatureEndLine,
+		"outline":              inspection.Outline,
+		"next_modes":           orderedReadSymbolModes(requestedMode),
+		"applied_max_chars":    limits.MaxChars,
+		"applied_max_lines":    limits.MaxLines,
+		"stale":                inspection.Stale,
+		"next_tools": []map[string]string{
+			{"tool": "understand", "args_hint": `{"symbol": ` + string(symbolRefJSON) + `}`},
+			{"tool": "impact", "args_hint": `{"symbol_id": ` + string(symbolRefJSON) + `}`},
+			{"tool": "list_file_symbols", "args_hint": `{"path": ` + string(filePathJSON) + `, "limit": 50}`},
+		},
 	}
 
+	// Heuristic staleness check: if the extracted symbol body no longer contains the base
+	// symbol name, prefer a safe metadata-only response rather than returning misleading code.
+	baseName := symbolBaseName(node.SymbolName)
+	if baseName != "" && inspection.Source != "" && !strings.Contains(inspection.Source, baseName) {
+		inspection.Stale = true
+		inspection.StaleReason = "file may have changed since indexing"
+		response["stale"] = true
+	}
+	if inspection.Stale {
+		response["error"] = inspection.StaleReason
+		response["selected_start_line"] = inspection.SymbolStartLine
+		response["selected_end_line"] = inspection.SymbolEndLine
+		return response, nil
+	}
+
+	if requestedMode == "signature" {
+		response["selected_start_line"] = inspection.SignatureStartLine
+		response["selected_end_line"] = inspection.SignatureEndLine
+		response["next_modes"] = orderedReadSymbolModes("signature")
+		return response, nil
+	}
+
+	if requestedMode == "flow_summary" {
+		response["flow_summary"] = flowSummaryForInspection(inspection, symbolRef)
+		response["selected_start_line"] = inspection.SymbolStartLine
+		response["selected_end_line"] = inspection.SymbolEndLine
+		response["next_modes"] = orderedReadSymbolModes("flow_summary")
+		return response, nil
+	}
+
+	modeUsed := requestedMode
+	if requestedMode == "full" && !symbolFitsWithinLimits(inspection, limits) {
+		modeUsed = "bounded"
+		response["downgraded"] = true
+		response["downgrade_reason"] = "symbol_exceeds_safe_read_threshold"
+	}
+	response["mode_used"] = modeUsed
+	response["next_modes"] = orderedReadSymbolModes(modeUsed)
+
+	source, selectedStart, selectedEnd, truncated := selectSourceWindow(inspection, modeUsed, p.Section, p.StartLine, p.EndLine, limits)
+	response["selected_start_line"] = selectedStart
+	response["selected_end_line"] = selectedEnd
+	response["truncated"] = truncated || selectedStart != inspection.SymbolStartLine || selectedEnd != inspection.SymbolEndLine
+	if p.StartLine != 0 || p.EndLine != 0 {
+		response["selected_section"] = "explicit_range"
+	} else if modeUsed == "section" || (modeUsed == "bounded" && response["truncated"].(bool)) {
+		section := p.Section
+		if section == "" {
+			section = "auto"
+		}
+		response["selected_section"] = section
+	}
+	response["source"] = source
 	return response, nil
 }
 
@@ -774,7 +822,7 @@ func symbolBaseName(symbolName string) string {
 }
 
 func registerReadSymbolTool(s *Server, deps ToolDeps) {
-	desc := "Read exact source code of a symbol by name or ID. Returns the precise byte range from disk. Use after context or explore to inspect a specific result."
+	desc := "Safely inspect a symbol by name or ID. Defaults to bounded reads with line spans, summary modes, and explicit full reads only when safe."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -795,6 +843,33 @@ func registerReadSymbolTool(s *Server, deps ToolDeps) {
 					"type":        "string",
 					"description": "The ID or name of the symbol to read",
 				},
+				"mode": map[string]interface{}{
+					"type":        "string",
+					"description": "Read mode: bounded (default), signature, section, flow_summary, or full",
+					"default":     defaultReadSymbolMode,
+				},
+				"max_chars": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum characters to return for source-bearing modes (default: 6000, hard cap: 20000)",
+					"default":     defaultReadSymbolMaxChars,
+				},
+				"max_lines": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum lines to return for source-bearing modes (default: 60, hard cap: 200)",
+					"default":     defaultReadSymbolMaxLines,
+				},
+				"start_line": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional 1-based file-relative start line for section reads",
+				},
+				"end_line": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional 1-based file-relative end line for section reads",
+				},
+				"section": map[string]interface{}{
+					"type":        "string",
+					"description": "Section selector for section reads: top, middle, bottom, auto",
+				},
 			},
 			"required": []string{"symbol_id"},
 		},
@@ -807,10 +882,16 @@ func registerReadSymbolTool(s *Server, deps ToolDeps) {
 			mcp.WithTitleAnnotation("Read Symbol"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("symbol_id", mcp.Description("The ID or name of the symbol to read"), mcp.Required()),
+			mcp.WithString("mode", mcp.Description("Read mode: bounded (default), signature, section, flow_summary, or full")),
+			mcp.WithNumber("max_chars", mcp.Description("Maximum characters to return for source-bearing modes (default: 6000, hard cap: 20000)")),
+			mcp.WithNumber("max_lines", mcp.Description("Maximum lines to return for source-bearing modes (default: 60, hard cap: 200)")),
+			mcp.WithNumber("start_line", mcp.Description("Optional 1-based file-relative start line for section reads")),
+			mcp.WithNumber("end_line", mcp.Description("Optional 1-based file-relative end line for section reads")),
+			mcp.WithString("section", mcp.Description("Section selector for section reads: top, middle, bottom, auto")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
-				"anthropic/searchHint": "exact source for a selected symbol",
+				"anthropic/searchHint": "safe bounded inspection for a selected symbol",
 			},
 		}
 		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1089,7 +1170,7 @@ func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, er
 				resolved = append(resolved, pathNode{
 					SymbolName:     node.SymbolName,
 					FilePath:       node.FilePath,
-					ReadSymbolArgs: map[string]string{"symbol_id": node.ID},
+					ReadSymbolArgs: defaultReadSymbolArgs(node.ID),
 				})
 			} else {
 				resolved = append(resolved, pathNode{SymbolName: hashID})
@@ -1281,7 +1362,7 @@ func getKeySymbolsHandler(deps ToolDeps, p GetKeySymbolsParams) (interface{}, er
 			Score:      sym.PageRank,
 			Reason:     reason,
 			NextTool:   nextTool,
-			NextArgs:   map[string]string{"symbol_id": sym.ID},
+			NextArgs:   defaultSymbolNextArgs(nextTool, sym.ID),
 		})
 	}
 
@@ -1806,7 +1887,7 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		// Build next args — new files have no ID, fall back to explore by file path
 		nextArgs := map[string]string{}
 		if sc.ID != "" {
-			nextArgs["symbol_id"] = sc.ID
+			nextArgs = defaultSymbolNextArgs(nextTool, sc.ID)
 		} else if sc.FilePath != "" {
 			nextTool = "explore"
 			nextArgs["symbol"] = sc.FilePath
@@ -2040,7 +2121,7 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 			Score:      sc.score,
 			Reason:     sc.reason,
 			NextTool:   nextTool,
-			NextArgs:   map[string]string{"symbol_id": symbolRef},
+			NextArgs:   defaultSymbolNextArgs(nextTool, symbolRef),
 		})
 	}
 
@@ -2195,7 +2276,7 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 			Score:      0,
 			Reason:     fmt.Sprintf("Matched symbol (%s)", m.NodeType),
 			NextTool:   nextTool,
-			NextArgs:   map[string]string{"symbol_id": m.ID},
+			NextArgs:   defaultSymbolNextArgs(nextTool, m.ID),
 		})
 	}
 
@@ -2278,6 +2359,154 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 	}
 
 	return result, nil
+}
+
+func listFileSymbolsHandler(deps ToolDeps, p ListFileSymbolsParams) (interface{}, error) {
+	if p.Path == "" {
+		return nil, fmt.Errorf("'path' is required")
+	}
+	if p.Limit <= 0 {
+		p.Limit = 200
+	}
+	if p.Limit > 500 {
+		p.Limit = 500
+	}
+
+	fileCtx, err := loadSymbolFileContext(deps.RepoRoot, p.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	nodes, err := deps.Store.GetNodesByFile(fileCtx.RelPath)
+	if err != nil {
+		return nil, fmt.Errorf("query indexed symbols for %s: %w", fileCtx.RelPath, err)
+	}
+
+	kindFilter := make(map[string]bool)
+	for _, kind := range p.Kinds {
+		if kind == "" {
+			continue
+		}
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		switch kind {
+		case "function", "class", "struct", "method", "interface", "file", "route":
+			kindFilter[kind] = true
+		default:
+			return nil, fmt.Errorf("invalid kind %q: must be one of function, class, struct, method, interface, file, route", kind)
+		}
+	}
+
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].StartByte == nodes[j].StartByte {
+			return nodes[i].ID < nodes[j].ID
+		}
+		return nodes[i].StartByte < nodes[j].StartByte
+	})
+
+	var symbols []map[string]interface{}
+	totalMatching := 0
+	for _, node := range nodes {
+		kind := node.NodeType.String()
+		if len(kindFilter) == 0 && node.NodeType == types.NodeTypeFile {
+			continue
+		}
+		if len(kindFilter) > 0 && !kindFilter[kind] {
+			continue
+		}
+
+		totalMatching++
+		if len(symbols) >= p.Limit {
+			continue
+		}
+
+		inspection := buildSymbolInspection(node, fileCtx)
+		symbolRef := node.ID
+		if symbolRef == "" {
+			symbolRef = node.SymbolName
+		}
+
+		symbols = append(symbols, map[string]interface{}{
+			"id":               node.ID,
+			"symbol_name":      node.SymbolName,
+			"node_type":        kind,
+			"start_line":       inspection.SymbolStartLine,
+			"end_line":         inspection.SymbolEndLine,
+			"signature":        inspection.Signature,
+			"read_symbol_args": defaultReadSymbolArgs(symbolRef),
+		})
+	}
+
+	return map[string]interface{}{
+		"path":      fileCtx.RelPath,
+		"count":     len(symbols),
+		"total":     totalMatching,
+		"truncated": totalMatching > len(symbols),
+		"symbols":   symbols,
+	}, nil
+}
+
+func registerListFileSymbolsTool(s *Server, deps ToolDeps) {
+	desc := "List indexed symbols in a file in source order with safe read_symbol follow-up args. Use instead of grep when you need method or symbol inventory."
+
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p ListFileSymbolsParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		return listFileSymbolsHandler(deps, p)
+	}
+
+	s.RegisterTool(ToolDefinition{
+		Name:        "list_file_symbols",
+		Description: desc,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Repo-relative or absolute-under-repo file path to inspect",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum symbols to return (default: 200)",
+					"default":     200,
+				},
+				"kinds": map[string]interface{}{
+					"type":        "array",
+					"description": "Optional node-type filters such as function, method, class, struct, interface, route",
+					"items":       map[string]interface{}{"type": "string"},
+				},
+			},
+			"required": []string{"path"},
+		},
+	}, cliHandler)
+
+	if isToolInProfile("list_file_symbols", deps.Profile) {
+		tool := mcp.NewTool("list_file_symbols",
+			mcp.WithDescription(desc),
+			mcp.WithTitleAnnotation("List File Symbols"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("path", mcp.Description("Repo-relative or absolute-under-repo file path to inspect"), mcp.Required()),
+			mcp.WithNumber("limit", mcp.Description("Maximum symbols to return (default: 200)")),
+			mcp.WithArray("kinds", mcp.Description("Optional node-type filters such as function, method, class, struct, interface, route"), mcp.WithStringItems()),
+		)
+		tool.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{
+				"anthropic/searchHint": "inventory of symbols in a file without shell grep",
+			},
+		}
+		s.AddSDKTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			var p ListFileSymbolsParams
+			if err := req.BindArguments(&p); err != nil {
+				return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+			}
+			result, err := listFileSymbolsHandler(deps, p)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return toCallToolResult(result)
+		})
+	}
 }
 
 func registerExploreTool(s *Server, deps ToolDeps) {

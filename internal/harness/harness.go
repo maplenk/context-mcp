@@ -95,10 +95,17 @@ func selfBinary() (string, error) {
 	return filepath.EvalSymlinks(p)
 }
 
+func effectiveProfile(profile string) string {
+	if profile == "" {
+		return "extended"
+	}
+	return profile
+}
+
 func buildArgs(opts InstallOpts) []string {
 	args := []string{"--repo", opts.RepoRoot}
-	if opts.Profile != "" {
-		args = append(args, "--profile", opts.Profile)
+	if profile := effectiveProfile(opts.Profile); profile != "" {
+		args = append(args, "--profile", profile)
 	}
 	return args
 }

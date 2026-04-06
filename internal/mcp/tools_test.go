@@ -736,6 +736,7 @@ func TestAllToolsRegistered(t *testing.T) {
 		"context",
 		"impact",
 		"read_symbol",
+		"list_file_symbols",
 		"query",
 		"health",
 		"index",
@@ -1224,6 +1225,8 @@ func TestToolHandlers_EmptyNilInputs(t *testing.T) {
 		{"impact_no_params", "impact", `{}`, true},
 		// read_symbol: empty symbol_id
 		{"read_symbol_empty", "read_symbol", `{"symbol_id": ""}`, true},
+		// list_file_symbols: empty path
+		{"list_file_symbols_empty", "list_file_symbols", `{"path": ""}`, true},
 		// query: empty SQL
 		{"query_empty_sql", "query", `{"sql": ""}`, true},
 		// trace_call_path: missing from and to
@@ -1356,7 +1359,7 @@ func TestStore_GetNodesByFile(t *testing.T) {
 
 func TestIsToolInProfile(t *testing.T) {
 	// Core tools should be in all profiles
-	for _, tool := range []string{"context", "read_symbol", "understand", "impact", "detect_changes", "trace_call_path"} {
+	for _, tool := range []string{"context", "read_symbol", "list_file_symbols", "understand", "impact", "detect_changes", "trace_call_path"} {
 		if !isToolInProfile(tool, "core") {
 			t.Errorf("%s should be in core profile", tool)
 		}

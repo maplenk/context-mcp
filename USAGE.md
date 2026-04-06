@@ -1,6 +1,6 @@
 # context-mcp User Guide
 
-A local-first MCP daemon that indexes your codebase and gives LLM agents surgical, context-aware code retrieval. Provides 16 tools, 5 prompt templates, and 4 resources.
+A local-first MCP daemon that indexes your codebase and gives LLM agents surgical, context-aware code retrieval. Provides 17 tools, 5 prompt templates, and 4 resources.
 
 ---
 
@@ -15,6 +15,7 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
   - [context](#context--search--discover-code)
   - [impact](#impact--blast-radius-analysis)
   - [read_symbol](#read_symbol--read-source-code)
+  - [list_file_symbols](#list_file_symbols--file-symbol-inventory)
   - [query](#query--raw-sql)
   - [index](#index--re-index-repository)
   - [health](#health--system-health-status)
@@ -85,7 +86,8 @@ TOOL                       DESCRIPTION
 ----                       -----------
 context                    Discovers relevant code symbols using hybrid lexical + semantic search...
 impact                     Analyzes the blast radius of a code symbol...
-read_symbol                Retrieves the exact source code of a symbol...
+read_symbol                Safely inspects a symbol with bounded and summary modes...
+list_file_symbols          Lists indexed symbols in a file in source order...
 query                      Executes a read-only SQL query against the structural database.
 index                      Triggers a full re-index of the repository.
 health                     Returns system health status.
@@ -217,7 +219,7 @@ Use the `cli` subcommand to invoke any MCP tool directly from the terminal. This
 **Read the source code of a function:**
 
 ```bash
-./context-mcp -repo . cli read_symbol '{"symbol_id": "ParseFile"}'
+./context-mcp -repo . cli read_symbol '{"symbol_id": "ParseFile", "mode": "bounded"}'
 ```
 
 **Run a diagnostic SQL query:**
@@ -348,19 +350,26 @@ The `risk_score` is the betweenness centrality of the target symbol (0-1). Highe
 
 ### `read_symbol` -- Read Source Code
 
-Retrieves the exact source code of a symbol by reading the specific byte range from disk. No grep, no scanning -- precise extraction.
+Safely inspects a symbol by reading indexed source from disk with bounded defaults, explicit windowing, and deterministic flow summaries for large symbols.
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `symbol_id` | string | yes | -- | Symbol name or hash ID |
+| `mode` | string | no | `"bounded"` | `"bounded"`, `"signature"`, `"section"`, `"flow_summary"`, or `"full"` |
+| `max_chars` | integer | no | `6000` | Soft output budget for source-bearing modes, clamped to `20000` |
+| `max_lines` | integer | no | `60` | Soft output budget for source-bearing modes, clamped to `200` |
+| `start_line` | integer | no | -- | Optional 1-based file-relative start line, takes precedence over `section` |
+| `end_line` | integer | no | -- | Optional 1-based file-relative end line, takes precedence over `section` |
+| `section` | string | no | -- | `"top"`, `"middle"`, `"bottom"`, or `"auto"` for section reads |
 
 **Example:**
 
 ```json
 {
-  "symbol_id": "ParseFile"
+  "symbol_id": "ParseFile",
+  "mode": "bounded"
 }
 ```
 
@@ -373,11 +382,80 @@ Retrieves the exact source code of a symbol by reading the specific byte range f
   "node_type": "function",
   "start_byte": 1234,
   "end_byte": 2345,
+  "symbol_start_line": 42,
+  "symbol_end_line": 118,
+  "mode_requested": "bounded",
+  "mode_used": "bounded",
+  "truncated": true,
+  "downgraded": false,
+  "downgrade_reason": "",
+  "signature": "func ParseFile(path string, repoRoot string) (*ParseResult, error)",
+  "next_modes": ["signature", "section", "flow_summary", "full"],
+  "selected_start_line": 42,
+  "selected_end_line": 96,
+  "selected_section": "auto",
   "source": "func ParseFile(path string, repoRoot string) (*ParseResult, error) {\n  ..."
 }
 ```
 
-Accepts either the symbol name (e.g., `"ParseFile"`) or the full SHA-256 hash ID. If the name matches multiple symbols, the first match is returned.
+Behavior notes:
+
+- Omitting `mode` never returns a giant raw symbol body; it defaults to `bounded`.
+- `full` is only honored when the symbol fits within both active safety budgets. Otherwise it downgrades to `bounded` and sets `downgraded=true`.
+- `signature` returns metadata plus the signature only.
+- `section` can target `start_line`/`end_line` or a named `section`.
+- `flow_summary` returns structured steps, helper calls, validations, side effects, and suggested follow-up reads instead of large raw source.
+
+Accepts either the symbol name (for example `"ParseFile"`) or the full SHA-256 hash ID. If the name matches multiple symbols, the first match is returned.
+
+---
+
+### `list_file_symbols` -- File Symbol Inventory
+
+Lists indexed symbols in a file in source order. Use it when you need a method inventory and do not want to fall back to shell grep.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | yes | -- | Repo-relative path or absolute-under-repo path |
+| `limit` | integer | no | `200` | Maximum symbols to return |
+| `kinds` | string[] | no | -- | Optional filters such as `function`, `method`, `class`, `struct`, `interface`, `route` |
+
+**Example:**
+
+```json
+{
+  "path": "app/Http/Controllers/OrderController.php",
+  "limit": 50,
+  "kinds": ["method"]
+}
+```
+
+**Response:**
+
+```json
+{
+  "path": "app/Http/Controllers/OrderController.php",
+  "count": 3,
+  "total": 3,
+  "truncated": false,
+  "symbols": [
+    {
+      "id": "f321b80a...",
+      "symbol_name": "OrderController.__construct",
+      "node_type": "method",
+      "start_line": 86,
+      "end_line": 91,
+      "signature": "public function __construct()",
+      "read_symbol_args": {
+        "symbol_id": "f321b80a...",
+        "mode": "bounded"
+      }
+    }
+  ]
+}
+```
 
 ---
 
@@ -748,7 +826,7 @@ Add context-mcp to your Claude Desktop MCP configuration:
 }
 ```
 
-Restart Claude Desktop after editing the config. All 16 tools will appear in Claude's tool list.
+Restart Claude Desktop after editing the config. All 17 tools will appear in Claude's tool list.
 
 ### Connecting to Claude Code
 
@@ -773,7 +851,7 @@ Claude Code supports `user`, `local`, and `project` scopes. The helper defaults 
   "mcpServers": {
     "context-mcp": {
       "command": "/absolute/path/to/context-mcp",
-      "args": ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
+      "args": ["-repo", "/absolute/path/to/your/project", "-profile", "extended"]
     }
   }
 }
@@ -809,7 +887,7 @@ The helper installs Codex config into `~/.codex/config.toml`. Codex also support
 ```toml
 [mcp_servers.context-mcp]
 command = "/absolute/path/to/context-mcp"
-args = ["-repo", "/absolute/path/to/your/project", "-profile", "core"]
+args = ["-repo", "/absolute/path/to/your/project", "-profile", "extended"]
 ```
 
 **User-scoped HTTP config (`~/.codex/config.toml` or `.codex/config.toml`):**
@@ -865,7 +943,7 @@ All options are set via CLI flags:
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
 | `-embedding-dim` | `384` | Embedding vector dimension. TF-IDF defaults to 384; CodeRankEmbed uses 768 |
 | `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
-| `-profile` | `core` | Tool profile for MCP mode: `core` (6 tools), `extended` (13), `full` (16) |
+| `-profile` | `core` | Tool profile for MCP mode: `core` (7 tools), `extended` (14), `full` (17) |
 | `-ollama-endpoint` | (empty) | Ollama API endpoint (e.g., `http://localhost:11434`) |
 | `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |
 | `-llamacpp-endpoint` | (empty) | llama.cpp server endpoint (e.g., `http://localhost:8080`) |

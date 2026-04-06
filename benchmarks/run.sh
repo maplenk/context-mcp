@@ -19,6 +19,8 @@ if [ ! -d "$TARGET_REPO" ]; then
     exit 1
 fi
 
+export QB_TEST_REPO="$TARGET_REPO"
+
 mkdir -p "$RESULTS_DIR"
 
 # 1. Build
@@ -73,7 +75,7 @@ grep -c "PASS:" "$QUERY_OUT" 2>/dev/null | xargs -I{} echo "  Benchmark queries 
 grep -c "PASS:" "$QUALITY_OUT" 2>/dev/null | xargs -I{} echo "  Search quality passed:    {}"
 grep -c "PASS:" "$TOOLS_OUT" 2>/dev/null | xargs -I{} echo "  Tool tests passed:        {}"
 echo ""
-FAIL_COUNT=$(grep -c "FAIL:" "$QUERY_OUT" "$QUALITY_OUT" "$TOOLS_OUT" 2>/dev/null || echo 0)
+FAIL_COUNT=$({ grep -h -c "FAIL:" "$QUERY_OUT" "$QUALITY_OUT" "$TOOLS_OUT" 2>/dev/null || true; } | awk '{sum += $1} END {print sum+0}')
 if [ "$FAIL_COUNT" = "0" ]; then
     echo "✅ All benchmarks passed"
 else
