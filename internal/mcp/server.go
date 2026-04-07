@@ -94,6 +94,9 @@ func (s *Server) RegisterTool(def ToolDefinition, handler ToolHandler) {
 
 // AddSDKTool registers a tool with the underlying MCP SDK server.
 func (s *Server) AddSDKTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
+	s.mu.Lock()
+	s.activated[tool.Name] = true
+	s.mu.Unlock()
 	s.mcpServer.AddTool(tool, handler)
 }
 

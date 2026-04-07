@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -38,7 +37,7 @@ func NewOutputStore(maxSize int, ttl time.Duration) *OutputStore {
 }
 
 // Store saves data and returns a handle for later retrieval.
-func (s *OutputStore) Store(toolName string, data []byte) string {
+func (s *OutputStore) Store(toolName string, data []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -47,7 +46,7 @@ func (s *OutputStore) Store(toolName string, data []byte) string {
 	// Generate handle
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		log.Printf("[output] failed to generate random handle: %v", err)
+		return "", fmt.Errorf("failed to generate handle: %w", err)
 	}
 	handle := hex.EncodeToString(b)
 
@@ -73,7 +72,7 @@ func (s *OutputStore) Store(toolName string, data []byte) string {
 		}
 	}
 
-	return handle
+	return handle, nil
 }
 
 // Retrieve returns a slice of the stored data.
@@ -91,7 +90,7 @@ func (s *OutputStore) Retrieve(handle string, offset, limit int) ([]byte, int, e
 		offset = 0
 	}
 	if offset >= total {
-		return nil, total, nil
+		return []byte{}, total, nil
 	}
 
 	end := offset + limit

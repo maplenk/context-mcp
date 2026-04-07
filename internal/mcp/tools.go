@@ -37,8 +37,7 @@ type ToolDeps struct {
 	OutputStore *OutputStore     // nil-safe, initialized in RegisterTools if nil
 }
 
-// globalOutputStore is set during RegisterTools for use by toCallToolResultWithName.
-var globalOutputStore *OutputStore
+// No global output store — passed through call chain via deps.OutputStore.
 
 // stripInspectable returns a compact version of an Inspectable.
 // Compact contract: Keep ID, Name, FilePath, Score/Rank, line spans.
@@ -242,8 +241,6 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	if deps.OutputStore == nil {
 		deps.OutputStore = NewOutputStore(50, 10*time.Minute)
 	}
-	globalOutputStore = deps.OutputStore
-
 	registerContextTool(s, deps)
 	registerImpactTool(s, deps)
 	registerReadSymbolTool(s, deps)
@@ -517,7 +514,7 @@ func registerContextTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResultWithName(result, "context")
+		return toCallToolResultWithName(result, "context", deps.OutputStore)
 	}
 
 	// Register or defer based on profile
@@ -757,7 +754,7 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResultWithName(result, "impact")
+		return toCallToolResultWithName(result, "impact", deps.OutputStore)
 	}
 
 	if isToolInProfile("impact", deps.Profile) {
@@ -2108,7 +2105,7 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResultWithName(result, "detect_changes")
+		return toCallToolResultWithName(result, "detect_changes", deps.OutputStore)
 	}
 
 	if isToolInProfile("detect_changes", deps.Profile) {
@@ -2330,7 +2327,7 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResultWithName(result, "get_architecture_summary")
+		return toCallToolResultWithName(result, "get_architecture_summary", deps.OutputStore)
 	}
 
 	if isToolInProfile("get_architecture_summary", deps.Profile) {
@@ -2742,7 +2739,7 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResultWithName(result, "explore")
+		return toCallToolResultWithName(result, "explore", deps.OutputStore)
 	}
 
 	if isToolInProfile("explore", deps.Profile) {
@@ -2996,7 +2993,7 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResultWithName(result, "understand")
+		return toCallToolResultWithName(result, "understand", deps.OutputStore)
 	}
 
 	if isToolInProfile("understand", deps.Profile) {
@@ -3326,7 +3323,7 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResultWithName(result, "assemble_context")
+		return toCallToolResultWithName(result, "assemble_context", deps.OutputStore)
 	}
 
 	if isToolInProfile("assemble_context", deps.Profile) {
@@ -3583,7 +3580,7 @@ var recoveryHints = map[string]string{
 
 // toCallToolResultWithName adds tiered output protection (warning at 8KB,
 // sandbox at 16KB) before delegating to toCallToolResult.
-func toCallToolResultWithName(result interface{}, toolName string) (*mcp.CallToolResult, error) {
+func toCallToolResultWithName(result interface{}, toolName string, store *OutputStore) (*mcp.CallToolResult, error) {
 	var text string
 	switch v := result.(type) {
 	case string:
@@ -3599,8 +3596,12 @@ func toCallToolResultWithName(result interface{}, toolName string) (*mcp.CallToo
 	if len(text) > warnThreshold {
 		log.Printf("[output] %s response: %d bytes (threshold: %d)", toolName, len(text), sandboxThreshold)
 	}
-	if len(text) > sandboxThreshold && globalOutputStore != nil {
-		handle := globalOutputStore.Store(toolName, []byte(text))
+	if len(text) > sandboxThreshold && store != nil {
+		handle, err := store.Store(toolName, []byte(text))
+		if err != nil {
+			log.Printf("[output] failed to store sandbox: %v", err)
+			return toCallToolResult(result)
+		}
 
 		preview := truncatePreview(text, 500)
 		hint := recoveryHints[toolName]

@@ -25,7 +25,10 @@ func TestOutputStore_StoreRetrieve(t *testing.T) {
 	store := NewOutputStore(10, 5*time.Minute)
 	data := []byte("hello world, this is test data")
 
-	handle := store.Store("test_tool", data)
+	handle, err := store.Store("test_tool", data)
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
 	if handle == "" {
 		t.Fatal("expected non-empty handle")
 	}
@@ -46,7 +49,10 @@ func TestOutputStore_Pagination(t *testing.T) {
 	store := NewOutputStore(10, 5*time.Minute)
 	data := []byte(strings.Repeat("abcdefghij", 100)) // 1000 bytes
 
-	handle := store.Store("test_tool", data)
+	handle, err := store.Store("test_tool", data)
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
 
 	// First page
 	page1, total, err := store.Retrieve(handle, 0, 400)
@@ -101,10 +107,13 @@ func TestOutputStore_TTLEviction(t *testing.T) {
 	store := NewOutputStore(10, 50*time.Millisecond)
 	data := []byte("ephemeral data")
 
-	handle := store.Store("test_tool", data)
+	handle, err := store.Store("test_tool", data)
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
 
 	// Should be retrievable immediately
-	_, _, err := store.Retrieve(handle, 0, 100)
+	_, _, err = store.Retrieve(handle, 0, 100)
 	if err != nil {
 		t.Fatalf("expected data to be available immediately: %v", err)
 	}
@@ -113,7 +122,7 @@ func TestOutputStore_TTLEviction(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Store something else to trigger eviction
-	store.Store("other_tool", []byte("trigger eviction"))
+	_, _ = store.Store("other_tool", []byte("trigger eviction"))
 
 	// Original handle should be gone
 	_, _, err = store.Retrieve(handle, 0, 100)
@@ -126,10 +135,10 @@ func TestOutputStore_MaxEntries(t *testing.T) {
 	store := NewOutputStore(3, 5*time.Minute)
 
 	// Store 4 entries (max is 3)
-	h1 := store.Store("tool1", []byte("data1"))
-	store.Store("tool2", []byte("data2"))
-	store.Store("tool3", []byte("data3"))
-	store.Store("tool4", []byte("data4"))
+	h1, _ := store.Store("tool1", []byte("data1"))
+	_, _ = store.Store("tool2", []byte("data2"))
+	_, _ = store.Store("tool3", []byte("data3"))
+	_, _ = store.Store("tool4", []byte("data4"))
 
 	// First entry should have been evicted
 	_, _, err := store.Retrieve(h1, 0, 100)
@@ -151,15 +160,13 @@ func TestOutputStore_HandleNotFound(t *testing.T) {
 }
 
 func TestToCallToolResultWithName_Small(t *testing.T) {
-	// Initialize globalOutputStore for the test
-	globalOutputStore = NewOutputStore(50, 10*time.Minute)
-	defer func() { globalOutputStore = nil }()
+	store := NewOutputStore(50, 10*time.Minute)
 
 	// Small response (< 8KB) should pass through unchanged
 	small := map[string]interface{}{
 		"data": "small response",
 	}
-	result, err := toCallToolResultWithName(small, "context")
+	result, err := toCallToolResultWithName(small, "context", store)
 	if err != nil {
 		t.Fatalf("toCallToolResultWithName: %v", err)
 	}
@@ -177,15 +184,13 @@ func TestToCallToolResultWithName_Small(t *testing.T) {
 }
 
 func TestToCallToolResultWithName_Warning(t *testing.T) {
-	// Initialize globalOutputStore for the test
-	globalOutputStore = NewOutputStore(50, 10*time.Minute)
-	defer func() { globalOutputStore = nil }()
+	store := NewOutputStore(50, 10*time.Minute)
 
 	// Response between 8KB and 16KB should warn but not sandbox
 	medium := map[string]interface{}{
 		"data": strings.Repeat("x", 10000), // ~10KB JSON
 	}
-	result, err := toCallToolResultWithName(medium, "context")
+	result, err := toCallToolResultWithName(medium, "context", store)
 	if err != nil {
 		t.Fatalf("toCallToolResultWithName: %v", err)
 	}
@@ -202,15 +207,13 @@ func TestToCallToolResultWithName_Warning(t *testing.T) {
 }
 
 func TestToCallToolResultWithName_Sandbox(t *testing.T) {
-	// Initialize globalOutputStore for the test
-	globalOutputStore = NewOutputStore(50, 10*time.Minute)
-	defer func() { globalOutputStore = nil }()
+	store := NewOutputStore(50, 10*time.Minute)
 
 	// Large response (> 16KB) should be sandboxed
 	large := map[string]interface{}{
 		"data": strings.Repeat("x", 20000),
 	}
-	result, err := toCallToolResultWithName(large, "context")
+	result, err := toCallToolResultWithName(large, "context", store)
 	if err != nil {
 		t.Fatalf("toCallToolResultWithName: %v", err)
 	}
@@ -259,17 +262,14 @@ func TestToCallToolResultWithName_Sandbox(t *testing.T) {
 }
 
 func TestRetrieveOutput_Integration(t *testing.T) {
-	// Initialize globalOutputStore for the test
 	store := NewOutputStore(50, 10*time.Minute)
-	globalOutputStore = store
-	defer func() { globalOutputStore = nil }()
 
 	// Step 1: Create a large response that triggers sandboxing
 	largeData := strings.Repeat("integration-test-data-", 1000) // ~22KB
 	large := map[string]interface{}{
 		"data": largeData,
 	}
-	result, err := toCallToolResultWithName(large, "understand")
+	result, err := toCallToolResultWithName(large, "understand", store)
 	if err != nil {
 		t.Fatalf("toCallToolResultWithName: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestRetrieveOutput_Integration(t *testing.T) {
 
 func TestRetrieveOutput_LimitClamping(t *testing.T) {
 	store := NewOutputStore(10, 5*time.Minute)
-	store.Store("test", []byte("test data"))
+	_, _ = store.Store("test", []byte("test data"))
 
 	// Test default limit
 	_, err := retrieveOutputHandler(store, RetrieveOutputParams{
@@ -345,7 +345,10 @@ func TestRetrieveOutput_LimitClamping(t *testing.T) {
 	}
 
 	// Test max limit clamping
-	handle := store.Store("test", []byte(strings.Repeat("x", 20000)))
+	handle, err := store.Store("test", []byte(strings.Repeat("x", 20000)))
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
 	result, err := retrieveOutputHandler(store, RetrieveOutputParams{
 		Handle: handle,
 		Limit:  99999, // should be clamped to 16000

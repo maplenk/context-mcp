@@ -47,7 +47,7 @@ var taskBundles = []taskBundle{
 
 // DiscoverToolsParams are the parameters for the discover_tools tool.
 type DiscoverToolsParams struct {
-	Need     string   `json:"need" jsonschema:"required,description=Start here in minimal mode. Describe your task and the most relevant tool bundle will be activated."`
+	Need     string   `json:"need,omitempty" jsonschema:"description=Describe your task and the most relevant tool bundle will be activated."`
 	Activate []string `json:"activate,omitempty" jsonschema:"description=Specific tool names to activate directly (bypasses bundle matching, max 5)"`
 }
 
@@ -136,7 +136,9 @@ func discoverToolsHandler(s *Server, p DiscoverToolsParams) (*DiscoverToolsRespo
 
 	if len(bundlesToActivate) > 1 {
 		bundleName = bundlesToActivate[0].bundle.Name + "+" + bundlesToActivate[1].bundle.Name
-		allMatched := append(bundlesToActivate[0].matched, bundlesToActivate[1].matched...)
+		allMatched := make([]string, 0, len(bundlesToActivate[0].matched)+len(bundlesToActivate[1].matched))
+		allMatched = append(allMatched, bundlesToActivate[0].matched...)
+		allMatched = append(allMatched, bundlesToActivate[1].matched...)
 		reason = fmt.Sprintf("Matched keywords: %s", strings.Join(allMatched, ", "))
 	}
 
@@ -175,6 +177,7 @@ func discoverToolsHandler(s *Server, p DiscoverToolsParams) (*DiscoverToolsRespo
 
 // activateDirectly activates specific tools by name.
 func activateDirectly(s *Server, names []string) (*DiscoverToolsResponse, error) {
+	capped := len(names) > maxActivatePerCall
 	if len(names) > maxActivatePerCall {
 		names = names[:maxActivatePerCall]
 	}
@@ -198,7 +201,7 @@ func activateDirectly(s *Server, names []string) (*DiscoverToolsResponse, error)
 		Reason:           fmt.Sprintf("Directly activated: %s", strings.Join(names, ", ")),
 		Activated:        activated,
 		ActivatedCount:   len(activated),
-		ActivationCapped: len(names) >= maxActivatePerCall,
+		ActivationCapped: capped,
 		AlreadyActive:    alreadyActive,
 		Pending:          s.ListPending(),
 	}, nil
@@ -353,14 +356,13 @@ func registerDiscoverToolsTool(s *Server, deps ToolDeps) {
 					"description": "Specific tool names to activate directly (max 5)",
 				},
 			},
-			"required": []string{"need"},
 		},
 	}, cliHandler)
 
 	// discover_tools SDK registration
 	tool := mcp.NewTool("discover_tools",
 		mcp.WithDescription(desc),
-		mcp.WithString("need", mcp.Description("Describe your task and the most relevant tool bundle will be activated"), mcp.Required()),
+		mcp.WithString("need", mcp.Description("Describe your task and the most relevant tool bundle will be activated")),
 		mcp.WithArray("activate", mcp.Description("Specific tool names to activate directly (max 5)"), mcp.WithStringItems()),
 	)
 	sdkHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
