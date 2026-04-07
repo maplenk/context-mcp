@@ -26,9 +26,11 @@ algorithm performance.
 - [Go Graph Micro-Benchmarks](#go-graph-micro-benchmarks)
 - [Performance Thresholds](#performance-thresholds)
 - [Baselines](#baselines)
-  - [v0.8.0 (with Cold Start)](#v080-with-cold-start)
-  - [Pre-Cold-Start (fab5104)](#pre-cold-start-fab5104)
-  - [Comparison: Cold Start Impact](#comparison-cold-start-impact)
+  - [v0.6.0 — Baseline](#v060--baseline-earliest-benchmarked-release)
+  - [v0.9.0 — Current (Cold Start)](#v090--current-cold-start)
+  - [v0.10.0 — Human-Eval Snapshot](#v0100--human-eval-snapshot)
+  - [HEAD — CLI TF-IDF vs ONNX Snapshot](#head--cli-tf-idf-vs-onnx-snapshot)
+  - [Comparison: Baseline vs Current](#comparison-baseline-vs-current)
 - [Result JSON Schema](#result-json-schema)
 - [Interpreting Results](#interpreting-results)
 - [Adding New Queries](#adding-new-queries)
@@ -110,12 +112,17 @@ benchmarks/
 ├── dashboard.py           Terminal + HTML comparison dashboard
 └── results/
     ├── baseline-v0.6.0-qbapi.json          Baseline (earliest benchmarked release)
+    ├── head-<sha>-qbapi-tfidf-cli-abcde.json Full 26-query TF-IDF CLI artifact
+    ├── head-<sha>-qbapi-onnx-cli-abcde.json  Full 26-query ONNX CLI artifact
+    ├── head-<sha>-qbapi-cli-human-eval-comparison.json CLI rubric vs human-eval comparison
     ├── mcp-usage-v<version>-<sha>-qbapi.json Published MCP usage artifact
     ├── mcp-usage-v<version>-<sha>-qbapi.md   Published MCP usage Markdown report
     ├── go-bench-<timestamp>.txt              Raw Go graph benchmark output
     ├── queries-<timestamp>.txt               Real-repo benchmark query output
     ├── search-quality-<timestamp>.txt        Real-repo search quality output
     ├── tools-<timestamp>.txt                 Real-repo tool smoke output
+    ├── v0.10.0-4b13987-qbapi-raw.txt         Human-eval core 6 raw queries
+    ├── v0.10.0-4b13987-qbapi-extra-raw.txt   Human-eval remaining 9 raw queries
     ├── v0.7.0-c608668-qbapi.json           Search quality release
     ├── v0.8.0-fab5104-qbapi.json           Cross-file + DA hardening
     ├── v0.9.0-e1a93bc-qbapi.json           Cold Start release (current)
@@ -508,6 +515,73 @@ Commit: `e1a93bc` · Result file: `results/v0.9.0-e1a93bc-qbapi.json`
 
 Index: 12,653 nodes · 16,294 edges · Search quality: 17/17 passed · Tool tests: 9/9 passed
 
+### v0.10.0 — Human-Eval Snapshot
+
+Commit: `4b13987` · Raw result files:
+`results/v0.10.0-4b13987-qbapi-raw.txt`,
+`results/v0.10.0-4b13987-qbapi-extra-raw.txt` · Evaluation doc:
+[`human-eval-results.md`](./human-eval-results.md)
+
+This snapshot added a manual rubric pass against [`human-answers.md`](./human-answers.md)
+instead of the usual release-quality summary JSON. It covers 15 A-C queries and records
+both the raw benchmark output and the human-evaluated hit counts.
+
+| Query | Category   | Latency   | Human-Eval Grade |
+|-------|------------|-----------|------------------|
+| A1    | Exact      | 581µs     | 1/1              |
+| A2    | Exact      | 2.9ms     | 1/3              |
+| A3    | Regex      | 111.4ms   | 3/5              |
+| B1    | Concept    | 9.0ms     | 4/20             |
+| B6    | Concept    | 1.7ms     | 0/10             |
+| C1    | Cross-file | 4.7ms     | 0/11             |
+| C5    | Cross-file | 2.9ms     | 0/8              |
+
+Index: 18,655 nodes · 24,882 edges · Human-eval aggregate: B+C 13/102 (12.7%)
+
+### HEAD — CLI TF-IDF vs ONNX Snapshot
+
+Benchmarked commit: `7f8808e`
+
+Raw result files:
+- `results/head-7f8808e-qbapi-tfidf-cli-abcde.json`
+- `results/head-7f8808e-qbapi-onnx-cli-abcde.json`
+- `results/head-7f8808e-qbapi-cli-human-eval-comparison.json`
+
+This snapshot is an end-to-end CLI benchmark against the same `qbapi` repo, not the
+older in-process Go test harness used by the release baseline JSON files above. Treat
+these numbers as a separate latency line for real CLI usage rather than a direct
+replacement for the release progression table.
+
+Index stats: 16,214 nodes · 108,055 edges · 15,905 stored node scores
+
+Reindex time:
+- TF-IDF: 49.06s
+- ONNX (`CodeRankEmbed`, 768d, CPU): 769.38s
+
+Average latency by category:
+
+| Category | TF-IDF CLI | ONNX CLI | ONNX / TF-IDF |
+|----------|------------|----------|---------------|
+| A        | 282.0ms    | 601.9ms  | 2.13× slower  |
+| B        | 124.2ms    | 448.9ms  | 3.61× slower  |
+| C        | 116.1ms    | 441.0ms  | 3.80× slower  |
+| D        | 298.1ms    | 613.8ms  | 2.06× slower  |
+| E        | 109.3ms    | 436.3ms  | 3.99× slower  |
+| Overall  | 169.7ms    | 492.9ms  | 2.91× slower  |
+
+CLI rubric comparison against the parseable subset of `human-answers.md`:
+
+| Engine | A | B | C | B+C |
+|--------|---|---|---|-----|
+| TF-IDF | 6/9 (66.7%) | 11/36 (30.6%) | 18/45 (40.0%) | 29/81 (35.8%) |
+| ONNX   | 6/9 (66.7%) | 12/36 (33.3%) | 23/45 (51.1%) | 35/81 (43.2%) |
+| v0.10.0 human-eval | — | 7/56 (12.5%) | 6/46 (13.0%) | 13/102 (12.7%) |
+
+Note: the CLI rubric denominator (`81`) is smaller than the manual human-eval
+denominator (`102`) because the automated matcher only scores parseable file/route/symbol
+items from the answer key. The comparison file above includes the per-query breakdown and
+the exact hit/miss sets used for this automated pass.
+
 ### Comparison: Baseline vs Current
 
 | Metric          | v0.6.0 (baseline) | v0.9.0 (current) | Delta      | Notes                          |
@@ -530,9 +604,11 @@ qbapi Laravel codebase (~780 PHP files, staging branch).
 | v0.7.0  | `c608668` | Search quality           | 33,607 |  5,635 | 503µs      | 2.9ms        | **2.6ms**        | 6/6 ✅  | 7/7 ✅  |
 | v0.8.0  | `fab5104` | Cross-file + DA hardening| 12,653 | 16,294 | 568µs      | 4.7ms        | **3.2ms**        | 6/6 ✅  | 7/7 ✅  |
 | v0.9.0  | `e1a93bc` | Cold Start               | 12,653 | 16,294 | 279µs      | 5.7ms        | **3.0ms**        | 6/6 ✅  | 17/17 ✅|
+| v0.10.0 | `4b13987` | Human-eval snapshot      | 18,655 | 24,882 | 581µs      | 9.0ms        | **4.7ms**        | 15/15 ✅ | 13/102 manual |
 
 Result files: `results/baseline-v0.6.0-qbapi.json`, `results/v0.7.0-c608668-qbapi.json`,
-`results/v0.8.0-fab5104-qbapi.json`, `results/v0.9.0-e1a93bc-qbapi.json`
+`results/v0.8.0-fab5104-qbapi.json`, `results/v0.9.0-e1a93bc-qbapi.json`,
+`results/v0.10.0-4b13987-qbapi-raw.txt`, `results/v0.10.0-4b13987-qbapi-extra-raw.txt`
 
 #### Key Findings
 
