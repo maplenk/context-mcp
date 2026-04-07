@@ -22,7 +22,7 @@ LLM coding agents waste thousands of tokens brute-forcing through grep and glob 
 
 - **Single binary, zero cloud dependencies** -- SQLite + FTS5 + sqlite-vec, runs entirely local
 - **Hybrid ranked search** -- Personalized PageRank + BM25 + Betweenness Centrality + Semantic Similarity
-- **20 MCP tools, 5 prompts, 4 resources** -- from symbol lookup to blast radius analysis to token-budgeted context assembly
+- **20 MCP tools available across profiles, 5 prompts, 4 resources** -- from symbol lookup to blast radius analysis to token-budgeted context assembly
 - **Sub-120ms query latency** -- tested on real-world 18K+ node codebases
 - **Multi-language** -- Go (native go/ast), JavaScript, TypeScript, PHP (tree-sitter)
 - **Incremental indexing** -- filesystem watching with .gitignore-aware hot-reload
@@ -199,7 +199,7 @@ Also includes **5 prompt templates** (review\_changes, trace\_impact, prepare\_f
 
 ## Compact Output
 
-Seven tools (`context`, `impact`, `understand`, `explore`, `detect_changes`, `get_architecture_summary`, `assemble_context`) accept a `compact: true` parameter that strips verbose fields (Reason, WhyNow, NextTool, NextArgs) from each result. This reduces output tokens by 50-70% for agents that only need IDs and scores.
+High-output analysis tools (`context`, `impact`, `understand`, `explore`, `detect_changes`, `get_architecture_summary`, `assemble_context`) accept a `compact: true` parameter that strips verbose fields (Reason, WhyNow, NextTool, NextArgs) from each result. This reduces output tokens by 50-70% for agents that only need IDs and scores.
 
 ```json
 {"query": "payment processing", "compact": true}
@@ -208,6 +208,8 @@ Seven tools (`context`, `impact`, `understand`, `explore`, `detect_changes`, `ge
 ## Output Sandbox
 
 Responses exceeding 16 KB are automatically sandboxed: the agent receives a short preview with a `handle`, then calls `retrieve_output` to page through the full content in 4 KB chunks. Responses between 8-16 KB include a size warning. This prevents context window overflow from unexpectedly large results.
+
+Tools like `read_symbol` try to stay safe via bounded defaults and automatic downgrading. The output sandbox is the overflow safety net for any tool that still produces an oversized response.
 
 ## Minimal Profile
 
@@ -228,7 +230,13 @@ Use `minimal` when your agent's context window is constrained or when startup to
 ./context-mcp -repo /path/to/project -profile minimal
 ```
 
-The agent calls `discover_tools` with a task description, and the best-matching tool bundle is activated automatically. Four bundles are available: **inspection** (search/read/understand), **change_analysis** (impact/trace/detect), **architecture** (structure/modules/key symbols), and **assembly** (context/checkpoint/delta/search).
+The agent calls `discover_tools` with a task description, and the best-matching tool bundle is activated automatically. A second bundle is only activated when ambiguity between the top two matches is high. For clients that do not refresh dynamic tool lists reliably, `execute_tool` remains available as a compatibility fallback. Four bundles are available: **inspection** (search/read/understand), **change_analysis** (impact/trace/detect), **architecture** (structure/modules/key symbols), and **assembly** (context/checkpoint/delta/search).
+
+### Install Helper Limitations
+
+- **ONNX args:** The `install` helper only passes `--repo` and `--profile` flags. For ONNX-enabled installs, manually create the client config with `-onnx-model` and `-onnx-lib` args.
+- **HTTP auth:** `install` / `print-config` do not emit client-specific auth header configuration for HTTP bearer-token setups. Configure auth headers manually.
+- **Profile default:** The binary defaults to `core`. Install helpers use `--profile extended` in examples for better real-world agent usability.
 
 ## Language Support
 

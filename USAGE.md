@@ -177,6 +177,12 @@ Send `SIGINT` (Ctrl+C) or `SIGTERM` for graceful shutdown.
 - Claude Code supports `user`, `local`, and `project` scopes
 - Codex helper install writes to `~/.codex/config.toml`; project-local `.codex/config.toml` remains a manual option
 
+### Known Limitations
+
+- **ONNX args:** The `install` helper only passes `--repo` and `--profile` flags. For ONNX-enabled installs, manually create the client config with `-onnx-model` and `-onnx-lib` args.
+- **HTTP auth:** `install` / `print-config` do not emit client-specific auth header configuration for HTTP bearer-token setups. Configure auth headers manually in your client config.
+- **Profile default:** The binary defaults to `core`. Install helpers use `--profile extended` in examples for better real-world agent usability.
+
 ### Direct Release Install
 
 The checked-in [`server.json`](server.json) manifest is the source template for release-based installs. Tagged GitHub Releases publish a prebuilt `context-mcp-darwin-arm64.tar.gz` artifact and a checksum-resolved `server.json` asset for agents that install from release metadata instead of a locally built binary. Use the release asset as the install manifest; the repo copy is intentionally templated until a release is cut.
@@ -868,6 +874,8 @@ At least one of `need` or `activate` must be provided.
 }
 ```
 
+By default, the best single matching bundle is activated. A second bundle is only activated when ambiguity is high (the top bundle's score is less than 2x the runner-up). If no bundle scores well, a fallback mode activates up to 3 individual tools by keyword match.
+
 ---
 
 ### `execute_tool` -- Tool Proxy
@@ -894,7 +902,10 @@ Fallback for calling tools that have not yet been activated via `discover_tools`
 
 ```json
 {
-  "proxy_warning": "Tool 'context' was executed via proxy. Activate it with discover_tools for native access.",
+  "proxy_warning": {
+    "tool_not_activated": true,
+    "message": "Tool 'context' is not yet activated. Consider calling discover_tools first for native tool access."
+  },
   "result": { "...tool output..." }
 }
 ```
@@ -1289,6 +1300,8 @@ context-mcp automatically protects against context window overflow from large to
 ```
 
 The output store holds up to 50 entries with a 10-minute TTL. Entries are evicted oldest-first when capacity is reached.
+
+Tools like `read_symbol` try to stay safe via bounded defaults and automatic downgrading, so most responses never reach the sandbox threshold. The output sandbox is the overflow safety net for any tool that still produces an oversized response despite per-tool guardrails.
 
 ---
 
