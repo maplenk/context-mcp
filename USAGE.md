@@ -1,6 +1,6 @@
 # context-mcp User Guide
 
-A local-first MCP daemon that indexes your codebase and gives LLM agents surgical, context-aware code retrieval. Provides 17 tools, 5 prompt templates, and 4 resources.
+A local-first MCP daemon that indexes your codebase and gives LLM agents surgical, context-aware code retrieval. Provides 20 tools, 5 prompt templates, and 4 resources.
 
 ---
 
@@ -29,6 +29,9 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
   - [assemble_context](#assemble_context--token-budgeted-context-assembly)
   - [checkpoint_context](#checkpoint_context--create-index-checkpoint)
   - [read_delta](#read_delta--compare-against-checkpoint)
+  - [discover_tools](#discover_tools--bundle-driven-tool-discovery)
+  - [execute_tool](#execute_tool--tool-proxy)
+  - [retrieve_output](#retrieve_output--paginated-output-retrieval)
 - [MCP Prompts](#mcp-prompts)
 - [MCP Resources](#mcp-resources)
 - [Connecting to Claude Desktop](#connecting-to-claude-desktop)
@@ -36,6 +39,9 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
 - [Connecting to Codex](#connecting-to-codex)
 - [Manual Smoke Tests](#manual-smoke-tests)
 - [Configuration](#configuration)
+- [Compact Output Mode](#compact-output-mode)
+- [Output Sandbox](#output-sandbox)
+- [Minimal Profile](#minimal-profile)
 - [How Indexing Works](#how-indexing-works)
 - [Supported Languages](#supported-languages)
 
@@ -265,6 +271,7 @@ Discovers relevant code symbols using multi-signal ranked search. Combines lexic
 | `mode` | string | no | `"search"` | `"search"` for hybrid search, `"architecture"` for community detection |
 | `max_per_file` | integer | no | 3 | Maximum results per unique file path |
 | `active_files` | string[] | no | -- | File paths the developer is currently editing for PPR personalization |
+| `compact` | boolean | no | false | Strip verbose fields (Reason, WhyNow, NextTool, NextArgs) for smaller output |
 
 **Search mode example:**
 
@@ -314,6 +321,7 @@ Traces all downstream dependents of a symbol via BFS graph traversal and classif
 |-----------|------|----------|---------|-------------|
 | `symbol_id` | string | yes | -- | Symbol name or hash ID |
 | `depth` | integer | no | 5 | Max BFS traversal depth |
+| `compact` | boolean | no | false | Strip verbose fields for smaller output |
 
 **Example:**
 
@@ -641,6 +649,7 @@ Detects symbols that have changed since a given git ref. Useful for understandin
 |-----------|------|----------|---------|-------------|
 | `since` | string | yes | -- | Git ref to compare against (e.g. `"HEAD~5"`, `"main"`, a commit SHA) |
 | `path` | string | no | -- | Optional path filter to restrict detection scope |
+| `compact` | boolean | no | false | Strip verbose fields for smaller output |
 
 **Example:**
 
@@ -662,6 +671,7 @@ Returns a comprehensive architecture overview including community clusters, entr
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `limit` | integer | no | 10 | Maximum number of items per category |
+| `compact` | boolean | no | false | Strip verbose fields for smaller output |
 
 **Example:**
 
@@ -684,6 +694,7 @@ Explores the codebase by searching for a symbol with optional dependency analysi
 | `symbol` | string | yes | -- | Symbol name to search for |
 | `include_deps` | boolean | no | false | Whether to include dependency analysis |
 | `depth` | integer | no | 2 | Dependency traversal depth (when `include_deps` is true) |
+| `compact` | boolean | no | false | Strip verbose fields for smaller output |
 
 **Example:**
 
@@ -706,6 +717,7 @@ Provides deep understanding of a symbol using 3-tier resolution (exact match, fu
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `symbol` | string | yes | -- | Symbol name to analyze |
+| `compact` | boolean | no | false | Strip verbose fields for smaller output |
 
 **Example:**
 
@@ -731,6 +743,7 @@ Returns ranked code snippets fitted within a token budget. Use when you need to 
 | `active_files` | string[] | no | -- | File paths currently being edited |
 | `max_per_file` | integer | no | 2 | Maximum results per file |
 | `include_neighbors` | boolean | no | false | Include callers/callees of top results |
+| `compact` | boolean | no | false | Strip verbose fields for smaller output |
 
 **Example:**
 
@@ -788,6 +801,126 @@ Compares the current index state against a named checkpoint. Shows added, modifi
 
 ---
 
+### `discover_tools` -- Bundle-Driven Tool Discovery
+
+Start here in minimal profile mode. Describes your task and activates the most relevant tool bundle. After activation, new tools appear in your tool list -- call them directly.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `need` | string | no | -- | Describe your task and the most relevant tool bundle will be activated |
+| `activate` | string[] | no | -- | Specific tool names to activate directly (bypasses bundle matching, max 5) |
+
+At least one of `need` or `activate` must be provided.
+
+**Bundles:**
+
+| Bundle | Tools | Keywords |
+|--------|-------|----------|
+| `inspection` | context, read_symbol, list_file_symbols, understand | search, find, read, code, symbol, inspect |
+| `change_analysis` | impact, detect_changes, trace_call_path | impact, blast, risk, change, trace, diff |
+| `architecture` | get_architecture_summary, explore, get_key_symbols | architecture, structure, modules, overview, navigate |
+| `assembly` | assemble_context, checkpoint_context, read_delta, search_code | assemble, budget, token, checkpoint, delta, regex |
+
+**Example (bundle discovery):**
+
+```json
+{
+  "need": "I want to understand the impact of changing a function"
+}
+```
+
+**Example (direct activation):**
+
+```json
+{
+  "activate": ["context", "impact", "understand"]
+}
+```
+
+**Response:**
+
+```json
+{
+  "bundle": "change_analysis",
+  "reason": "Matched keywords: impact, change",
+  "activated": [
+    {"name": "impact", "description": "Analyzes the blast radius..."},
+    {"name": "detect_changes", "description": "Detects changed symbols..."},
+    {"name": "trace_call_path", "description": "Traces call paths..."}
+  ],
+  "activated_count": 3,
+  "activation_capped": false,
+  "pending": ["context", "read_symbol", "..."]
+}
+```
+
+---
+
+### `execute_tool` -- Tool Proxy
+
+Fallback for calling tools that have not yet been activated via `discover_tools`. Prefer activating tools first for native tool access. If the requested tool is not activated, the response includes a `proxy_warning`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `name` | string | yes | -- | Name of the tool to execute |
+| `args` | object | yes | -- | Tool arguments as a JSON object |
+
+**Example:**
+
+```json
+{
+  "name": "context",
+  "args": {"query": "authentication", "limit": 5}
+}
+```
+
+---
+
+### `retrieve_output` -- Paginated Output Retrieval
+
+Retrieves paginated content from a sandboxed (oversized) tool response. When any tool produces a response larger than 16 KB, the response is automatically stored and a short preview with a handle is returned instead. Use this tool with that handle to page through the full content.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `handle` | string | yes | -- | Handle from a sandboxed response |
+| `offset` | integer | no | 0 | Byte offset to start reading from |
+| `limit` | integer | no | 4000 | Maximum bytes to return (max: 16000) |
+
+**Example:**
+
+```json
+{
+  "handle": "a1b2c3d4e5f6g7h8",
+  "offset": 0,
+  "limit": 4000
+}
+```
+
+**Response:**
+
+```json
+{
+  "content": "...first 4000 bytes...",
+  "total_size": 24576,
+  "returned_bytes": 4000,
+  "remaining_bytes": 20576,
+  "has_more": true,
+  "next_args": {
+    "handle": "a1b2c3d4e5f6g7h8",
+    "offset": 4000,
+    "limit": 4000
+  }
+}
+```
+
+---
+
 ## MCP Prompts
 
 context-mcp provides 5 prompt templates that orchestrate multi-tool workflows:
@@ -832,7 +965,7 @@ Add context-mcp to your Claude Desktop MCP configuration:
 }
 ```
 
-Restart Claude Desktop after editing the config. All 17 tools will appear in Claude's tool list.
+Restart Claude Desktop after editing the config. Tools will appear based on your selected profile (default: core with 7+1 tools).
 
 ### Connecting to Claude Code
 
@@ -969,7 +1102,7 @@ All options are set via CLI flags:
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
 | `-embedding-dim` | `384` | Embedding vector dimension. TF-IDF defaults to 384; CodeRankEmbed uses 768 |
 | `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
-| `-profile` | `core` | Tool profile for MCP mode: `core` (7 tools), `extended` (14), `full` (17) |
+| `-profile` | `core` | Tool profile for MCP mode: `minimal` (3+discover), `core` (7), `extended` (14), `full` (17) |
 | `-ollama-endpoint` | (empty) | Ollama API endpoint (e.g., `http://localhost:11434`) |
 | `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |
 | `-llamacpp-endpoint` | (empty) | llama.cpp server endpoint (e.g., `http://localhost:8080`) |
@@ -1081,6 +1214,82 @@ All signals are normalized to [0, 1] before weighting. FTS5 queries are enhanced
 | JavaScript | Tree-sitter + regex | High -- tree-sitter for declarations, regex for call extraction |
 | TypeScript | Tree-sitter + regex | High -- tree-sitter for declarations, regex for call extraction |
 | PHP | Tree-sitter + regex | High -- tree-sitter for declarations, regex for call extraction |
+
+---
+
+## Compact Output Mode
+
+Seven analysis tools support a `compact: true` parameter that strips verbose guidance fields from each result item:
+
+- **Stripped fields:** `Reason`, `WhyNow`, `NextTool`, `NextArgs`
+- **Kept fields:** `Rank`, `Name`, `FilePath`, `ID`, `Score`
+
+This reduces output tokens by 50-70%, useful for agents that only need symbol IDs and scores for further tool calls.
+
+**Supported tools:** `context`, `impact`, `understand`, `explore`, `detect_changes`, `get_architecture_summary`, `assemble_context`
+
+**Example:**
+
+```json
+{"query": "payment processing", "compact": true}
+```
+
+---
+
+## Output Sandbox
+
+context-mcp automatically protects against context window overflow from large tool responses using tiered thresholds:
+
+| Response Size | Behavior |
+|--------------|----------|
+| < 8 KB | Normal response (no modification) |
+| 8-16 KB | Normal response with `size_warning` field added |
+| > 16 KB | Response sandboxed: preview + handle returned, full content retrievable via `retrieve_output` |
+
+**Sandboxed response envelope:**
+
+```json
+{
+  "sandboxed": true,
+  "tool": "context",
+  "handle": "a1b2c3d4e5f6g7h8",
+  "total_size": 24576,
+  "preview": "...first 200 chars...",
+  "recovery_hint": "Call retrieve_output with this handle"
+}
+```
+
+The output store holds up to 64 entries with a 10-minute TTL. Entries are evicted oldest-first when capacity is reached.
+
+---
+
+## Minimal Profile
+
+The `minimal` profile starts with only 3 SDK-registered tools, keeping the initial tool schema under 35% of the core profile's size:
+
+| Tool | Purpose |
+|------|---------|
+| `discover_tools` | Activate tool bundles by describing your task |
+| `execute_tool` | Proxy fallback for non-activated tools |
+| `health` | System health status |
+
+Plus `retrieve_output` which is always registered as infrastructure.
+
+**Usage:**
+
+```bash
+./context-mcp -repo /path/to/project -profile minimal
+```
+
+**Workflow:**
+
+1. Agent starts with `discover_tools`, `execute_tool`, `health`, and `retrieve_output`
+2. Agent calls `discover_tools({"need": "I want to search for code"})` -> `inspection` bundle activated
+3. `context`, `read_symbol`, `list_file_symbols`, `understand` appear in tool list
+4. Agent uses activated tools directly (no proxy needed)
+5. Agent can activate more bundles as needed (max 5 tools per call)
+
+All 17 standard tools remain available -- they are built but deferred until activated. The `execute_tool` proxy can call any tool even before activation, but includes a `proxy_warning` for non-activated tools.
 
 ---
 

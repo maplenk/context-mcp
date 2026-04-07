@@ -22,7 +22,7 @@ LLM coding agents waste thousands of tokens brute-forcing through grep and glob 
 
 - **Single binary, zero cloud dependencies** -- SQLite + FTS5 + sqlite-vec, runs entirely local
 - **Hybrid ranked search** -- Personalized PageRank + BM25 + Betweenness Centrality + Semantic Similarity
-- **17 MCP tools, 5 prompts, 4 resources** -- from symbol lookup to blast radius analysis to token-budgeted context assembly
+- **20 MCP tools, 5 prompts, 4 resources** -- from symbol lookup to blast radius analysis to token-budgeted context assembly
 - **Sub-120ms query latency** -- tested on real-world 18K+ node codebases
 - **Multi-language** -- Go (native go/ast), JavaScript, TypeScript, PHP (tree-sitter)
 - **Incremental indexing** -- filesystem watching with .gitignore-aware hot-reload
@@ -180,11 +180,36 @@ Run your own benchmarks with `./benchmarks/run_mcp_usage.sh`.
 | | `checkpoint_context` | Create named index checkpoint |
 | | `read_delta` | Compare current state against checkpoint |
 | | `assemble_context` | Token-budgeted context assembly |
+| **Discovery & Proxy** | `discover_tools` | Bundle-driven tool activation for minimal profile |
+| | `execute_tool` | Proxy for calling tools before activation |
 | **System** | `query` | Read-only SQL against the structural database |
 | | `index` | Trigger full or targeted re-index |
 | | `health` | System health: uptime, node/edge counts, memory |
+| | `retrieve_output` | Paginated retrieval of sandboxed oversized responses |
 
 Also includes **5 prompt templates** (review\_changes, trace\_impact, prepare\_fix\_context, onboard\_repo, collect\_minimal\_context) and **4 resources** (repo\_summary, index\_stats, changed\_symbols, hot\_paths). Full parameter documentation in [USAGE.md](USAGE.md).
+
+## Compact Output
+
+Seven tools (`context`, `impact`, `understand`, `explore`, `detect_changes`, `get_architecture_summary`, `assemble_context`) accept a `compact: true` parameter that strips verbose fields (Reason, WhyNow, NextTool, NextArgs) from each result. This reduces output tokens by 50-70% for agents that only need IDs and scores.
+
+```json
+{"query": "payment processing", "compact": true}
+```
+
+## Output Sandbox
+
+Responses exceeding 16 KB are automatically sandboxed: the agent receives a short preview with a `handle`, then calls `retrieve_output` to page through the full content in 4 KB chunks. Responses between 8-16 KB include a size warning. This prevents context window overflow from unexpectedly large results.
+
+## Minimal Profile
+
+Start with just 3 tools (`discover_tools`, `execute_tool`, `health`) and activate more on demand:
+
+```bash
+./context-mcp -repo /path/to/project -profile minimal
+```
+
+The agent calls `discover_tools` with a task description, and the best-matching tool bundle is activated automatically. Four bundles are available: **inspection** (search/read/understand), **change_analysis** (impact/trace/detect), **architecture** (structure/modules/key symbols), and **assembly** (context/checkpoint/delta/search).
 
 ## Language Support
 
@@ -214,7 +239,7 @@ Python, Rust, and Java parsers are on the roadmap.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-repo` | `.` | Repository root path |
-| `-profile` | `core` | Tool profile: `core` (7), `extended` (14), `full` (17) |
+| `-profile` | `core` | Tool profile: `minimal` (3+discover), `core` (7), `extended` (14), `full` (17) |
 | `-workers` | `4` | Parallel parsing workers |
 | `-onnx-model` | (empty) | ONNX model directory for neural embeddings |
 | `-embedding-dim` | `384` | Vector dimension (384 TF-IDF, 768 ONNX) |
