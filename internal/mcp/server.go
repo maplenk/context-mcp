@@ -178,17 +178,24 @@ func (s *Server) MCPServer() *server.MCPServer {
 }
 
 // Serve starts the MCP server using the SDK's protocol handler.
-// It blocks until the transport is closed (stdin EOF) or an error occurs.
-func (s *Server) Serve() error {
+// It blocks until the context is cancelled, the transport is closed
+// (stdin EOF), or an error occurs.  Passing a cancellable context
+// allows the caller's signal handler to trigger a clean shutdown
+// without relying on the library's internal signal handling.
+func (s *Server) Serve(ctx context.Context) error {
 	// Route logging to stderr to avoid corrupting the JSON-RPC stream.
 	log.SetOutput(os.Stderr)
 
+	stdioServer := server.NewStdioServer(s.mcpServer)
+
 	if s.input != nil && s.output != nil {
 		// Testing mode: use StdioServer with custom I/O
-		stdioServer := server.NewStdioServer(s.mcpServer)
-		return stdioServer.Listen(context.Background(), s.input, s.output)
+		return stdioServer.Listen(ctx, s.input, s.output)
 	}
 
-	// Production mode: serve on stdin/stdout
-	return server.ServeStdio(s.mcpServer)
+	// Production mode: serve on stdin/stdout.
+	// We use Listen directly instead of ServeStdio so the caller-provided
+	// context controls shutdown (ServeStdio installs its own redundant
+	// signal handler).
+	return stdioServer.Listen(ctx, os.Stdin, os.Stdout)
 }

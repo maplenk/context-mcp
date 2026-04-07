@@ -49,7 +49,7 @@ func TestAnnotations_ContextToolHasMeta(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- server.Serve()
+		done <- server.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -169,7 +169,7 @@ func TestAnnotations_ReadOnlyHint(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- server.Serve()
+		done <- server.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)

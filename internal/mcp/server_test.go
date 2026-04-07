@@ -273,7 +273,7 @@ func TestSDKServe_Initialize(t *testing.T) {
 	// Start server in goroutine
 	done := make(chan error, 1)
 	go func() {
-		done <- server.Serve()
+		done <- server.Serve(context.Background())
 	}()
 
 	// Wait for response
@@ -344,7 +344,7 @@ func TestSDKServe_ToolsList(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- server.Serve()
+		done <- server.Serve(context.Background())
 	}()
 
 	// We expect at least 2 responses (initialize + tools/list)
@@ -435,7 +435,7 @@ func TestSDKServe_ToolsCall(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- server.Serve()
+		done <- server.Serve(context.Background())
 	}()
 
 	// Wait for 2 responses (initialize + tools/call)

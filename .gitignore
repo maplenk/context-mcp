@@ -1,5 +1,5 @@
 # Binaries
-context-mcp
+/context-mcp
 *.exe
 *.dll
 *.so

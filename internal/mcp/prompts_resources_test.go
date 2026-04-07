@@ -4,6 +4,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -41,7 +42,7 @@ func TestPromptsRegistered(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -127,7 +128,7 @@ func TestResourcesRegistered(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -214,7 +215,7 @@ func TestPromptGetReviewChanges(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -287,7 +288,7 @@ func TestPromptGetOnboardRepo(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -366,7 +367,7 @@ func TestPromptGetCollectMinimalContext(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -446,7 +447,7 @@ func TestResourceReadRepoSummary(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -528,7 +529,7 @@ func TestResourceReadHotPaths(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
@@ -612,7 +613,7 @@ func TestResourceReadIndexStats(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve()
+		done <- srv.Serve(context.Background())
 	}()
 
 	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
