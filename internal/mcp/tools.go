@@ -1788,6 +1788,9 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		if strings.Contains(p.Path, "..") {
 			return nil, fmt.Errorf("path traversal detected in path filter")
 		}
+		if strings.Contains(p.Path, ":") {
+			return nil, fmt.Errorf("path contains invalid character ':'")
+		}
 		// M14: Reject absolute paths to prevent accessing files outside the repo
 		if filepath.IsAbs(p.Path) {
 			return nil, fmt.Errorf("absolute paths not allowed in path filter: %s", p.Path)
