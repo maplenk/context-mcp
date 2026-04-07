@@ -528,6 +528,9 @@ func registerContextTool(s *Server, deps ToolDeps) {
 // ----- Tool 2: impact -----
 
 func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
+	if p.SymbolID == "" {
+		return nil, fmt.Errorf("'symbol_id' is required")
+	}
 	if p.Depth == 0 {
 		p.Depth = 5
 	}
@@ -887,7 +890,7 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 	response["truncated"] = truncated || selectedStart != inspection.SymbolStartLine || selectedEnd != inspection.SymbolEndLine
 	if p.StartLine != 0 || p.EndLine != 0 {
 		response["selected_section"] = "explicit_range"
-	} else if modeUsed == "section" || (modeUsed == "bounded" && response["truncated"].(bool)) {
+	} else if modeUsed == "section" || (modeUsed == "bounded" && func() bool { v, ok := response["truncated"].(bool); return ok && v }()) {
 		section := p.Section
 		if section == "" {
 			section = "auto"
@@ -1582,11 +1585,19 @@ func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
 		Content string `json:"content"`
 	}
 
+	// Global timeout to prevent unbounded scanning across many files
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	var matches []codeMatch
 	var scanWarnings []string
 	filesScanned := 0
 	filesWithErrors := 0
 	for _, relPath := range filePaths {
+		if ctx.Err() != nil {
+			scanWarnings = append(scanWarnings, "global 60s timeout reached, results may be incomplete")
+			break
+		}
 		// Apply file filter if specified (try full path first, fallback to basename)
 		if p.FileFilter != "" {
 			matched, err := filepath.Match(p.FileFilter, relPath)
@@ -3016,6 +3027,20 @@ func readNodeSource(repoRoot string, node types.ASTNode) string {
 	const maxFileSize = 5 * 1024 * 1024 // 5MB
 
 	filePath := filepath.Join(repoRoot, node.FilePath)
+
+	// Validate path stays within repo root to prevent path traversal
+	realRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return ""
+	}
+	realPath, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		return ""
+	}
+	if realPath != realRoot && !strings.HasPrefix(realPath, realRoot+string(filepath.Separator)) {
+		return ""
+	}
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return ""
@@ -3050,6 +3075,9 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 	// Apply defaults
 	if p.BudgetTokens == 0 {
 		p.BudgetTokens = 4000
+	}
+	if p.BudgetTokens > 100000 {
+		p.BudgetTokens = 100000
 	}
 	if p.Mode == "" {
 		p.Mode = "snippets"

@@ -265,6 +265,20 @@ func (cs *CheckpointStore) ComputeDelta(checkpointName, repoRoot string, store *
 // Returns "" on any error (file missing, out-of-range, >5MB files skipped).
 func hashNodeSource(repoRoot string, node types.ASTNode) string {
 	filePath := filepath.Join(repoRoot, node.FilePath)
+
+	// Validate path stays within repo root to prevent path traversal
+	realRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return ""
+	}
+	realPath, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		return ""
+	}
+	if realPath != realRoot && !strings.HasPrefix(realPath, realRoot+string(filepath.Separator)) {
+		return ""
+	}
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return ""

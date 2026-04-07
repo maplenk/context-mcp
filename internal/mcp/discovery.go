@@ -296,8 +296,23 @@ type ExecuteToolParams struct {
 	Args map[string]any `json:"args" jsonschema:"required,description=Tool arguments as a JSON object"`
 }
 
+// isToolAllowedInProfile returns true if a tool can be executed via execute_tool.
+// A tool is allowed if it belongs to the current profile OR has been dynamically
+// activated via discover_tools.
+func isToolAllowedInProfile(toolName, profile string, s *Server) bool {
+	if isToolInProfile(toolName, profile) {
+		return true
+	}
+	return s.IsActivated(toolName)
+}
+
 // executeToolHandler proxies tool calls through the CLI handler system.
-func executeToolHandler(s *Server, p ExecuteToolParams) (interface{}, error) {
+func executeToolHandler(s *Server, p ExecuteToolParams, profile string) (interface{}, error) {
+	// Check if the tool is allowed in the current profile to prevent bypass
+	if !isToolAllowedInProfile(p.Name, profile, s) {
+		return nil, fmt.Errorf("tool %q is not available in the %q profile; use discover_tools to activate bundles", p.Name, profile)
+	}
+
 	handler, ok := s.GetHandler(p.Name)
 	if !ok {
 		return nil, fmt.Errorf("tool %q not found", p.Name)
@@ -392,7 +407,7 @@ func registerExecuteToolTool(s *Server, deps ToolDeps) {
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid parameters: %w", err)
 		}
-		return executeToolHandler(s, p)
+		return executeToolHandler(s, p, deps.Profile)
 	}
 
 	s.RegisterTool(ToolDefinition{
@@ -424,7 +439,7 @@ func registerExecuteToolTool(s *Server, deps ToolDeps) {
 		if err := req.BindArguments(&p); err != nil {
 			return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
 		}
-		result, err := executeToolHandler(s, p)
+		result, err := executeToolHandler(s, p, deps.Profile)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
