@@ -47,6 +47,9 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
 # Build
 go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 
+# With ONNX neural embeddings (recommended for best search quality)
+go build -tags "fts5,onnx" -o context-mcp ./cmd/context-mcp
+
 # Index and query your repo via CLI
 ./context-mcp -repo /path/to/your/project cli context '{"query": "authentication"}'
 
@@ -69,6 +72,9 @@ go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 git clone https://github.com/maplenk/context-mcp.git
 cd context-mcp
 go build -tags "fts5" -o context-mcp ./cmd/context-mcp
+
+# With ONNX neural embeddings (recommended for best search quality)
+go build -tags "fts5,onnx" -o context-mcp ./cmd/context-mcp
 ```
 
 The `-tags "fts5"` flag is **required** -- it enables SQLite full-text search.
@@ -504,7 +510,7 @@ SELECT project, source_hash FROM project_summaries
 | `nodes` | AST nodes (id, file_path, symbol_name, node_type, start_byte, end_byte, content_sum) |
 | `edges` | Relationships between nodes (source_id, target_id, edge_type) |
 | `nodes_fts` | FTS5 full-text index on symbol_name and content_sum |
-| `node_embeddings` | Vector embeddings for semantic search (384-dim) |
+| `node_embeddings` | Vector embeddings for semantic search (384-dim TF-IDF or 768-dim ONNX) |
 | `node_scores` | Precomputed graph metrics (pagerank, betweenness) |
 | `project_summaries` | Architecture decision records and design docs |
 
@@ -838,6 +844,8 @@ Claude Code supports `user`, `local`, and `project` scopes. The helper defaults 
 ./context-mcp install --client claude-code --repo /absolute/path/to/your/project --profile extended
 ```
 
+> **Note:** The `install` helper only passes `--repo` and `--profile` flags to the binary. For ONNX-enabled installs, you must manually create `.mcp/config.json` with the full args including `-onnx-model` and `-onnx-lib`.
+
 **Helper install (local scope):**
 
 ```bash
@@ -852,6 +860,24 @@ Claude Code supports `user`, `local`, and `project` scopes. The helper defaults 
     "context-mcp": {
       "command": "/absolute/path/to/context-mcp",
       "args": ["-repo", "/absolute/path/to/your/project", "-profile", "extended"]
+    }
+  }
+}
+```
+
+**Project-scoped stdio config with ONNX embeddings (`.mcp/config.json`):**
+
+```json
+{
+  "mcpServers": {
+    "context-mcp": {
+      "command": "/absolute/path/to/context-mcp",
+      "args": [
+        "-repo", "/absolute/path/to/your/project",
+        "-profile", "extended",
+        "-onnx-model", "/absolute/path/to/models/CodeRankEmbed-onnx-int8",
+        "-onnx-lib", "/path/to/libonnxruntime.dylib"
+      ]
     }
   }
 }
@@ -1002,6 +1028,22 @@ llama-server -m nomic-embed-code-q8_0.gguf --embedding --port 8080
 llama.cpp supports native batch embedding and GGUF quantized models (smaller than ONNX).
 
 **Important:** The `-embedding-dim` flag must match the model's output dimension. Changing dimensions requires re-indexing.
+
+### Switching Embedding Backends
+
+When switching between embedding backends (e.g., TF-IDF to ONNX), the vector dimensions change (384 vs 768). The sqlite-vec table dimensions are set at creation time and cannot be altered.
+
+**You must delete the old index and re-index:**
+
+```bash
+rm -f /path/to/repo/.context-mcp/index.db*
+./context-mcp -repo /path/to/repo \
+  -onnx-model /path/to/models/CodeRankEmbed-onnx-int8 \
+  -onnx-lib /path/to/libonnxruntime.dylib \
+  cli index '{}'
+```
+
+Without this step, reindexing will silently fail with "Dimension mismatch" errors on every symbol.
 
 ---
 
