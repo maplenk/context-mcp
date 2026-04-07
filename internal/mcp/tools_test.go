@@ -750,6 +750,8 @@ func TestAllToolsRegistered(t *testing.T) {
 		"assemble_context",
 		"checkpoint_context",
 		"read_delta",
+		"discover_tools",
+		"execute_tool",
 	}
 
 	tools := server.GetTools()
