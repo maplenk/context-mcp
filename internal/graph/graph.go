@@ -148,6 +148,7 @@ func (g *GraphEngine) BlastRadius(nodeHashID string, maxDepth int) []string {
 	}
 
 	// BFS traversing incoming edges (who depends on this node)
+	const maxVisited = 10000
 	var affected []string
 	visited := map[int64]bool{startID: true}
 	currentLevel := []int64{startID}
@@ -167,6 +168,12 @@ func (g *GraphEngine) BlastRadius(nodeHashID string, maxDepth int) []string {
 					}
 				}
 			}
+			if len(visited) >= maxVisited {
+				break
+			}
+		}
+		if len(visited) >= maxVisited {
+			break
 		}
 		currentLevel = nextLevel
 	}
