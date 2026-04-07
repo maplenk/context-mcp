@@ -23,8 +23,8 @@ import (
 	"github.com/maplenk/context-mcp/internal/types"
 )
 
-// Version is the package-level version string, referenced by server.go.
-const Version = "0.3.0"
+// Version is set by ldflags during release builds.
+var Version = "dev"
 
 // ToolDeps holds dependencies needed by MCP tools
 type ToolDeps struct {

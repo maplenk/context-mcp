@@ -51,6 +51,9 @@ AGENTS.md
 docs/*
 !docs/images/
 
+# GoReleaser output
+dist/
+
 # Downloaded models
 models/
 *.tar.gz
