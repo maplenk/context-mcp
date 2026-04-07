@@ -137,7 +137,7 @@ func ParseFlags() (*Config, error) {
 	fs.IntVar(&cfg.GitPerFileCommitCap, "git-per-file-cap", cfg.GitPerFileCommitCap, "Maximum commits per file")
 	fs.IntVar(&cfg.GitMaxMessageBytes, "git-max-message", cfg.GitMaxMessageBytes, "Maximum bytes per commit message")
 	fs.IntVar(&cfg.GitMaxIntentBytes, "git-max-intent", cfg.GitMaxIntentBytes, "Maximum bytes per file intent summary")
-	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (7 tools), extended (14 tools), or full (all 17)")
+	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (7), extended (14), full (all 17), or minimal (3 + discover)")
 	fs.StringVar(&cfg.OllamaEndpoint, "ollama-endpoint", cfg.OllamaEndpoint, "Ollama API endpoint (e.g., http://localhost:11434)")
 	fs.StringVar(&cfg.OllamaModel, "ollama-model", cfg.OllamaModel, "Ollama embedding model name")
 	fs.StringVar(&cfg.LlamaCppEndpoint, "llamacpp-endpoint", cfg.LlamaCppEndpoint, "llama.cpp server endpoint (e.g., http://localhost:8080)")
@@ -190,10 +190,10 @@ func ParseFlags() (*Config, error) {
 
 	// Validate profile
 	switch cfg.Profile {
-	case "core", "extended", "full":
+	case "core", "extended", "full", "minimal":
 		// valid
 	default:
-		return nil, fmt.Errorf("invalid profile %q: must be core, extended, or full", cfg.Profile)
+		return nil, fmt.Errorf("invalid profile %q: must be core, extended, full, or minimal", cfg.Profile)
 	}
 
 	// Resolve absolute paths

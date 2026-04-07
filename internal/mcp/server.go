@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -24,13 +25,21 @@ type ToolDefinition struct {
 // Retained for CLI compatibility (GetHandler / runCLI).
 type ToolHandler func(params json.RawMessage) (interface{}, error)
 
+// PendingSDKTool holds a pre-built SDK tool ready for dynamic activation.
+type PendingSDKTool struct {
+	Tool    mcp.Tool
+	Handler server.ToolHandlerFunc
+}
+
 // Server wraps the mark3labs/mcp-go SDK server while preserving
 // the GetHandler / GetTools interface used by CLI mode.
 type Server struct {
-	mcpServer *server.MCPServer
-	tools     []ToolDefinition
-	handlers  map[string]ToolHandler
-	mu        sync.Mutex
+	mcpServer    *server.MCPServer
+	tools        []ToolDefinition
+	handlers     map[string]ToolHandler
+	mu           sync.Mutex
+	pendingTools map[string]*PendingSDKTool // deferred tools awaiting activation
+	activated    map[string]bool            // tracks which tools have been activated
 
 	// For testing with custom I/O (nil means use stdio)
 	input  io.Reader
@@ -45,7 +54,9 @@ func NewServer() *Server {
 			server.WithResourceCapabilities(true, false),
 			server.WithPromptCapabilities(true),
 		),
-		handlers: make(map[string]ToolHandler),
+		handlers:     make(map[string]ToolHandler),
+		pendingTools: make(map[string]*PendingSDKTool),
+		activated:    make(map[string]bool),
 	}
 }
 
@@ -57,9 +68,11 @@ func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 			server.WithResourceCapabilities(true, false),
 			server.WithPromptCapabilities(true),
 		),
-		handlers: make(map[string]ToolHandler),
-		input:    input,
-		output:   output,
+		handlers:     make(map[string]ToolHandler),
+		pendingTools: make(map[string]*PendingSDKTool),
+		activated:    make(map[string]bool),
+		input:        input,
+		output:       output,
 	}
 }
 
@@ -109,6 +122,50 @@ func (s *Server) GetTools() []ToolDefinition {
 	tools := make([]ToolDefinition, len(s.tools))
 	copy(tools, s.tools)
 	return tools
+}
+
+// StorePendingTool saves an SDK tool for later activation.
+func (s *Server) StorePendingTool(name string, tool mcp.Tool, handler server.ToolHandlerFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingTools[name] = &PendingSDKTool{Tool: tool, Handler: handler}
+}
+
+// ActivateTool moves a tool from pending to active via mcpServer.AddTool().
+// Returns true if the tool was activated, false if not found or already active.
+func (s *Server) ActivateTool(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activated[name] {
+		return false
+	}
+	pt, ok := s.pendingTools[name]
+	if !ok {
+		return false
+	}
+	s.mcpServer.AddTool(pt.Tool, pt.Handler)
+	s.activated[name] = true
+	delete(s.pendingTools, name)
+	return true
+}
+
+// ListPending returns names of tools that haven't been activated yet.
+func (s *Server) ListPending() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.pendingTools))
+	for name := range s.pendingTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// IsActivated returns true if a tool has been activated (or was initially registered).
+func (s *Server) IsActivated(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activated[name]
 }
 
 // MCPServer returns the underlying mark3labs MCPServer for custom transport usage
