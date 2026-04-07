@@ -1,6 +1,6 @@
 # qb-context — Project Knowledge Base
 
-> Living document for team reference. Last updated: 2026-04-07 (added competitive landscape, token reduction strategies, gaps/opportunities, benchmark data, and key references).
+> Living document for team reference. Last updated: 2026-04-07 (added direct-install release packaging, registry manifest docs, and release workflow notes).
 
 ---
 
@@ -13,6 +13,7 @@
 - Memory: <2GB active, <200MB idle
 - Zero cloud dependencies — fully local
 - Target repos: Laravel/Node monorepos (~1-2K files), React monorepos (~1K files), Go microservices (~300 files)
+- Direct-install packaging is currently limited to macOS Apple Silicon (`darwin/arm64`)
 
 ### Reference Project
 - **C predecessor**: `/Users/naman/Documents/QBApps/codebase-memory-mcp/` — 16 tools, Louvain communities, betweenness centrality, architecture analysis, ADR support, ranked search (BM25 + PPR + betweenness + HITS)
@@ -25,6 +26,7 @@
 ### Project Structure
 ```
 qb-context/
+├── .github/workflows/release.yml    — Tagged GitHub Release workflow for packaged binaries
 ├── cmd/qb-context/main.go         — CLI entry + MCP daemon + CLI tool subcommand + indexPath + ONNX init + Cold Start
 ├── internal/
 │   ├── config/config.go            — Config with CLI flags (incl. --onnx-model, --onnx-lib, --embedding-dim, --cold-start, --git-*)
@@ -64,7 +66,9 @@ qb-context/
 │   ├── benchmark_grading_test.go   — Automated benchmark grading (15 queries, B+C threshold guard)
 │   └── param_sweep_test.go         — Parameter sweep harness (Phases 1-4, ~130 configs, SWEEP=1 gated)
 ├── .golangci.yml                   — Linter configuration
+├── .goreleaser.yaml                — Tagged GitHub Release packaging for `context-mcp-darwin-arm64.tar.gz`
 ├── go.mod / go.sum
+├── server.json                     — MCP registry manifest template for release-based installs
 └── knowledge.md                    — This file
 ```
 
@@ -537,6 +541,19 @@ qb-context/
 - **Output sandbox** (output.go): OutputStore with 50-entry/10min TTL. toCallToolResultWithName: logs at 8KB, auto-sandboxes at 16KB with preview + handle + recovery_hint. retrieve_output: byte-range paginated retrieval (4KB default, 16KB max).
 - **DA review #14**: 2 CRITICAL (globalOutputStore eliminated → pass through call chain; rand.Read error handling), 3 HIGH (AddSDKTool tracks activation; append aliasing fix; need made optional in discover_tools), 2 LOW (ActivationCapped fix; Retrieve nil→empty slice).
 
+### Phase 15: Direct Install Release Packaging (working tree)
+
+| # | Hash | Description | Agent | Status |
+|---|------|-------------|-------|--------|
+| 57 | `working tree` | Add GitHub Release packaging, root `server.json`, and direct-install docs for packaged binaries | Orchestrator | Done |
+
+**Key changes:**
+- Added root `server.json` using MCP registry schema + `mcpb` package metadata for a `context-mcp-darwin-arm64.tar.gz` release artifact over stdio
+- Added `.goreleaser.yaml` to build a tagged macOS arm64 archive with `-tags "fts5"` and emit `context-mcp-checksums.txt`
+- Added `.github/workflows/release.yml` to publish tagged releases on `v*`, generate a checksum-resolved `server.json`, and upload that manifest to the GitHub Release
+- README and USAGE now distinguish release-based direct install from `install --client ...`, which still configures an already-available local binary
+- Current limitation: direct packaged installs cover macOS Apple Silicon only; Linux, Intel macOS, and Windows remain future work
+
 ### Test Coverage (13 packages, all passing — 300+ unit tests + 22 real-repo subtests)
 - `internal/types` — 12 tests (ID generation, enum values, null byte separator collision, hex format validation)
 - `internal/gitmeta` — 21 tests (non-git graceful degradation, normal/detached/dirty snapshots, commit history with depth caps, file history with per-file caps and path filtering, intent compaction with dedup/low-signal filtering/truncation, helpers)
@@ -845,6 +862,7 @@ qb-context --onnx-model /path/to/model --onnx-lib /path/to/libonnxruntime.dylib 
 ```
 
 ### Known Limitations
+- Direct-install release artifacts currently ship only for macOS Apple Silicon (`darwin/arm64`)
 - Tree-sitter JS/TS/PHP parsers extract symbol definitions via AST; call edges still use regex on node body text for reliability
 - INHERITS/IMPLEMENTS cross-file resolution via `TargetSymbol` works in `indexRepo()` (full index) but NOT in `indexPath()` or `processFileEvent()` (incremental) — incremental updates produce dangling edges until next full re-index
 - `symbolIndex` first-wins: duplicate class names across files (e.g., `User` model + `User` resource) resolve non-deterministically — would need FQN for disambiguation

@@ -42,6 +42,12 @@ go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 
 Prerequisites: Go 1.25+ with CGO enabled, a C compiler (gcc/clang).
 
+## Direct Install
+
+For release-based installs, use the checksum-resolved `server.json` asset attached to each tagged GitHub Release. The checked-in [`server.json`](server.json) file is the manifest template tracked in git and is resolved with the release checksum during publishing. The first packaged release target is macOS Apple Silicon (`darwin/arm64`) and installs the prebuilt `context-mcp` binary over stdio.
+
+The client-specific commands below are the local-binary path. They assume `context-mcp` is already present on disk, whether you built it yourself or downloaded it from a release artifact.
+
 ## Connect to Your Agent
 
 <details>

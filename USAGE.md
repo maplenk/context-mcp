@@ -8,6 +8,7 @@ A local-first MCP daemon that indexes your codebase and gives LLM agents surgica
 
 - [Quick Start](#quick-start)
 - [Installation](#installation)
+- [Direct Release Install](#direct-release-install)
 - [Running the Daemon](#running-the-daemon)
 - [Harness Commands](#harness-commands)
 - [CLI Mode](#cli-mode)
@@ -173,16 +174,22 @@ Send `SIGINT` (Ctrl+C) or `SIGTERM` for graceful shutdown.
 - Claude Code supports `user`, `local`, and `project` scopes
 - Codex helper install writes to `~/.codex/config.toml`; project-local `.codex/config.toml` remains a manual option
 
+### Direct Release Install
+
+The checked-in [`server.json`](server.json) manifest is the source template for release-based installs. Tagged GitHub Releases publish a prebuilt `context-mcp-darwin-arm64.tar.gz` artifact and a checksum-resolved `server.json` asset for agents that install from release metadata instead of a locally built binary. Use the release asset as the install manifest; the repo copy is intentionally templated until a release is cut.
+
+`install --client ...` remains the local-binary helper path. It writes client config that points at a `context-mcp` binary you already have on disk.
+
 ### Examples
 
 ```bash
-# Claude Code stdio install
+# Claude Code stdio install using an existing local binary
 ./context-mcp install --client claude-code --repo /absolute/path/to/your/project --profile extended
 
 # Claude Code local-scope install
 ./context-mcp install --client claude-code --repo /absolute/path/to/your/project --scope local
 
-# Codex stdio install
+# Codex stdio install using an existing local binary
 ./context-mcp install --client codex --repo /absolute/path/to/your/project --profile extended
 
 # Print an HTTP snippet instead of installing it
@@ -971,6 +978,8 @@ Restart Claude Desktop after editing the config. Tools will appear based on your
 
 Claude Code supports `user`, `local`, and `project` scopes. The helper defaults to `user`; use `--scope local` or `--scope project` when needed.
 
+Release-based installs still end up with the same stdio configuration shape shown below. The only difference is that the `context-mcp` binary comes from a packaged GitHub Release instead of a local source build.
+
 **Helper install (user scope):**
 
 ```bash
@@ -1034,6 +1043,8 @@ Claude Code supports `user`, `local`, and `project` scopes. The helper defaults 
 ### Connecting to Codex
 
 The helper installs Codex config into `~/.codex/config.toml`. Codex also supports project-local `.codex/config.toml` if you prefer to keep the config in the repository.
+
+The same TOML works for release-based installs once the published binary has been unpacked locally.
 
 **Helper install:**
 

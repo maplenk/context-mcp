@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.maplenk/context-mcp",
+  "title": "context-mcp",
+  "description": "Local-first MCP server for structural, token-efficient code retrieval through graph-aware search.",
+  "repository": {
+    "url": "https://github.com/maplenk/context-mcp",
+    "source": "github"
+  },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/maplenk/context-mcp/releases/download/v0.3.0/context-mcp-darwin-arm64.tar.gz",
+      "fileSha256": "REPLACE_WITH_CONTEXT_MCP_DARWIN_ARM64_SHA256",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

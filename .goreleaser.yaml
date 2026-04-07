@@ -1,0 +1,38 @@
+version: 2
+
+project_name: context-mcp
+
+builds:
+  - id: context-mcp-darwin-arm64
+    main: ./cmd/context-mcp
+    binary: context-mcp
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+      - -tags=fts5
+
+archives:
+  - id: context-mcp-darwin-arm64
+    ids:
+      - context-mcp-darwin-arm64
+    name_template: "context-mcp-darwin-arm64"
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "context-mcp-checksums.txt"
+
+changelog:
+  use: git
+
+release:
+  draft: false
+  replace_existing_draft: true

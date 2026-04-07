@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build sanity check
+        run: go build -tags "fts5" ./...
+
+      - name: Test release build
+        run: go test -tags "fts5" ./... -count=1
+
+      - name: Release artifacts
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate release manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release_tag = os.environ["RELEASE_TAG"]
+          version = release_tag.removeprefix("v")
+          checksum_path = Path("dist/context-mcp-checksums.txt")
+          archive_name = "context-mcp-darwin-arm64.tar.gz"
+
+          checksum = None
+          for line in checksum_path.read_text().splitlines():
+              line = line.strip()
+              if not line:
+                  continue
+              parts = line.split()
+              if len(parts) >= 2 and parts[-1] == archive_name:
+                  checksum = parts[0]
+                  break
+          if checksum is None:
+              raise SystemExit(f"checksum for {archive_name} not found in {checksum_path}")
+
+          manifest = json.loads(Path("server.json").read_text())
+          manifest["version"] = version
+          manifest["packages"][0]["identifier"] = (
+              f"https://github.com/maplenk/context-mcp/releases/download/{release_tag}/{archive_name}"
+          )
+          manifest["packages"][0]["fileSha256"] = checksum
+
+          output_path = Path("dist/server.json")
+          output_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Upload release manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release upload "$RELEASE_TAG" dist/server.json --clobber
