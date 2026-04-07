@@ -676,6 +676,48 @@ func TestGetNodeByName_DeterministicOrder(t *testing.T) {
 	}
 }
 
+func TestGetSymbolIndex_IncludesMethodsAndBareAlias(t *testing.T) {
+	s := newTestStore(t)
+
+	nodes := []types.ASTNode{
+		{
+			ID:         types.GenerateNodeID("controllers.go", "OrderController"),
+			FilePath:   "controllers.go",
+			SymbolName: "OrderController",
+			NodeType:   types.NodeTypeClass,
+		},
+		{
+			ID:         types.GenerateNodeID("controllers.go", "OrderController.handle"),
+			FilePath:   "controllers.go",
+			SymbolName: "OrderController.handle",
+			NodeType:   types.NodeTypeMethod,
+		},
+		{
+			ID:         types.GenerateNodeID("handlers.go", "processOrder"),
+			FilePath:   "handlers.go",
+			SymbolName: "processOrder",
+			NodeType:   types.NodeTypeFunction,
+		},
+	}
+	if err := s.UpsertNodes(nodes); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	index, err := s.GetSymbolIndex()
+	if err != nil {
+		t.Fatalf("GetSymbolIndex: %v", err)
+	}
+	if got := index["OrderController.handle"]; got != nodes[1].ID {
+		t.Fatalf("qualified method lookup = %q, want %q", got, nodes[1].ID)
+	}
+	if got := index["handle"]; got != nodes[1].ID {
+		t.Fatalf("bare method lookup = %q, want %q", got, nodes[1].ID)
+	}
+	if got := index["processOrder"]; got != nodes[2].ID {
+		t.Fatalf("function lookup = %q, want %q", got, nodes[2].ID)
+	}
+}
+
 // ---- RawQuery LIMIT injection (M6) ----
 
 func TestRawQuery_InjectsDefaultLimit(t *testing.T) {

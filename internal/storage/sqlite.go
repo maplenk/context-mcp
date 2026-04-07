@@ -1208,16 +1208,20 @@ func (s *Store) SearchNodesByName(pattern string) ([]types.ASTNode, error) {
 	return nodes, rows.Err()
 }
 
-// GetSymbolIndex returns a map of symbol_name -> node_id for class, struct, and
-// interface nodes. Used for cross-file edge resolution during incremental re-index.
+// GetSymbolIndex returns a map of symbol_name -> node_id for symbols used in
+// cross-file edge resolution during incremental re-index.
+// It includes type nodes plus functions/methods, and also adds a best-effort
+// bare-method alias (e.g. "Controller.handle" -> "handle") when the alias is
+// not already claimed by another symbol.
 func (s *Store) GetSymbolIndex() (map[string]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
 		SELECT symbol_name, id FROM nodes
-		WHERE node_type IN (?, ?, ?)`,
-		uint8(types.NodeTypeClass), uint8(types.NodeTypeStruct), uint8(types.NodeTypeInterface))
+		WHERE node_type IN (?, ?, ?, ?, ?)`,
+		uint8(types.NodeTypeClass), uint8(types.NodeTypeStruct), uint8(types.NodeTypeInterface),
+		uint8(types.NodeTypeFunction), uint8(types.NodeTypeMethod))
 	if err != nil {
 		return nil, err
 	}
@@ -1232,6 +1236,12 @@ func (s *Store) GetSymbolIndex() (map[string]string, error) {
 		// first-wins: same behavior as indexRepo's symbolIndex
 		if _, exists := index[sym]; !exists {
 			index[sym] = id
+		}
+		if dot := strings.LastIndex(sym, "."); dot >= 0 && dot < len(sym)-1 {
+			bare := sym[dot+1:]
+			if _, exists := index[bare]; !exists {
+				index[bare] = id
+			}
 		}
 	}
 	return index, rows.Err()

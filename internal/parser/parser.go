@@ -281,6 +281,10 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 		return true
 	})
 
+	routeNodes, routeEdges := ExtractGoRoutes(file, fset, content, relPath)
+	result.Nodes = append(result.Nodes, routeNodes...)
+	result.Edges = append(result.Edges, routeEdges...)
+
 	return result, nil
 }
 
@@ -716,6 +720,10 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 			})
 		}
 	}
+
+	routeNodes, routeEdges := ExtractJSRoutes(content, relPath)
+	result.Nodes = append(result.Nodes, routeNodes...)
+	result.Edges = append(result.Edges, routeEdges...)
 
 	// H1: Extract import edges from tree-sitter nodes
 	walkTree(root, func(n *sitter.Node) bool {
@@ -1560,4 +1568,3 @@ func collectStringRanges(root *sitter.Node) []byteRange {
 	})
 	return ranges
 }
-

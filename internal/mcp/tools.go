@@ -72,6 +72,10 @@ func isToolInProfile(toolName, profile string) bool {
 		"explore":                  true,
 		"search_code":              true,
 		"assemble_context":         true,
+		"compare_symbols":          true,
+		"find_routes":              true,
+		"trace_route":              true,
+		"compare_routes":           true,
 		"checkpoint_context":       true,
 		"read_delta":               true,
 	}
@@ -187,12 +191,15 @@ type UnderstandParams struct {
 // AssembleContextParams are the parameters for the assemble_context tool
 type AssembleContextParams struct {
 	Query            string   `json:"query" jsonschema:"required,description=Search query to find relevant code"`
+	Task             string   `json:"task,omitempty" jsonschema:"description=Deprecated alias for query. Prefer query."`
 	BudgetTokens     int      `json:"budget_tokens,omitempty" jsonschema:"description=Maximum token budget for assembled context (default: 4000)"`
 	Mode             string   `json:"mode,omitempty" jsonschema:"description=Output fidelity: summary, signatures, snippets, bundle, or full (default: snippets)"`
 	ActiveFiles      []string `json:"active_files,omitempty" jsonschema:"description=File paths currently being edited for PPR personalization"`
 	MaxPerFile       int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per file (default: 2)"`
 	IncludeNeighbors bool     `json:"include_neighbors,omitempty" jsonschema:"description=Include callers/callees of top results (default: false)"`
 	Compact          bool     `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
+	Goal             string   `json:"goal,omitempty" jsonschema:"description=Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes"`
+	Targets          []string `json:"targets,omitempty" jsonschema:"description=Optional symbol or route references used with goal-aware assembly"`
 }
 
 // AssembleContextResponse is the structured response from assemble_context
@@ -204,6 +211,7 @@ type AssembleContextResponse struct {
 	Items        []AssembleContextItem `json:"items"`
 	Excluded     int                   `json:"excluded"`
 	Summary      string                `json:"summary"`
+	Strategy     string                `json:"strategy,omitempty"`
 }
 
 // AssembleContextItem represents a single item in the assembled context
@@ -216,6 +224,35 @@ type AssembleContextItem struct {
 	Content  string  `json:"content"`
 	Tokens   int     `json:"tokens"`
 	Reason   string  `json:"reason,omitempty"`
+	Group    string  `json:"group,omitempty"`
+}
+
+type CompareSymbolsParams struct {
+	Left    string `json:"left" jsonschema:"required,description=Left symbol name or ID"`
+	Right   string `json:"right" jsonschema:"required,description=Right symbol name or ID"`
+	Depth   int    `json:"depth,omitempty" jsonschema:"description=Traversal depth for callers/callees comparison (default: 1, max: 3)"`
+	Compact bool   `json:"compact,omitempty" jsonschema:"description=Return compact output by dropping verbose summaries from list items"`
+}
+
+type FindRoutesParams struct {
+	Query           string `json:"query" jsonschema:"required,description=Route path, handler, or concept query"`
+	Method          string `json:"method,omitempty" jsonschema:"description=Optional HTTP method filter"`
+	Limit           int    `json:"limit,omitempty" jsonschema:"description=Maximum number of routes to return (default: 10)"`
+	IncludeHandlers *bool  `json:"include_handlers,omitempty" jsonschema:"description=Include resolved route handlers when available (default: true)"`
+	Compact         bool   `json:"compact,omitempty" jsonschema:"description=Return compact output by dropping verbose summaries from list items"`
+}
+
+type TraceRouteParams struct {
+	Route   string `json:"route" jsonschema:"required,description=Route ID, symbol, or path fragment to trace"`
+	Depth   int    `json:"depth,omitempty" jsonschema:"description=Maximum downstream traversal depth from the handler (default: 2, max: 4)"`
+	Compact bool   `json:"compact,omitempty" jsonschema:"description=Return compact output by dropping verbose summaries from list items"`
+}
+
+type CompareRoutesParams struct {
+	Left    string `json:"left" jsonschema:"required,description=Left route ID or symbol"`
+	Right   string `json:"right" jsonschema:"required,description=Right route ID or symbol"`
+	Depth   int    `json:"depth,omitempty" jsonschema:"description=Maximum downstream traversal depth from each handler (default: 2, max: 4)"`
+	Compact bool   `json:"compact,omitempty" jsonschema:"description=Return compact output by dropping verbose summaries from list items"`
 }
 
 // CheckpointContextParams are the parameters for the checkpoint_context tool
@@ -255,6 +292,10 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	registerArchitectureSummaryTool(s, deps)
 	registerExploreTool(s, deps)
 	registerUnderstandTool(s, deps)
+	registerCompareSymbolsTool(s, deps)
+	registerFindRoutesTool(s, deps)
+	registerTraceRouteTool(s, deps)
+	registerCompareRoutesTool(s, deps)
 	registerAssembleContextTool(s, deps)
 	registerCheckpointContextTool(s, deps)
 	registerReadDeltaTool(s, deps)
@@ -3017,6 +3058,626 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 	}
 }
 
+type compactNameID struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+type routeResultItem struct {
+	ID        string         `json:"id"`
+	Symbol    string         `json:"symbol"`
+	Method    string         `json:"method"`
+	Path      string         `json:"path"`
+	FilePath  string         `json:"file_path"`
+	Score     float64        `json:"score,omitempty"`
+	Handler   map[string]any `json:"handler,omitempty"`
+	Summary   string         `json:"summary,omitempty"`
+}
+
+type goalCandidate struct {
+	Result types.SearchResult
+	Group  string
+}
+
+func parseRouteSymbol(symbol string) (string, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(symbol), " ", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid route symbol %q", symbol)
+	}
+	return parts[0], parts[1], nil
+}
+
+func resolveRouteNode(deps ToolDeps, routeRef string) (*types.ASTNode, error) {
+	if routeRef == "" {
+		return nil, fmt.Errorf("'route' is required")
+	}
+	if node, err := deps.Store.GetNode(routeRef); err == nil && node != nil && node.NodeType == types.NodeTypeRoute {
+		return node, nil
+	}
+	if node, err := deps.Store.GetNodeByName(routeRef); err == nil && node != nil && node.NodeType == types.NodeTypeRoute {
+		return node, nil
+	}
+	candidates, err := deps.Store.SearchNodesByName(routeRef)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range candidates {
+		if node.NodeType == types.NodeTypeRoute {
+			return &node, nil
+		}
+	}
+	return nil, fmt.Errorf("route not found: %s", routeRef)
+}
+
+func resolveRouteHandler(deps ToolDeps, routeNode types.ASTNode) (*types.ASTNode, string) {
+	edges, err := deps.Store.GetEdgesFrom(routeNode.ID)
+	if err != nil {
+		return nil, ""
+	}
+	for _, edge := range edges {
+		if edge.EdgeType != types.EdgeTypeHandles {
+			continue
+		}
+		if edge.TargetID != "" {
+			if node, err := deps.Store.GetNode(edge.TargetID); err == nil && node != nil {
+				return node, edge.TargetSymbol
+			}
+		}
+		if edge.TargetSymbol != "" {
+			if node, err := deps.Store.GetNodeByName(edge.TargetSymbol); err == nil && node != nil {
+				return node, edge.TargetSymbol
+			}
+		}
+		return nil, edge.TargetSymbol
+	}
+	return nil, ""
+}
+
+func nodeSummary(node *types.ASTNode) map[string]any {
+	if node == nil {
+		return nil
+	}
+	return map[string]any{
+		"id":        node.ID,
+		"name":      node.SymbolName,
+		"file_path": node.FilePath,
+		"node_type": node.NodeType.String(),
+	}
+}
+
+func routeItemFromResult(deps ToolDeps, node types.ASTNode, score float64, includeHandler bool, compact bool) routeResultItem {
+	method, path, _ := parseRouteSymbol(node.SymbolName)
+	item := routeResultItem{
+		ID:       node.ID,
+		Symbol:   node.SymbolName,
+		Method:   method,
+		Path:     path,
+		FilePath: node.FilePath,
+		Score:    score,
+	}
+	if includeHandler {
+		if handler, unresolved := resolveRouteHandler(deps, node); handler != nil {
+			item.Handler = nodeSummary(handler)
+		} else if unresolved != "" {
+			item.Handler = map[string]any{"name": unresolved}
+		}
+	}
+	if !compact {
+		item.Summary = fmt.Sprintf("%s route in %s", node.SymbolName, node.FilePath)
+	}
+	return item
+}
+
+func routeHandlersEnabled(flag *bool) bool {
+	return flag == nil || *flag
+}
+
+func applyCompactSummary(result map[string]any, compact bool) map[string]any {
+	if compact {
+		delete(result, "summary")
+	}
+	return result
+}
+
+func appendGoalCandidate(out []goalCandidate, seen map[string]bool, node *types.ASTNode, score float64, group string) []goalCandidate {
+	if node == nil || seen[node.ID] {
+		return out
+	}
+	seen[node.ID] = true
+	return append(out, goalCandidate{
+		Result: types.SearchResult{Node: *node, Score: score},
+		Group:  group,
+	})
+}
+
+func uniqueNodeIDs(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	var out []string
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func collectNeighbors(graphEngine *graph.GraphEngine, roots []string, depth int, mode string) []string {
+	if graphEngine == nil || depth <= 0 {
+		return nil
+	}
+	current := uniqueNodeIDs(roots)
+	seen := make(map[string]bool, len(current))
+	for _, id := range current {
+		seen[id] = true
+	}
+	var out []string
+	for level := 0; level < depth; level++ {
+		var next []string
+		for _, id := range current {
+			var neighbors []string
+			if mode == "callers" {
+				neighbors = graphEngine.GetCallers(id)
+			} else {
+				neighbors = graphEngine.GetCallees(id)
+			}
+			for _, neighbor := range neighbors {
+				if seen[neighbor] {
+					continue
+				}
+				seen[neighbor] = true
+				next = append(next, neighbor)
+				out = append(out, neighbor)
+			}
+		}
+		current = next
+		if len(current) == 0 {
+			break
+		}
+	}
+	return out
+}
+
+func summarizeIDs(store *storage.Store, ids []string) []compactNameID {
+	ids = uniqueNodeIDs(ids)
+	out := make([]compactNameID, 0, len(ids))
+	for _, id := range ids {
+		node, err := store.GetNode(id)
+		if err != nil || node == nil {
+			continue
+		}
+		out = append(out, compactNameID{Name: node.SymbolName, ID: node.ID})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func symbolSignature(repoRoot string, node types.ASTNode) string {
+	fileCtx, err := loadSymbolFileContext(repoRoot, node.FilePath)
+	if err != nil {
+		return ""
+	}
+	return buildSymbolInspection(node, fileCtx).Signature
+}
+
+func compareSymbolsHandler(deps ToolDeps, p CompareSymbolsParams) (interface{}, error) {
+	leftNode, err := resolveSymbolNode(deps, p.Left)
+	if err != nil {
+		return nil, err
+	}
+	rightNode, err := resolveSymbolNode(deps, p.Right)
+	if err != nil {
+		return nil, err
+	}
+	if p.Depth <= 0 {
+		p.Depth = 1
+	}
+	if p.Depth > 3 {
+		p.Depth = 3
+	}
+
+	leftCallers := collectNeighbors(deps.Graph, []string{leftNode.ID}, p.Depth, "callers")
+	rightCallers := collectNeighbors(deps.Graph, []string{rightNode.ID}, p.Depth, "callers")
+	leftCallees := collectNeighbors(deps.Graph, []string{leftNode.ID}, p.Depth, "callees")
+	rightCallees := collectNeighbors(deps.Graph, []string{rightNode.ID}, p.Depth, "callees")
+
+	toSet := func(ids []string) map[string]bool {
+		set := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			set[id] = true
+		}
+		return set
+	}
+	intersect := func(left, right []string) []string {
+		rightSet := toSet(right)
+		var out []string
+		for _, id := range uniqueNodeIDs(left) {
+			if rightSet[id] {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	diff := func(left, right []string) []string {
+		rightSet := toSet(right)
+		var out []string
+		for _, id := range uniqueNodeIDs(left) {
+			if !rightSet[id] {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+
+	result := map[string]any{
+		"left":              nodeSummary(leftNode),
+		"right":             nodeSummary(rightNode),
+		"left_signature":    symbolSignature(deps.RepoRoot, *leftNode),
+		"right_signature":   symbolSignature(deps.RepoRoot, *rightNode),
+		"shared_callers":    summarizeIDs(deps.Store, intersect(leftCallers, rightCallers)),
+		"left_only_callers": summarizeIDs(deps.Store, diff(leftCallers, rightCallers)),
+		"right_only_callers": summarizeIDs(deps.Store, diff(rightCallers, leftCallers)),
+		"shared_callees":     summarizeIDs(deps.Store, intersect(leftCallees, rightCallees)),
+		"left_only_callees":  summarizeIDs(deps.Store, diff(leftCallees, rightCallees)),
+		"right_only_callees": summarizeIDs(deps.Store, diff(rightCallees, leftCallees)),
+		"summary": fmt.Sprintf("Compared %s and %s across callers/callees at depth %d",
+			leftNode.SymbolName, rightNode.SymbolName, p.Depth),
+	}
+	if p.Compact {
+		delete(result, "summary")
+	}
+	return result, nil
+}
+
+func findRoutesHandler(deps ToolDeps, p FindRoutesParams) (interface{}, error) {
+	if strings.TrimSpace(p.Query) == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	if p.Limit <= 0 {
+		p.Limit = 10
+	}
+	includeHandlers := routeHandlersEnabled(p.IncludeHandlers)
+
+	var items []routeResultItem
+	seen := make(map[string]bool)
+	addNode := func(node types.ASTNode, score float64) {
+		if node.NodeType != types.NodeTypeRoute || seen[node.ID] {
+			return
+		}
+		item := routeItemFromResult(deps, node, score, includeHandlers, p.Compact)
+		if p.Method != "" && !strings.EqualFold(item.Method, p.Method) {
+			return
+		}
+		seen[node.ID] = true
+		items = append(items, item)
+	}
+
+	if exact, err := deps.Store.SearchNodesByName(p.Query); err == nil {
+		for _, node := range exact {
+			addNode(node, 1.5)
+		}
+	}
+	if deps.Search != nil {
+		if results, err := deps.Search.Search(p.Query, p.Limit*4, nil, 2); err == nil {
+			for _, result := range results {
+				addNode(result.Node, result.Score)
+			}
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Score > items[j].Score })
+	if len(items) > p.Limit {
+		items = items[:p.Limit]
+	}
+	return applyCompactSummary(map[string]any{
+		"query":            p.Query,
+		"method_filter":    strings.ToUpper(p.Method),
+		"count":            len(items),
+		"routes":           items,
+		"include_handlers": includeHandlers,
+		"summary":          fmt.Sprintf("Found %d matching routes for %q", len(items), p.Query),
+	}, p.Compact), nil
+}
+
+func traceRouteHandler(deps ToolDeps, p TraceRouteParams) (interface{}, error) {
+	routeNode, err := resolveRouteNode(deps, p.Route)
+	if err != nil {
+		return nil, err
+	}
+	if p.Depth <= 0 {
+		p.Depth = 2
+	}
+	if p.Depth > 4 {
+		p.Depth = 4
+	}
+	handlerNode, unresolved := resolveRouteHandler(deps, *routeNode)
+	result := map[string]any{
+		"route":   routeItemFromResult(deps, *routeNode, 1, true, p.Compact),
+		"summary": fmt.Sprintf("Traced route %s", routeNode.SymbolName),
+	}
+	if handlerNode != nil {
+		result["handler"] = nodeSummary(handlerNode)
+	} else if unresolved != "" {
+		result["handler"] = map[string]any{"name": unresolved}
+	}
+
+	var layers []map[string]any
+	current := []string{}
+	if handlerNode != nil {
+		current = append(current, handlerNode.ID)
+	}
+	seen := make(map[string]bool)
+	for depth := 1; depth <= p.Depth && len(current) > 0; depth++ {
+		next := uniqueNodeIDs(collectNeighbors(deps.Graph, current, 1, "callees"))
+		var symbols []compactNameID
+		for _, id := range next {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+				symbols = append(symbols, compactNameID{Name: node.SymbolName, ID: node.ID})
+			}
+		}
+		if len(symbols) > 0 {
+			layers = append(layers, map[string]any{"depth": depth, "symbols": symbols})
+		}
+		current = next
+	}
+	result["layers"] = layers
+	return applyCompactSummary(result, p.Compact), nil
+}
+
+func compareRoutesHandler(deps ToolDeps, p CompareRoutesParams) (interface{}, error) {
+	leftNode, err := resolveRouteNode(deps, p.Left)
+	if err != nil {
+		return nil, err
+	}
+	rightNode, err := resolveRouteNode(deps, p.Right)
+	if err != nil {
+		return nil, err
+	}
+	if p.Depth <= 0 {
+		p.Depth = 2
+	}
+	if p.Depth > 4 {
+		p.Depth = 4
+	}
+	leftMethod, leftPath, _ := parseRouteSymbol(leftNode.SymbolName)
+	rightMethod, rightPath, _ := parseRouteSymbol(rightNode.SymbolName)
+	leftHandler, _ := resolveRouteHandler(deps, *leftNode)
+	rightHandler, _ := resolveRouteHandler(deps, *rightNode)
+	leftDownstream := []string{}
+	rightDownstream := []string{}
+	if leftHandler != nil {
+		leftDownstream = collectNeighbors(deps.Graph, []string{leftHandler.ID}, p.Depth, "callees")
+	}
+	if rightHandler != nil {
+		rightDownstream = collectNeighbors(deps.Graph, []string{rightHandler.ID}, p.Depth, "callees")
+	}
+	toSet := func(ids []string) map[string]bool {
+		set := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			set[id] = true
+		}
+		return set
+	}
+	diff := func(left, right []string) []string {
+		rightSet := toSet(right)
+		var out []string
+		for _, id := range uniqueNodeIDs(left) {
+			if !rightSet[id] {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	shared := func(left, right []string) []string {
+		rightSet := toSet(right)
+		var out []string
+		for _, id := range uniqueNodeIDs(left) {
+			if rightSet[id] {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	result := map[string]any{
+		"left":                   routeItemFromResult(deps, *leftNode, 1, true, p.Compact),
+		"right":                  routeItemFromResult(deps, *rightNode, 1, true, p.Compact),
+		"same_method":            leftMethod == rightMethod,
+		"left_path":              leftPath,
+		"right_path":             rightPath,
+		"left_handler":           nodeSummary(leftHandler),
+		"right_handler":          nodeSummary(rightHandler),
+		"shared_downstream":      summarizeIDs(deps.Store, shared(leftDownstream, rightDownstream)),
+		"left_only_downstream":   summarizeIDs(deps.Store, diff(leftDownstream, rightDownstream)),
+		"right_only_downstream":  summarizeIDs(deps.Store, diff(rightDownstream, leftDownstream)),
+		"summary":                fmt.Sprintf("Compared routes %s and %s", leftNode.SymbolName, rightNode.SymbolName),
+	}
+	return applyCompactSummary(result, p.Compact), nil
+}
+
+func registerCompareSymbolsTool(s *Server, deps ToolDeps) {
+	desc := "Compare two symbols by signatures, callers, and callees."
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p CompareSymbolsParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		return compareSymbolsHandler(deps, p)
+	}
+	s.RegisterTool(ToolDefinition{
+		Name:        "compare_symbols",
+		Description: desc,
+		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+			"left": map[string]interface{}{"type": "string"},
+			"right": map[string]interface{}{"type": "string"},
+			"depth": map[string]interface{}{"type": "integer", "default": 1},
+			"compact": map[string]interface{}{"type": "boolean"},
+		}, "required": []string{"left", "right"}},
+	}, cliHandler)
+	tool := mcp.NewTool("compare_symbols",
+		mcp.WithDescription(desc),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("left", mcp.Required()),
+		mcp.WithString("right", mcp.Required()),
+		mcp.WithNumber("depth"),
+		mcp.WithBoolean("compact"),
+	)
+	sdkHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var p CompareSymbolsParams
+		if err := req.BindArguments(&p); err != nil {
+			return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+		}
+		result, err := compareSymbolsHandler(deps, p)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toCallToolResultWithName(result, "compare_symbols", deps.OutputStore)
+	}
+	if isToolInProfile("compare_symbols", deps.Profile) {
+		s.AddSDKTool(tool, sdkHandler)
+	} else {
+		s.StorePendingTool("compare_symbols", tool, sdkHandler)
+	}
+}
+
+func registerFindRoutesTool(s *Server, deps ToolDeps) {
+	desc := "Find normalized route nodes and optionally resolve their handlers."
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p FindRoutesParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		return findRoutesHandler(deps, p)
+	}
+	s.RegisterTool(ToolDefinition{
+		Name:        "find_routes",
+		Description: desc,
+		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+			"query": map[string]interface{}{"type": "string"},
+			"method": map[string]interface{}{"type": "string"},
+			"limit": map[string]interface{}{"type": "integer", "default": 10},
+			"include_handlers": map[string]interface{}{"type": "boolean", "default": true},
+			"compact": map[string]interface{}{"type": "boolean"},
+		}, "required": []string{"query"}},
+	}, cliHandler)
+	tool := mcp.NewTool("find_routes",
+		mcp.WithDescription(desc),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("query", mcp.Required()),
+		mcp.WithString("method"),
+		mcp.WithNumber("limit"),
+		mcp.WithBoolean("include_handlers"),
+		mcp.WithBoolean("compact"),
+	)
+	sdkHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var p FindRoutesParams
+		if err := req.BindArguments(&p); err != nil {
+			return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+		}
+		result, err := findRoutesHandler(deps, p)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toCallToolResultWithName(result, "find_routes", deps.OutputStore)
+	}
+	if isToolInProfile("find_routes", deps.Profile) {
+		s.AddSDKTool(tool, sdkHandler)
+	} else {
+		s.StorePendingTool("find_routes", tool, sdkHandler)
+	}
+}
+
+func registerTraceRouteTool(s *Server, deps ToolDeps) {
+	desc := "Trace a route to its handler and downstream callees."
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p TraceRouteParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		return traceRouteHandler(deps, p)
+	}
+	s.RegisterTool(ToolDefinition{
+		Name:        "trace_route",
+		Description: desc,
+		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+			"route": map[string]interface{}{"type": "string"},
+			"depth": map[string]interface{}{"type": "integer", "default": 2},
+			"compact": map[string]interface{}{"type": "boolean"},
+		}, "required": []string{"route"}},
+	}, cliHandler)
+	tool := mcp.NewTool("trace_route",
+		mcp.WithDescription(desc),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("route", mcp.Required()),
+		mcp.WithNumber("depth"),
+		mcp.WithBoolean("compact"),
+	)
+	sdkHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var p TraceRouteParams
+		if err := req.BindArguments(&p); err != nil {
+			return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+		}
+		result, err := traceRouteHandler(deps, p)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toCallToolResultWithName(result, "trace_route", deps.OutputStore)
+	}
+	if isToolInProfile("trace_route", deps.Profile) {
+		s.AddSDKTool(tool, sdkHandler)
+	} else {
+		s.StorePendingTool("trace_route", tool, sdkHandler)
+	}
+}
+
+func registerCompareRoutesTool(s *Server, deps ToolDeps) {
+	desc := "Compare two routes by path, handler, and downstream symbols."
+	cliHandler := func(params json.RawMessage) (interface{}, error) {
+		var p CompareRoutesParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w", err)
+		}
+		return compareRoutesHandler(deps, p)
+	}
+	s.RegisterTool(ToolDefinition{
+		Name:        "compare_routes",
+		Description: desc,
+		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+			"left": map[string]interface{}{"type": "string"},
+			"right": map[string]interface{}{"type": "string"},
+			"depth": map[string]interface{}{"type": "integer", "default": 2},
+			"compact": map[string]interface{}{"type": "boolean"},
+		}, "required": []string{"left", "right"}},
+	}, cliHandler)
+	tool := mcp.NewTool("compare_routes",
+		mcp.WithDescription(desc),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("left", mcp.Required()),
+		mcp.WithString("right", mcp.Required()),
+		mcp.WithNumber("depth"),
+		mcp.WithBoolean("compact"),
+	)
+	sdkHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var p CompareRoutesParams
+		if err := req.BindArguments(&p); err != nil {
+			return mcp.NewToolResultError("invalid parameters: " + err.Error()), nil
+		}
+		result, err := compareRoutesHandler(deps, p)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toCallToolResultWithName(result, "compare_routes", deps.OutputStore)
+	}
+	if isToolInProfile("compare_routes", deps.Profile) {
+		s.AddSDKTool(tool, sdkHandler)
+	} else {
+		s.StorePendingTool("compare_routes", tool, sdkHandler)
+	}
+}
+
 // ----- Tool 14: assemble_context -----
 
 // estimateTokens returns a rough token count for a string (~4 chars per token).
@@ -3069,8 +3730,151 @@ func readNodeSource(repoRoot string, node types.ASTNode) string {
 	return string(buf[:n])
 }
 
+func collectGoalAwareCandidates(deps ToolDeps, p AssembleContextParams) ([]goalCandidate, string, error) {
+	switch p.Goal {
+	case "":
+		return nil, "", nil
+	case "inspect_symbol":
+		if len(p.Targets) == 0 {
+			return nil, "", fmt.Errorf("targets[0] is required for goal=inspect_symbol")
+		}
+		node, err := resolveSymbolNode(deps, p.Targets[0])
+		if err != nil {
+			return nil, "", err
+		}
+		seen := map[string]bool{}
+		results := appendGoalCandidate(nil, seen, node, 1, "target")
+		if p.IncludeNeighbors && deps.Graph != nil {
+			for _, id := range collectNeighbors(deps.Graph, []string{node.ID}, 1, "callees") {
+				if neighbor, err := deps.Store.GetNode(id); err == nil && neighbor != nil {
+					results = appendGoalCandidate(results, seen, neighbor, 0.7, "neighbor")
+				}
+			}
+		}
+		return results, "goal=inspect_symbol target_then_neighbors", nil
+	case "compare_symbols":
+		if len(p.Targets) < 2 {
+			return nil, "", fmt.Errorf("two targets are required for goal=compare_symbols")
+		}
+		left, err := resolveSymbolNode(deps, p.Targets[0])
+		if err != nil {
+			return nil, "", err
+		}
+		right, err := resolveSymbolNode(deps, p.Targets[1])
+		if err != nil {
+			return nil, "", err
+		}
+		seen := map[string]bool{}
+		results := appendGoalCandidate(nil, seen, left, 1, "left")
+		results = appendGoalCandidate(results, seen, right, 1, "right")
+		for _, id := range collectNeighbors(deps.Graph, []string{left.ID}, 1, "callees") {
+			if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+				results = appendGoalCandidate(results, seen, node, 0.7, "left_callee")
+			}
+		}
+		for _, id := range collectNeighbors(deps.Graph, []string{right.ID}, 1, "callees") {
+			if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+				results = appendGoalCandidate(results, seen, node, 0.7, "right_callee")
+			}
+		}
+		for _, id := range collectNeighbors(deps.Graph, []string{left.ID}, 1, "callers") {
+			if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+				results = appendGoalCandidate(results, seen, node, 0.55, "left_caller")
+			}
+		}
+		for _, id := range collectNeighbors(deps.Graph, []string{right.ID}, 1, "callers") {
+			if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+				results = appendGoalCandidate(results, seen, node, 0.55, "right_caller")
+			}
+		}
+		return results, "goal=compare_symbols balanced_targets_and_neighbors", nil
+	case "find_routes":
+		routes, err := findRoutesHandler(deps, FindRoutesParams{
+			Query: p.Query,
+			Limit: 10,
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		payload, ok := routes.(map[string]any)
+		if !ok {
+			return nil, "", fmt.Errorf("unexpected find_routes response type %T", routes)
+		}
+		rawRoutes, _ := payload["routes"].([]routeResultItem)
+		seen := map[string]bool{}
+		var results []goalCandidate
+		for _, item := range rawRoutes {
+			if node, err := deps.Store.GetNode(item.ID); err == nil && node != nil {
+				results = appendGoalCandidate(results, seen, node, item.Score, "route")
+			}
+		}
+		return results, "goal=find_routes routes_first", nil
+	case "trace_route":
+		if len(p.Targets) == 0 {
+			return nil, "", fmt.Errorf("targets[0] is required for goal=trace_route")
+		}
+		routeNode, err := resolveRouteNode(deps, p.Targets[0])
+		if err != nil {
+			return nil, "", err
+		}
+		seen := map[string]bool{}
+		results := appendGoalCandidate(nil, seen, routeNode, 1, "route")
+		if handler, _ := resolveRouteHandler(deps, *routeNode); handler != nil {
+			results = appendGoalCandidate(results, seen, handler, 0.9, "handler")
+			for _, id := range collectNeighbors(deps.Graph, []string{handler.ID}, 1, "callees") {
+				if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+					results = appendGoalCandidate(results, seen, node, 0.7, "trace_depth_1")
+				}
+			}
+			for _, id := range collectNeighbors(deps.Graph, []string{handler.ID}, 2, "callees") {
+				if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+					results = appendGoalCandidate(results, seen, node, 0.55, "trace_depth_2")
+				}
+			}
+		}
+		return results, "goal=trace_route route_then_handler_then_trace", nil
+	case "compare_routes":
+		if len(p.Targets) < 2 {
+			return nil, "", fmt.Errorf("two targets are required for goal=compare_routes")
+		}
+		left, err := resolveRouteNode(deps, p.Targets[0])
+		if err != nil {
+			return nil, "", err
+		}
+		right, err := resolveRouteNode(deps, p.Targets[1])
+		if err != nil {
+			return nil, "", err
+		}
+		seen := map[string]bool{}
+		results := appendGoalCandidate(nil, seen, left, 1, "left_route")
+		results = appendGoalCandidate(results, seen, right, 1, "right_route")
+		if handler, _ := resolveRouteHandler(deps, *left); handler != nil {
+			results = appendGoalCandidate(results, seen, handler, 0.9, "left_handler")
+			for _, id := range collectNeighbors(deps.Graph, []string{handler.ID}, 1, "callees") {
+				if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+					results = appendGoalCandidate(results, seen, node, 0.7, "left_downstream")
+				}
+			}
+		}
+		if handler, _ := resolveRouteHandler(deps, *right); handler != nil {
+			results = appendGoalCandidate(results, seen, handler, 0.9, "right_handler")
+			for _, id := range collectNeighbors(deps.Graph, []string{handler.ID}, 1, "callees") {
+				if node, err := deps.Store.GetNode(id); err == nil && node != nil {
+					results = appendGoalCandidate(results, seen, node, 0.7, "right_downstream")
+				}
+			}
+		}
+		return results, "goal=compare_routes balanced_routes_handlers_and_downstream", nil
+	default:
+		return nil, "", fmt.Errorf("invalid goal %q", p.Goal)
+	}
+}
+
 // assembleContextHandler implements the greedy budget selector for assemble_context.
 func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}, error) {
+	if p.Query == "" && p.Task != "" {
+		p.Query = p.Task
+	}
 	if p.Query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
@@ -3110,10 +3914,27 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 		}
 	}
 
-	// Search with generous limit
-	results, err := deps.Search.Search(p.Query, 50, activeFileNodeIDs, p.MaxPerFile)
+	var strategy string
+	goalResults, strategy, err := collectGoalAwareCandidates(deps, p)
 	if err != nil {
-		return nil, fmt.Errorf("search failed: %w", err)
+		return nil, err
+	}
+	resultGroups := make(map[string]string, len(goalResults))
+	results := make([]types.SearchResult, 0, len(goalResults))
+	for _, candidate := range goalResults {
+		results = append(results, candidate.Result)
+		if candidate.Group != "" {
+			resultGroups[candidate.Result.Node.ID] = candidate.Group
+		}
+	}
+	if len(results) == 0 {
+		results, err = deps.Search.Search(p.Query, 50, activeFileNodeIDs, p.MaxPerFile)
+		if err != nil {
+			return nil, fmt.Errorf("search failed: %w", err)
+		}
+		if strategy == "" {
+			strategy = "ranked_search"
+		}
 	}
 
 	// Build items within budget
@@ -3148,6 +3969,7 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 			Content:  content,
 			Tokens:   tokens,
 			Reason:   generateReasonFromBreakdown(r.Breakdown),
+			Group:    resultGroups[r.Node.ID],
 		})
 		usedTokens += tokens
 	}
@@ -3201,6 +4023,7 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 				Content:  content,
 				Tokens:   tokens,
 				Reason:   "neighbor (caller/callee)",
+				Group:    "neighbor",
 			})
 			usedTokens += tokens
 		}
@@ -3235,6 +4058,7 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 		Items:        items,
 		Excluded:     excluded,
 		Summary:      summary,
+		Strategy:     strategy,
 	}, nil
 }
 
@@ -3316,14 +4140,16 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"query":             map[string]interface{}{"type": "string", "description": "Search query to find relevant code"},
+				"task":              map[string]interface{}{"type": "string", "description": "Deprecated alias for query"},
 				"budget_tokens":     map[string]interface{}{"type": "integer", "description": "Maximum token budget (default: 4000)", "default": 4000},
 				"mode":              map[string]interface{}{"type": "string", "description": "Output fidelity: summary, signatures, snippets, bundle, or full (default: snippets)", "default": "snippets"},
 				"active_files":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "File paths currently being edited"},
 				"max_per_file":      map[string]interface{}{"type": "integer", "description": "Maximum results per file (default: 2)", "default": 2},
 				"include_neighbors": map[string]interface{}{"type": "boolean", "description": "Include callers/callees of top results"},
 				"compact":           map[string]interface{}{"type": "boolean", "description": "Return compact output: IDs, scores, and line spans only"},
+				"goal":              map[string]interface{}{"type": "string", "description": "Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes"},
+				"targets":           map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional goal-specific route/symbol refs"},
 			},
-			"required": []string{"query"},
 		},
 	}, cliHandler)
 
@@ -3332,13 +4158,16 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 		mcp.WithDescription(desc),
 		mcp.WithTitleAnnotation("Assemble Context"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("query", mcp.Required(), mcp.Description("Search query to find relevant code")),
+		mcp.WithString("query", mcp.Description("Search query to find relevant code")),
+		mcp.WithString("task", mcp.Description("Deprecated alias for query")),
 		mcp.WithNumber("budget_tokens", mcp.Description("Maximum token budget (default: 4000)")),
 		mcp.WithString("mode", mcp.Description("Output fidelity: summary, signatures, snippets, bundle, or full (default: snippets)")),
 		mcp.WithArray("active_files", mcp.Description("File paths currently being edited"), mcp.WithStringItems()),
 		mcp.WithNumber("max_per_file", mcp.Description("Maximum results per file (default: 2)")),
 		mcp.WithBoolean("include_neighbors", mcp.Description("Include callers/callees of top results")),
 		mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
+		mcp.WithString("goal", mcp.Description("Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes")),
+		mcp.WithArray("targets", mcp.Description("Optional goal-specific route/symbol refs"), mcp.WithStringItems()),
 	)
 	tool.Meta = &mcp.Meta{
 		AdditionalFields: map[string]any{

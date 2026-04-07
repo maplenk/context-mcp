@@ -80,6 +80,52 @@ func TestDiscoverTools_InspectionBundle(t *testing.T) {
 	}
 }
 
+func TestDiscoverTools_NativeContextCall(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+	deps.Profile = "minimal"
+
+	srv := NewServerWithIO(nil, nil)
+	RegisterTools(srv, deps, nil)
+
+	handler, ok := srv.GetHandler("discover_tools")
+	if !ok {
+		t.Fatal("discover_tools handler not registered")
+	}
+
+	params, _ := json.Marshal(DiscoverToolsParams{
+		Need: "find where orders are handled",
+	})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("discover_tools error: %v", err)
+	}
+
+	resp, ok := result.(*DiscoverToolsResponse)
+	if !ok {
+		t.Fatalf("expected *DiscoverToolsResponse, got %T", result)
+	}
+	if resp.ActivatedCount == 0 {
+		t.Fatal("expected discover_tools to activate at least one tool")
+	}
+	if !srv.IsActivated("context") {
+		t.Fatal("expected context to be activated after discover_tools")
+	}
+
+	contextHandler, ok := srv.GetHandler("context")
+	if !ok {
+		t.Fatal("context handler not registered")
+	}
+
+	contextResult, err := contextHandler(json.RawMessage(`{"query":"processOrder","limit":3}`))
+	if err != nil {
+		t.Fatalf("context handler error after activation: %v", err)
+	}
+	if contextResult == nil {
+		t.Fatal("expected non-nil context result after activation")
+	}
+}
+
 func TestDiscoverTools_ChangeAnalysisBundle(t *testing.T) {
 	deps, cleanup := setupTestEnv(t)
 	defer cleanup()
@@ -390,7 +436,7 @@ func TestExecuteTool_Proxy(t *testing.T) {
 	}
 }
 
-func TestExecuteTool_ProxyWarning(t *testing.T) {
+func TestExecuteTool_ProfileBlockBeforeActivation(t *testing.T) {
 	deps, cleanup := setupTestEnv(t)
 	defer cleanup()
 	deps.Profile = "minimal"
@@ -410,24 +456,11 @@ func TestExecuteTool_ProxyWarning(t *testing.T) {
 	})
 	_, err := handler(params)
 	if err == nil {
-		t.Fatal("expected error for tool not in minimal profile, got nil")
+		t.Fatal("expected execute_tool to block non-startup tools in minimal profile")
 	}
-	if !strings.Contains(err.Error(), "not available in the") {
+	if !strings.Contains(err.Error(), "not available in the \"minimal\" profile") {
 		t.Errorf("expected profile-block error, got: %v", err)
 	}
-
-	// Call health which IS in the minimal profile — should succeed with proxy_warning
-	// (health is registered in minimal profile but may not be SDK-activated yet)
-	healthParams, _ := json.Marshal(ExecuteToolParams{
-		Name: "health",
-		Args: map[string]any{},
-	})
-	result, err := handler(healthParams)
-	if err != nil {
-		t.Fatalf("execute_tool error for profile-allowed tool: %v", err)
-	}
-	// health is in the minimal profile and should be activated, so no proxy_warning expected
-	_ = result
 }
 
 func TestSchemaFootprint_Minimal(t *testing.T) {
@@ -439,20 +472,42 @@ func TestSchemaFootprint_Minimal(t *testing.T) {
 	minSrv := NewServerWithIO(nil, nil)
 	RegisterTools(minSrv, deps, nil)
 
-	// Get the tool definitions for minimal tools
+	// Get the tool definitions for minimal tools.
 	minTools := minSrv.GetTools()
+	startupToolNames := map[string]bool{
+		"discover_tools": true,
+		"execute_tool":   true,
+		"health":         true,
+	}
+	var startupSchemaTools []ToolDefinition
 	var minimalSchemaTools []ToolDefinition
 	for _, td := range minTools {
+		if startupToolNames[td.Name] {
+			startupSchemaTools = append(startupSchemaTools, td)
+		}
 		if isToolInProfile(td.Name, "minimal") {
 			minimalSchemaTools = append(minimalSchemaTools, td)
 		}
 	}
 
+	startupJSON, err := json.Marshal(startupSchemaTools)
+	if err != nil {
+		t.Fatalf("marshal startup schemas: %v", err)
+	}
 	minimalJSON, err := json.Marshal(minimalSchemaTools)
 	if err != nil {
 		t.Fatalf("marshal minimal schemas: %v", err)
 	}
 
+	if len(startupSchemaTools) != 3 {
+		t.Fatalf("startup tool count = %d, want 3", len(startupSchemaTools))
+	}
+	if len(minimalSchemaTools) != 4 {
+		t.Fatalf("minimal tool count = %d, want 4 including retrieve_output", len(minimalSchemaTools))
+	}
+	if len(startupJSON) > len(minimalJSON) {
+		t.Fatalf("startup schema footprint %d should not exceed total minimal footprint %d", len(startupJSON), len(minimalJSON))
+	}
 	if len(minimalJSON) > 2400 {
 		t.Errorf("minimal profile schema footprint %d bytes exceeds 2400 bytes", len(minimalJSON))
 	}
@@ -480,6 +535,8 @@ func TestSchemaFootprint_Minimal(t *testing.T) {
 		t.Errorf("minimal (%d bytes) is %.1f%% of core (%d bytes), expected < 35%%",
 			len(minimalJSON), ratio*100, len(coreJSON))
 	}
+	t.Logf("minimal profile schema footprint: startup=%d bytes (%d tools), total=%d bytes (%d tools)",
+		len(startupJSON), len(startupSchemaTools), len(minimalJSON), len(minimalSchemaTools))
 }
 
 func TestDeferredRegistration(t *testing.T) {

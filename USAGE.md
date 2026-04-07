@@ -382,7 +382,7 @@ The `risk_score` is the betweenness centrality of the target symbol (0-1). Highe
 
 ### `read_symbol` -- Read Source Code
 
-Safely inspects a symbol by reading indexed source from disk with bounded defaults, explicit windowing, and deterministic flow summaries for large symbols.
+Safely inspects a symbol by reading indexed source from disk with bounded defaults, explicit windowing, and deterministic flow summaries for large symbols. The preferred inspection path is `list_file_symbols` -> `read_symbol(mode="bounded")` -> `read_symbol(mode="flow_summary")` before any full read.
 
 **Parameters:**
 
@@ -436,7 +436,7 @@ Behavior notes:
 - `full` is only honored when the symbol fits within both active safety budgets. Otherwise it downgrades to `bounded` and sets `downgraded=true`.
 - `signature` returns metadata plus the signature only.
 - `section` can target `start_line`/`end_line` or a named `section`.
-- `flow_summary` returns structured steps, helper calls, validations, side effects, and suggested follow-up reads instead of large raw source.
+- `flow_summary` is the default deep-inspection payload: it returns structured steps, helper calls, validations, side effects, and suggested follow-up reads instead of large raw source.
 
 Accepts either the symbol name (for example `"ParseFile"`) or the full SHA-256 hash ID. If the name matches multiple symbols, the first match is returned.
 
@@ -444,7 +444,7 @@ Accepts either the symbol name (for example `"ParseFile"`) or the full SHA-256 h
 
 ### `list_file_symbols` -- File Symbol Inventory
 
-Lists indexed symbols in a file in source order. Use it when you need a method inventory and do not want to fall back to shell grep.
+Lists indexed symbols in a file in source order. Use it when you need a method inventory and do not want to fall back to shell grep. It is the preferred first step before bounded `read_symbol` reads.
 
 **Parameters:**
 
@@ -967,7 +967,7 @@ context-mcp provides 5 prompt templates that orchestrate multi-tool workflows:
 | `trace_impact` | Trace the blast radius of changes to a symbol (args: `symbol`, required) |
 | `prepare_fix_context` | Gather context needed to fix a bug (args: `description` required, `file` optional) |
 | `onboard_repo` | Get oriented in the codebase -- architecture, key symbols, entry points |
-| `collect_minimal_context` | Collect minimum context for a task within a token budget (args: `task` required, `budget` optional) |
+| `collect_minimal_context` | Collect minimum context for a task within a token budget (args: `query` required, `budget_tokens` optional) |
 
 ---
 
@@ -1307,7 +1307,7 @@ Tools like `read_symbol` try to stay safe via bounded defaults and automatic dow
 
 ## Minimal Profile
 
-The `minimal` profile starts with only 4 SDK-registered tools, keeping the initial tool schema under 35% of the core profile's size:
+The `minimal` profile starts with 3 SDK-registered tools, keeping the startup schema under 35% of the core profile's size. `retrieve_output` is always registered as infrastructure, so the total minimal-profile footprint is 4 tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -1325,7 +1325,7 @@ Plus `retrieve_output` which is always registered as infrastructure.
 
 **Workflow:**
 
-1. Agent starts with `discover_tools`, `execute_tool`, `health`, and `retrieve_output`
+1. Agent starts with `discover_tools`, `execute_tool`, and `health`, plus always-on `retrieve_output`
 2. Agent calls `discover_tools({"need": "I want to search for code"})` -> `inspection` bundle activated
 3. `context`, `read_symbol`, `list_file_symbols`, `understand` appear in tool list
 4. Agent uses activated tools directly (no proxy needed)
@@ -1337,7 +1337,7 @@ All 17 standard tools remain available -- they are built but deferred until acti
 
 | Profile | Active at startup | Dynamic discovery? | Total available tools |
 |---------|------------------|-------------------|----------------------|
-| `minimal` | `discover_tools`, `execute_tool`, `health`, `retrieve_output` | Yes, via `discover_tools` | 4 (expandable) |
+| `minimal` | `discover_tools`, `execute_tool`, `health` | Yes, via `discover_tools` | 4 total (3 startup + retrieve_output) |
 | `core` | 7 core analysis tools + `retrieve_output` | No | 8 |
 | `extended` | 14 tools (core + extended) + `retrieve_output` | No | 15 |
 | `full` | All 20 tools | No (everything available) | 20 |

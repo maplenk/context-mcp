@@ -333,6 +333,92 @@ func TestPromptGetOnboardRepo(t *testing.T) {
 	}
 }
 
+// TestPromptGetCollectMinimalContext verifies the collect_minimal_context prompt uses
+// assemble_context's canonical query/budget_tokens inputs and includes the safer
+// inspection sequence before any full read.
+func TestPromptGetCollectMinimalContext(t *testing.T) {
+	_, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	input := &bytes.Buffer{}
+	output := &syncBuffer{}
+
+	sendJSONRPC(input, 1, "initialize", map[string]interface{}{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo":      map[string]interface{}{"name": "test", "version": "1.0"},
+	})
+	notif, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	fmt.Fprintf(input, "%s\n", notif)
+	sendJSONRPC(input, 2, "prompts/get", map[string]interface{}{
+		"name": "collect_minimal_context",
+		"arguments": map[string]interface{}{
+			"query":         "refactor order flow",
+			"budget_tokens":  "2400",
+		},
+	})
+
+	srv := NewServerWithIO(input, output)
+	RegisterPrompts(srv)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Serve()
+	}()
+
+	responses := readJSONRPCResponses(t, output, 2, 3*time.Second)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("server exited with: %v", err)
+		}
+	default:
+	}
+
+	var promptResp map[string]interface{}
+	for _, r := range responses {
+		if id, ok := r["id"].(float64); ok && id == 2 {
+			promptResp = r
+			break
+		}
+	}
+	if promptResp == nil {
+		t.Fatalf("no response with id=2")
+	}
+
+	result, ok := promptResp["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("result not a map: %v", promptResp)
+	}
+
+	messages, ok := result["messages"].([]interface{})
+	if !ok || len(messages) == 0 {
+		t.Fatalf("messages missing or empty: %v", result)
+	}
+
+	msg, _ := messages[0].(map[string]interface{})
+	content, _ := msg["content"].(map[string]interface{})
+	text, _ := content["text"].(string)
+
+	for _, want := range []string{
+		`assemble_context with query="refactor order flow", budget_tokens=2400`,
+		`list_file_symbols`,
+		`read_symbol with mode="bounded"`,
+		`read_symbol with mode="flow_summary"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected prompt text to contain %q, got %q", want, text)
+		}
+	}
+	if strings.Contains(text, "task=") || strings.Contains(text, "budget=") {
+		t.Errorf("expected prompt text to avoid legacy task/budget args, got %q", text)
+	}
+}
+
 // TestResourceReadRepoSummary verifies the repo_summary resource returns valid JSON.
 func TestResourceReadRepoSummary(t *testing.T) {
 	deps, cleanup := setupTestEnv(t)
@@ -568,10 +654,10 @@ func TestResourceReadIndexStats(t *testing.T) {
 		t.Fatalf("resource text is not valid JSON: %v", err)
 	}
 
-	// Test env has 4 function nodes
+	// Test env has 4 function nodes plus 2 route nodes
 	totalNodes, _ := stats["total_nodes"].(float64)
-	if int(totalNodes) != 4 {
-		t.Errorf("expected total_nodes=4, got %v", totalNodes)
+	if int(totalNodes) != 6 {
+		t.Errorf("expected total_nodes=6, got %v", totalNodes)
 	}
 
 	typeCounts, ok := stats["node_counts_by_type"].(map[string]interface{})
@@ -582,10 +668,13 @@ func TestResourceReadIndexStats(t *testing.T) {
 	if int(funcCount) != 4 {
 		t.Errorf("expected 4 function nodes, got %v", funcCount)
 	}
+	routeCount, _ := typeCounts["route"].(float64)
+	if int(routeCount) != 2 {
+		t.Errorf("expected 2 route nodes, got %v", routeCount)
+	}
 
 	uniqueFiles, _ := stats["unique_files"].(float64)
-	if int(uniqueFiles) != 2 {
-		t.Errorf("expected 2 unique files, got %v", uniqueFiles)
+	if int(uniqueFiles) != 3 {
+		t.Errorf("expected 3 unique files, got %v", uniqueFiles)
 	}
 }
-

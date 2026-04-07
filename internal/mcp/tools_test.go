@@ -92,6 +92,24 @@ func validateOrder(order Order) bool {
 			EndByte:    50,
 			ContentSum: "helper utility function",
 		},
+		{
+			ID:         types.GenerateNodeID("routes.php", "POST /v1/orders"),
+			FilePath:   "routes.php",
+			SymbolName: "POST /v1/orders",
+			NodeType:   types.NodeTypeRoute,
+			StartByte:  0,
+			EndByte:    40,
+			ContentSum: "POST /v1/orders v1 orders api endpoint processOrder",
+		},
+		{
+			ID:         types.GenerateNodeID("routes.php", "GET /v3/orders/{id}"),
+			FilePath:   "routes.php",
+			SymbolName: "GET /v3/orders/{id}",
+			NodeType:   types.NodeTypeRoute,
+			StartByte:  41,
+			EndByte:    90,
+			ContentSum: "GET /v3/orders/{id} v3 orders api endpoint validateOrder",
+		},
 	}
 
 	if err := store.UpsertNodes(nodes); err != nil {
@@ -103,6 +121,8 @@ func validateOrder(order Order) bool {
 		{SourceID: nodes[0].ID, TargetID: nodes[1].ID, EdgeType: types.EdgeTypeCalls},
 		{SourceID: nodes[0].ID, TargetID: nodes[2].ID, EdgeType: types.EdgeTypeCalls},
 		{SourceID: nodes[2].ID, TargetID: nodes[3].ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: nodes[4].ID, TargetID: nodes[0].ID, EdgeType: types.EdgeTypeHandles, TargetSymbol: "processOrder"},
+		{SourceID: nodes[5].ID, TargetID: nodes[2].ID, EdgeType: types.EdgeTypeHandles, TargetSymbol: "validateOrder"},
 	}
 
 	if err := store.UpsertEdges(edges); err != nil {
@@ -747,6 +767,10 @@ func TestAllToolsRegistered(t *testing.T) {
 		"get_architecture_summary",
 		"explore",
 		"understand",
+		"compare_symbols",
+		"find_routes",
+		"trace_route",
+		"compare_routes",
 		"assemble_context",
 		"checkpoint_context",
 		"read_delta",

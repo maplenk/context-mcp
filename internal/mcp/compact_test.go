@@ -289,3 +289,72 @@ func TestCompactMode_AssembleContext(t *testing.T) {
 		t.Errorf("compact response (%d) should be smaller than normal (%d)", compactSize, normalSize)
 	}
 }
+
+func TestCompactMode_TaskTools(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	cases := []struct {
+		name   string
+		tool   string
+		normal string
+		compact string
+	}{
+		{
+			name:   "compare_symbols",
+			tool:   "compare_symbols",
+			normal: `{"left":"processOrder","right":"validateOrder"}`,
+			compact: `{"left":"processOrder","right":"validateOrder","compact":true}`,
+		},
+		{
+			name:   "find_routes",
+			tool:   "find_routes",
+			normal: `{"query":"orders","limit":5}`,
+			compact: `{"query":"orders","limit":5,"compact":true}`,
+		},
+		{
+			name:   "trace_route",
+			tool:   "trace_route",
+			normal: `{"route":"POST /v1/orders","depth":2}`,
+			compact: `{"route":"POST /v1/orders","depth":2,"compact":true}`,
+		},
+		{
+			name:   "compare_routes",
+			tool:   "compare_routes",
+			normal: `{"left":"POST /v1/orders","right":"GET /v3/orders/{id}","depth":2}`,
+			compact: `{"left":"POST /v1/orders","right":"GET /v3/orders/{id}","depth":2,"compact":true}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, ok := server.GetHandler(tc.tool)
+			if !ok {
+				t.Fatalf("%s handler not registered", tc.tool)
+			}
+
+			normalResult, err := handler(json.RawMessage(tc.normal))
+			if err != nil {
+				t.Fatalf("normal handler error: %v", err)
+			}
+			compactResult, err := handler(json.RawMessage(tc.compact))
+			if err != nil {
+				t.Fatalf("compact handler error: %v", err)
+			}
+
+			normalBytes, _ := json.MarshalIndent(normalResult, "", "  ")
+			compactBytes, _ := json.MarshalIndent(compactResult, "", "  ")
+			if len(compactBytes) >= len(normalBytes) {
+				t.Fatalf("compact response (%d) should be smaller than normal (%d)", len(compactBytes), len(normalBytes))
+			}
+
+			compactJSON := string(compactBytes)
+			if strings.Contains(compactJSON, `"summary"`) {
+				t.Fatalf("compact response should not include summary: %s", compactJSON)
+			}
+		})
+	}
+}

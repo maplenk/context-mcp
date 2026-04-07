@@ -177,8 +177,8 @@ Run your own benchmarks with `./benchmarks/run_mcp_usage.sh`.
 | **Search & Discovery** | `context` | Hybrid ranked search combining lexical, semantic, and graph signals |
 | | `search_code` | Regex search across indexed source files |
 | | `explore` | Symbol search with optional dependency analysis |
-| **Code Reading** | `read_symbol` | Safe-by-default source inspection — bounded, never dumps giant symbols. Supports signature, section, flow\_summary, full modes |
-| | `list_file_symbols` | File symbol inventory in source order |
+| **Code Reading** | `read_symbol` | Safe-by-default source inspection — bounded first, then `flow_summary`, with full reads only when safe. Pair with `list_file_symbols` before escalating |
+| | `list_file_symbols` | File symbol inventory in source order; preferred before `read_symbol` for deep inspection |
 | **Impact & Architecture** | `impact` | Blast radius analysis with risk classification |
 | | `trace_call_path` | Call path tracing between two symbols |
 | | `understand` | Deep symbol analysis with callers, callees, PageRank |
@@ -213,16 +213,18 @@ Tools like `read_symbol` try to stay safe via bounded defaults and automatic dow
 
 ## Minimal Profile
 
-Start with just 4 tools (`discover_tools`, `execute_tool`, `health`, `retrieve_output`) and activate more on demand:
+Start with 3 tools (`discover_tools`, `execute_tool`, `health`) and keep `retrieve_output` always available as infrastructure, for 4 total minimal-profile tools:
 
 | Profile | Active at startup | Can activate more? |
 |---------|------------------|--------------------|
-| `minimal` | `discover_tools`, `execute_tool`, `health`, `retrieve_output` | Yes, via `discover_tools` |
+| `minimal` | `discover_tools`, `execute_tool`, `health` | Yes, via `discover_tools` |
 | `core` | 7 core analysis tools + `retrieve_output` | No dynamic discovery |
 | `extended` | 14 tools + `retrieve_output` | No dynamic discovery |
 | `full` | All 20 tools | Everything available |
 
 `retrieve_output` is always registered in every profile as infrastructure for paginated retrieval of oversized responses.
+
+That means the minimal profile has a 3-tool startup schema footprint and a 4-tool total footprint once infrastructure is included.
 
 Use `minimal` when your agent's context window is constrained or when startup tool-definition cost matters. The agent discovers and activates only the tool bundles it needs, reducing initial schema overhead by ~65% compared to `extended`.
 

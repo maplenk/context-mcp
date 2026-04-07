@@ -95,8 +95,9 @@ Steps:
 1. Call context with the bug description to find relevant code symbols
 2. If a likely file is identified, call list_file_symbols on that file to inventory the available symbols
 3. Call read_symbol with mode="bounded" on the top 3 relevant symbols to inspect them safely
-4. Call understand on the most relevant symbol to see its relationships and dependencies
-5. Prepare a concise summary of the code area, the likely root cause, and a suggested fix approach`, description, fileHint))),
+4. Call read_symbol with mode="flow_summary" on the most relevant symbol before escalating to full reads
+5. Call understand on the most relevant symbol to see its relationships and dependencies
+6. Prepare a concise summary of the code area, the likely root cause, and a suggested fix approach`, description, fileHint))),
 				},
 			), nil
 		},
@@ -129,28 +130,31 @@ func registerCollectMinimalContextPrompt(s *Server) {
 	s.AddPrompt(
 		mcp.NewPrompt("collect_minimal_context",
 			mcp.WithPromptDescription("Collect the minimum context needed for a task within a token budget"),
-			mcp.WithArgument("task", mcp.ArgumentDescription("Description of the task"), mcp.RequiredArgument()),
-			mcp.WithArgument("budget", mcp.ArgumentDescription("Token budget (default: 4000)")),
+			mcp.WithArgument("query", mcp.ArgumentDescription("Description of the task or question"), mcp.RequiredArgument()),
+			mcp.WithArgument("budget_tokens", mcp.ArgumentDescription("Token budget (default: 4000)")),
 		),
 		func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			task := req.Params.Arguments["task"]
-			if task == "" {
-				return nil, fmt.Errorf("task argument is required")
+			query := req.Params.Arguments["query"]
+			if query == "" {
+				return nil, fmt.Errorf("query argument is required")
 			}
-			budget := req.Params.Arguments["budget"]
-			if budget == "" {
-				budget = "4000"
+			budgetTokens := req.Params.Arguments["budget_tokens"]
+			if budgetTokens == "" {
+				budgetTokens = "4000"
 			}
 			return mcp.NewGetPromptResult(
-				"Collect minimal context for: "+task,
+				"Collect minimal context for: "+query,
 				[]mcp.PromptMessage{
 					mcp.NewPromptMessage(mcp.RoleUser, mcp.NewTextContent(fmt.Sprintf(`Collect the minimum context needed for this task: "%s"
 Token budget: %s
 
 Steps:
 1. Call context with the task description to find relevant symbols
-2. Call assemble_context with task="%s", budget=%s, and mode="snippets" to get optimally ranked context within the token budget
-3. Present the assembled context in order of relevance, showing symbol names, file paths, and code snippets`, task, budget, task, budget))),
+2. Call list_file_symbols on the most likely files to inventory available symbols
+3. Call read_symbol with mode="bounded" on the most relevant symbols
+4. Call read_symbol with mode="flow_summary" on the top symbol before escalating to full reads
+5. Call assemble_context with query="%s", budget_tokens=%s, and mode="snippets" to get optimally ranked context within the token budget
+6. Present the assembled context in order of relevance, showing symbol names, file paths, and code snippets`, query, budgetTokens, query, budgetTokens))),
 				},
 			), nil
 		},

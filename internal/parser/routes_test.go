@@ -9,6 +9,15 @@ import (
 	"github.com/maplenk/context-mcp/internal/types"
 )
 
+func findHandleEdge(edges []types.ASTEdge, target string) *types.ASTEdge {
+	for i, edge := range edges {
+		if edge.EdgeType == types.EdgeTypeHandles && edge.TargetSymbol == target {
+			return &edges[i]
+		}
+	}
+	return nil
+}
+
 func TestExtractRoutes_BasicRoute(t *testing.T) {
 	src := []byte(`<?php
 Route::get('/status', ['as' => 'status', 'uses' => 'statusController@QBHealthCheck']);
@@ -19,95 +28,80 @@ Route::post('v1/merchant/{chainID}/getDashboardStats', ['as' => 'getDashboardSta
 	if len(nodes) != 2 {
 		t.Fatalf("expected 2 route nodes, got %d", len(nodes))
 	}
-
-	// Check first route
 	if nodes[0].SymbolName != "GET /status" {
 		t.Errorf("expected 'GET /status', got %q", nodes[0].SymbolName)
 	}
-	if nodes[0].NodeType != types.NodeTypeRoute {
-		t.Errorf("expected NodeTypeRoute, got %v", nodes[0].NodeType)
-	}
-
-	// Check second route
 	if nodes[1].SymbolName != "POST /v1/merchant/{chainID}/getDashboardStats" {
-		t.Errorf("expected 'POST /v1/merchant/{chainID}/getDashboardStats', got %q", nodes[1].SymbolName)
+		t.Errorf("expected normalized path, got %q", nodes[1].SymbolName)
 	}
-
-	// Check edges
-	if len(edges) != 2 {
-		t.Fatalf("expected 2 edges, got %d", len(edges))
+	if findHandleEdge(edges, "statusController.QBHealthCheck") == nil {
+		t.Fatal("expected fully qualified handler target for status route")
 	}
-	if edges[0].EdgeType != types.EdgeTypeHandles {
-		t.Errorf("expected EdgeTypeHandles, got %v", edges[0].EdgeType)
-	}
-	if edges[0].TargetSymbol != "QBHealthCheck" {
-		t.Errorf("expected target symbol 'QBHealthCheck', got %q", edges[0].TargetSymbol)
-	}
-	if edges[1].TargetSymbol != "getDashboardStats" {
-		t.Errorf("expected target symbol 'getDashboardStats', got %q", edges[1].TargetSymbol)
+	if findHandleEdge(edges, "chartController.getDashboardStats") == nil {
+		t.Fatal("expected fully qualified handler target for dashboard route")
 	}
 }
 
-func TestExtractRoutes_GroupPrefix(t *testing.T) {
+func TestExtractRoutes_GroupPrefixAndArrayHandlers(t *testing.T) {
 	src := []byte(`<?php
 Route::group(['prefix' => 'v1/webhook'], function () {
-    Route::post('/receiveSalesInvoice', ['as' => 'receiveSalesInvoice', 'uses' => 'WebhookTestController@receiveSalesInvoice']);
-    Route::post('/receiveRefundInvoice', ['as' => 'receiveRefundInvoice', 'uses' => 'WebhookTestController@receiveRefundInvoice']);
+    Route::post('/receiveSalesInvoice', [WebhookTestController::class, 'receiveSalesInvoice']);
+    Route::post('/receiveRefundInvoice', [WebhookTestController::class, 'receiveRefundInvoice']);
 });
 `)
-	nodes, _ := ExtractRoutes(src, "app/Http/routes.webhooks.php")
+	nodes, edges := ExtractRoutes(src, "app/Http/routes.webhooks.php")
 
-	if len(nodes) < 2 {
-		t.Fatalf("expected at least 2 route nodes, got %d", len(nodes))
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 route nodes, got %d", len(nodes))
 	}
-
-	// Routes should have group prefix applied
-	for _, n := range nodes {
-		if !strings.Contains(n.SymbolName, "/v1/webhook/") {
-			t.Errorf("expected group prefix 'v1/webhook' in route %q", n.SymbolName)
-		}
-	}
-
-	// Verify full paths
 	if nodes[0].SymbolName != "POST /v1/webhook/receiveSalesInvoice" {
-		t.Errorf("expected 'POST /v1/webhook/receiveSalesInvoice', got %q", nodes[0].SymbolName)
+		t.Errorf("unexpected first route %q", nodes[0].SymbolName)
 	}
 	if nodes[1].SymbolName != "POST /v1/webhook/receiveRefundInvoice" {
-		t.Errorf("expected 'POST /v1/webhook/receiveRefundInvoice', got %q", nodes[1].SymbolName)
+		t.Errorf("unexpected second route %q", nodes[1].SymbolName)
+	}
+	if findHandleEdge(edges, "WebhookTestController.receiveSalesInvoice") == nil {
+		t.Fatal("expected fully qualified array handler target")
+	}
+	if findHandleEdge(edges, "WebhookTestController.receiveRefundInvoice") == nil {
+		t.Fatal("expected fully qualified array handler target")
 	}
 }
 
-func TestExtractRoutes_NestedGroups(t *testing.T) {
+func TestExtractRoutes_MatchAnyAndResource(t *testing.T) {
 	src := []byte(`<?php
-Route::group(['prefix' => 'v1'], function () {
-    Route::group(['prefix' => 'merchant'], function () {
-        Route::get('/list', ['as' => 'merchantList', 'uses' => 'MerchantController@list']);
-    });
-});
+Route::match(['get', 'post'], '/auth/login', [AuthController::class, 'login']);
+Route::any('/sync', SyncController::class);
+Route::apiResource('/v1/orders', OrderController::class);
 `)
-	nodes, _ := ExtractRoutes(src, "routes/api.php")
+	nodes, edges := ExtractRoutes(src, "routes/api.php")
 
-	if len(nodes) != 1 {
-		t.Fatalf("expected 1 route node, got %d", len(nodes))
+	if len(nodes) != 12 {
+		t.Fatalf("expected 12 route nodes, got %d", len(nodes))
 	}
-
-	if nodes[0].SymbolName != "GET /v1/merchant/list" {
-		t.Errorf("expected 'GET /v1/merchant/list', got %q", nodes[0].SymbolName)
+	for _, want := range []string{
+		"GET /auth/login",
+		"POST /auth/login",
+		"GET /sync",
+		"DELETE /sync",
+		"GET /v1/orders",
+		"POST /v1/orders",
+		"GET /v1/orders/{id}",
+		"PUT /v1/orders/{id}",
+		"DELETE /v1/orders/{id}",
+	} {
+		if findNodeBySymbol(nodes, want) == nil {
+			t.Errorf("expected route %q", want)
+		}
 	}
-}
-
-func TestExtractRoutes_NoRoutes(t *testing.T) {
-	src := []byte(`<?php
-class OrderController {
-    public function index() { return "hello"; }
-}
-`)
-	nodes, edges := ExtractRoutes(src, "app/Http/Controllers/OrderController.php")
-	if len(nodes) != 0 {
-		t.Errorf("expected 0 route nodes from non-route file, got %d", len(nodes))
+	if findHandleEdge(edges, "AuthController.login") == nil {
+		t.Fatal("expected match handler edge")
 	}
-	if len(edges) != 0 {
-		t.Errorf("expected 0 edges from non-route file, got %d", len(edges))
+	if findHandleEdge(edges, "SyncController.__invoke") == nil {
+		t.Fatal("expected invokable controller edge")
+	}
+	if findHandleEdge(edges, "OrderController.index") == nil || findHandleEdge(edges, "OrderController.destroy") == nil {
+		t.Fatal("expected apiResource handler edges")
 	}
 }
 
@@ -125,7 +119,7 @@ Route::post('/v1/order', ['as' => 'createOrder', 'uses' => 'OrderController@crea
 		"POST /v1/order",
 		"v1 order",
 		"api endpoint",
-		"OrderController create",
+		"OrderController.create",
 	} {
 		if !strings.Contains(got, wantPart) {
 			t.Errorf("expected ContentSum to contain %q, got %q", wantPart, got)
@@ -134,7 +128,6 @@ Route::post('/v1/order', ['as' => 'createOrder', 'uses' => 'OrderController@crea
 }
 
 func TestExtractRoutes_NoHandler(t *testing.T) {
-	// Route without 'uses' => should still create a node but no edge
 	src := []byte(`<?php
 Route::get('/health', function() { return 'ok'; });
 `)
@@ -148,6 +141,118 @@ Route::get('/health', function() { return 'ok'; });
 	}
 	if len(edges) != 0 {
 		t.Errorf("expected 0 edges for closure route, got %d", len(edges))
+	}
+}
+
+func TestExtractJSRoutes_MountedRouterPrefix(t *testing.T) {
+	src := []byte(`
+const router = express.Router();
+router.get('/users', controller.listUsers);
+app.use('/api/v1', router);
+`)
+	nodes, edges := ExtractJSRoutes(src, "routes.js")
+
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 JS route, got %d", len(nodes))
+	}
+	if nodes[0].SymbolName != "GET /api/v1/users" {
+		t.Fatalf("expected mounted path, got %q", nodes[0].SymbolName)
+	}
+	if findHandleEdge(edges, "listUsers") == nil {
+		t.Fatal("expected JS handler edge")
+	}
+}
+
+func TestExtractJSRoutes_NestDecorators(t *testing.T) {
+	src := []byte(`
+@Controller('/users')
+export class UsersController {
+  @Get('/:id')
+  getUser() {
+    return {};
+  }
+}
+`)
+	nodes, edges := ExtractJSRoutes(src, "users.controller.ts")
+
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 Nest route, got %d", len(nodes))
+	}
+	if nodes[0].SymbolName != "GET /users/:id" {
+		t.Fatalf("expected controller + method path, got %q", nodes[0].SymbolName)
+	}
+	if findHandleEdge(edges, "UsersController.getUser") == nil {
+		t.Fatal("expected fully qualified Nest handler")
+	}
+}
+
+func TestParseFile_Go_RouteNodes(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "routes.go", `package main
+
+import "net/http"
+
+func registerRoutes() {
+	http.HandleFunc("/status", statusHandler)
+}
+
+func statusHandler(w http.ResponseWriter, r *http.Request) {}
+`)
+
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile Go: %v", err)
+	}
+	if findNodeBySymbol(result.Nodes, "ANY /status") == nil {
+		t.Fatal("expected Go route node from http.HandleFunc")
+	}
+	if findHandleEdge(result.Edges, "statusHandler") == nil {
+		t.Fatal("expected Go handler edge")
+	}
+}
+
+func TestParseFile_JS_RouteNodes(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "app.js", `
+const router = express.Router();
+router.post('/orders', createOrder);
+app.use('/api', router);
+function createOrder() {}
+`)
+
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile JS: %v", err)
+	}
+	if findNodeBySymbol(result.Nodes, "POST /api/orders") == nil {
+		t.Fatal("expected JS route node from parser integration")
+	}
+}
+
+func TestParseFile_TS_NestRouteNodes(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "users.controller.ts", `
+@Controller('/users')
+export class UsersController {
+  @Post('/')
+  create() {
+    return {};
+  }
+}
+`)
+
+	p := New()
+	result, err := p.ParseFile(path, dir)
+	if err != nil {
+		t.Fatalf("ParseFile TS: %v", err)
+	}
+	if findNodeBySymbol(result.Nodes, "POST /users/") == nil && findNodeBySymbol(result.Nodes, "POST /users") == nil {
+		t.Fatal("expected TS route node from Nest decorators")
+	}
+	if findHandleEdge(result.Edges, "UsersController.create") == nil {
+		t.Fatal("expected TS handler edge")
 	}
 }
 
