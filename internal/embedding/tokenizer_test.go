@@ -7,7 +7,10 @@ import (
 )
 
 func getModelDir() string {
-	if p := os.Getenv("QB_ONNX_MODEL"); p != "" {
+	if p := os.Getenv("CONTEXT_MCP_ONNX_MODEL"); p != "" {
+		return p
+	}
+	if p := os.Getenv("QB_ONNX_MODEL"); p != "" { // backward compat
 		return p
 	}
 	if p := os.Getenv("ONNX_MODEL_DIR"); p != "" {

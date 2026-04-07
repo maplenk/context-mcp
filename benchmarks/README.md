@@ -61,7 +61,7 @@ The hook activates when pushed commits modify:
 
 ### Skip
 ```bash
-QB_SKIP_BENCH=1 git push          # skip for one push
+CONTEXT_MCP_SKIP_BENCH=1 git push  # skip for one push
 git push --no-verify               # skip all hooks
 ```
 
@@ -78,7 +78,7 @@ The benchmark suite measures three dimensions of context-mcp quality:
 | **Graph Performance**| PageRank, blast radius, betweenness centrality | `BenchmarkPageRank`, etc.        |
 | **Harness Usage**    | Live MCP tool choice, token usage, and output size in Claude/Codex | `run_mcp_usage.sh` + smoke scripts |
 
-**Canonical benchmark target**: **QBApps/qbapi** (set via `QB_TEST_REPO` env var)
+**Canonical benchmark target**: **QBApps/qbapi** (set via `CONTEXT_MCP_TEST_REPO` env var)
 
 All benchmarks MUST be run against this repo. It is a Laravel multi-tenant retail/POS
 backend (~780 PHP files, staging branch) that produces ~12.6K nodes and ~16.3K edges
@@ -92,7 +92,7 @@ representative characteristics for regression detection.
 For **cross-engine comparison** (e.g. codebase-memory-mcp), always use the same qbapi
 target. The codebase-memory-mcp project name for CLI is:
 ```
-project: "Users-naman-Documents-QBApps-qbapi"
+project: "<path-based-project-name>"
 ```
 
 ---
@@ -128,7 +128,7 @@ benchmarks/
 
 ```bash
 # 1. Run benchmarks for current HEAD
-./benchmarks/run.sh /Users/naman/Documents/QBApps/qbapi
+./benchmarks/run.sh /path/to/test/repo
 
 # 2. Benchmark a specific commit
 ./benchmarks/compare.sh fab5104
@@ -143,7 +143,7 @@ python3 benchmarks/dashboard.py
 python3 benchmarks/dashboard.py --html > report.html
 
 # 6. Run live Claude/Codex MCP usage benchmarks
-./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
+./benchmarks/run_mcp_usage.sh /path/to/test/repo
 ```
 
 ---
@@ -159,7 +159,7 @@ results to `results/`.
 ./benchmarks/run.sh [target-repo-path]
 ```
 
-The positional target repo path is treated as canonical for the full suite. `run.sh` exports it to `QB_TEST_REPO` before invoking the real-repo tests, so the query, quality, and tool phases all run against the same qbapi target.
+The positional target repo path is treated as canonical for the full suite. `run.sh` exports it to `CONTEXT_MCP_TEST_REPO` before invoking the real-repo tests, so the query, quality, and tool phases all run against the same qbapi target.
 
 A clean `run.sh` execution exits `0` only when the summed `FAIL:` counts across the query, search-quality, and tool output files are zero.
 
@@ -256,7 +256,7 @@ This script is separate from `run.sh` because it requires authenticated paid cli
 
 ```bash
 # Full live benchmark on the canonical qbapi target
-./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
+./benchmarks/run_mcp_usage.sh /path/to/test/repo
 
 # No-MCP baseline only
 ./benchmarks/run_mcp_usage.sh --variant nomcp
@@ -265,7 +265,7 @@ This script is separate from `run.sh` because it requires authenticated paid cli
 ./benchmarks/run_mcp_usage.sh --client claude --transport http
 
 # Custom output path
-./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi \
+./benchmarks/run_mcp_usage.sh /path/to/test/repo \
   --output benchmarks/results/mcp-usage-custom.json
 ```
 
@@ -782,7 +782,7 @@ handles both automatically):
   "run_date": "2026-04-06T08:12:00Z",
   "environment": {
     "os": "darwin/arm64",
-    "target_repo": "/Users/naman/Documents/QBApps/qbapi",
+    "target_repo": "/path/to/test/repo",
     "clients": ["claude_code", "codex"],
     "transport": "all",
     "variant": "all",
@@ -928,7 +928,7 @@ python3 benchmarks/dashboard.py
 python3 benchmarks/dashboard.py --html > benchmarks/results/release-report.html
 
 # 6. Run live MCP vs no-MCP usage benchmarks and save the publishable artifact
-./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
+./benchmarks/run_mcp_usage.sh /path/to/test/repo
 
 # 7. Commit the new baseline and usage artifact
 git add benchmarks/results/

@@ -16,7 +16,7 @@
 - Direct-install packaging is currently limited to macOS Apple Silicon (`darwin/arm64`)
 
 ### Reference Project
-- **C predecessor**: `/Users/naman/Documents/QBApps/codebase-memory-mcp/` — 16 tools, Louvain communities, betweenness centrality, architecture analysis, ADR support, ranked search (BM25 + PPR + betweenness + HITS)
+- **C predecessor**: codebase-memory-mcp (local) — 16 tools, Louvain communities, betweenness centrality, architecture analysis, ADR support, ranked search (BM25 + PPR + betweenness + HITS)
 - **v0.8.0 composite ranking**: improved search from 30→123 on 15-case benchmark
 
 ---
@@ -169,7 +169,7 @@ qb-context/
   - **Matryoshka dimension truncation**: 64, 128, 256, 512, or 896 (default 256)
   - L2 normalization, thread-safe via mutex
   - Semantic quality: `sim(ReadFile, ReadFileContents) = 0.69`, `sim(ReadFile, SQL) = 0.17`
-  - Model: `/Users/naman/Documents/coindex/quantized_model` (473MB, INT8, Qwen2ForCausalLM)
+  - Model: set via `CONTEXT_MCP_ONNX_MODEL` env var (473MB, INT8, Qwen2ForCausalLM)
 - `NewEmbedder()` factory returns TFIDFEmbedder; main.go tries ONNX first if `--onnx-model` configured
 - **Trigram/bigram generation** operates on `[]rune` (not `[]byte`) for correct Unicode handling
 - BPE tokenizer tracks **unknown token drops** with atomic counter + periodic warning log (every 1000th)
@@ -568,7 +568,7 @@ qb-context/
 - `tests/integration_test.go` — full pipeline (parse → store → embed → graph → search → delete → graph connectivity assertion)
 - `tests/incremental_test.go` — 5 tests (add/modify/delete/consistency/full cycle)
 - `tests/concurrent_test.go` — 5 tests (search during index, multi-file changes, search consistency, race conditions)
-- `tests/realrepo_test.go` — 3 test functions, 22 subtests (build tag: `realrepo`) against `/Users/naman/Documents/QBApps/qbapi` Laravel project: full pipeline indexing (31K nodes, 8K edges), all MCP tool handlers, domain-relevant search quality
+- `tests/realrepo_test.go` — 3 test functions, 22 subtests (build tag: `realrepo`) against the benchmark Laravel project (set via `CONTEXT_MCP_TEST_REPO`): full pipeline indexing (31K nodes, 8K edges), all MCP tool handlers, domain-relevant search quality
 - Benchmark tests added for parser, graph, and search packages
 
 ### Devil's Advocate Reviews (4 completed)

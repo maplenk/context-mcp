@@ -178,7 +178,7 @@
     "model": "claude-3-5-haiku-latest",
     "mcp_config": {
       "command": "context-mcp",
-      "args": ["--repo", "/Users/naman/Documents/context-mcp", "--profile", "extended"],
+      "args": ["--repo", "/path/to/project", "--profile", "extended"],
       "transport": "stdio"
     },
     "queries_tested": [

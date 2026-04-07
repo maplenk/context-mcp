@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET_REPO="${1:-${QB_TEST_REPO:-/path/to/test/repo}}"
+TARGET_REPO="${1:-${CONTEXT_MCP_TEST_REPO:-${QB_TEST_REPO:-/path/to/test/repo}}}"
 RESULTS_DIR="$REPO_ROOT/benchmarks/results"
 TIMESTAMP=$(date +%Y%m%dT%H%M%S)
 
@@ -19,7 +19,8 @@ if [ ! -d "$TARGET_REPO" ]; then
     exit 1
 fi
 
-export QB_TEST_REPO="$TARGET_REPO"
+export CONTEXT_MCP_TEST_REPO="$TARGET_REPO"
+export QB_TEST_REPO="$TARGET_REPO"  # backward compat
 
 mkdir -p "$RESULTS_DIR"
 
