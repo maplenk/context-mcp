@@ -34,7 +34,11 @@ type ToolDeps struct {
 	RepoRoot    string
 	Profile     string
 	Checkpoints *CheckpointStore // nil-safe, tools skip if nil
+	OutputStore *OutputStore     // nil-safe, initialized in RegisterTools if nil
 }
+
+// globalOutputStore is set during RegisterTools for use by toCallToolResultWithName.
+var globalOutputStore *OutputStore
 
 // stripInspectable returns a compact version of an Inspectable.
 // Compact contract: Keep ID, Name, FilePath, Score/Rank, line spans.
@@ -50,6 +54,10 @@ func stripInspectable(i types.Inspectable) types.Inspectable {
 // isToolInProfile returns true if a tool should be registered for the MCP SDK
 // based on the given profile. CLI tools are always registered regardless.
 func isToolInProfile(toolName, profile string) bool {
+	// Infrastructure tools always available in all profiles
+	if toolName == "retrieve_output" {
+		return true
+	}
 	coreTools := map[string]bool{
 		"context":           true,
 		"read_symbol":       true,
@@ -230,6 +238,12 @@ type IndexFunc func(path string) error
 // CLI tools: all 17 available via GetHandler/GetTools (always).
 // SDK tools (MCP protocol): gated by deps.Profile — "core" (7), "extended" (14), or "full" (17).
 func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
+	// Initialize output store if not provided
+	if deps.OutputStore == nil {
+		deps.OutputStore = NewOutputStore(50, 10*time.Minute)
+	}
+	globalOutputStore = deps.OutputStore
+
 	registerContextTool(s, deps)
 	registerImpactTool(s, deps)
 	registerReadSymbolTool(s, deps)
@@ -250,6 +264,8 @@ func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	// Discovery tools (registered in all modes, only SDK-active in minimal)
 	registerDiscoverToolsTool(s, deps)
 	registerExecuteToolTool(s, deps)
+	// Output sandbox (registered in all profiles)
+	registerRetrieveOutputTool(s, deps)
 	// P4: Register MCP resources and prompts
 	RegisterResources(s, deps)
 	RegisterPrompts(s)
@@ -501,7 +517,7 @@ func registerContextTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "context")
 	}
 
 	// Register or defer based on profile
@@ -741,7 +757,7 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "impact")
 	}
 
 	if isToolInProfile("impact", deps.Profile) {
@@ -2092,7 +2108,7 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "detect_changes")
 	}
 
 	if isToolInProfile("detect_changes", deps.Profile) {
@@ -2314,7 +2330,7 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "get_architecture_summary")
 	}
 
 	if isToolInProfile("get_architecture_summary", deps.Profile) {
@@ -2726,7 +2742,7 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "explore")
 	}
 
 	if isToolInProfile("explore", deps.Profile) {
@@ -2980,7 +2996,7 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "understand")
 	}
 
 	if isToolInProfile("understand", deps.Profile) {
@@ -3310,7 +3326,7 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "assemble_context")
 	}
 
 	if isToolInProfile("assemble_context", deps.Profile) {
@@ -3546,4 +3562,81 @@ func toCallToolResult(result interface{}) (*mcp.CallToolResult, error) {
 		}
 	}
 	return mcp.NewToolResultText(text), nil
+}
+
+// Tiered output protection thresholds.
+const (
+	warnThreshold    = 8 * 1024  // 8KB — log warning
+	sandboxThreshold = 16 * 1024 // 16KB — auto-sandbox
+)
+
+// recoveryHints provides tool-specific suggestions for avoiding large responses.
+var recoveryHints = map[string]string{
+	"understand":               "Try compact=true to reduce output size",
+	"impact":                   "Try compact=true or reduce depth",
+	"assemble_context":         "Try a smaller budget_tokens or mode=signatures",
+	"get_architecture_summary": "Try compact=true or a smaller limit",
+	"context":                  "Try compact=true or a smaller limit",
+	"read_symbol":              "Try mode=bounded or mode=signature instead of full",
+	"explore":                  "Try compact=true or include_deps=false",
+}
+
+// toCallToolResultWithName adds tiered output protection (warning at 8KB,
+// sandbox at 16KB) before delegating to toCallToolResult.
+func toCallToolResultWithName(result interface{}, toolName string) (*mcp.CallToolResult, error) {
+	var text string
+	switch v := result.(type) {
+	case string:
+		text = v
+	default:
+		jsonBytes, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal result: %w", err)
+		}
+		text = string(jsonBytes)
+	}
+
+	if len(text) > warnThreshold {
+		log.Printf("[output] %s response: %d bytes (threshold: %d)", toolName, len(text), sandboxThreshold)
+	}
+	if len(text) > sandboxThreshold && globalOutputStore != nil {
+		handle := globalOutputStore.Store(toolName, []byte(text))
+
+		preview := truncatePreview(text, 500)
+		hint := recoveryHints[toolName]
+		if hint == "" {
+			hint = "Try compact=true to reduce output size"
+		}
+
+		envelope := map[string]any{
+			"sandboxed":     true,
+			"handle":        handle,
+			"tool":          toolName,
+			"size_bytes":    len(text),
+			"preview":       preview,
+			"recovery_hint": hint,
+			"next_tool":     "retrieve_output",
+			"next_args": map[string]any{
+				"handle": handle,
+				"offset": 0,
+				"limit":  4000,
+			},
+		}
+		envelopeBytes, _ := json.MarshalIndent(envelope, "", "  ")
+		return mcp.NewToolResultText(string(envelopeBytes)), nil
+	}
+
+	return toCallToolResult(result)
+}
+
+// truncatePreview returns a preview of text, truncated to maxLen with "..." appended.
+func truncatePreview(text string, maxLen int) string {
+	if len(text) <= maxLen {
+		return text
+	}
+	preview := text[:maxLen]
+	for !utf8.ValidString(preview) && len(preview) > 0 {
+		preview = preview[:len(preview)-1]
+	}
+	return preview + "..."
 }

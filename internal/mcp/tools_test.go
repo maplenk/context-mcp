@@ -752,6 +752,7 @@ func TestAllToolsRegistered(t *testing.T) {
 		"read_delta",
 		"discover_tools",
 		"execute_tool",
+		"retrieve_output",
 	}
 
 	tools := server.GetTools()

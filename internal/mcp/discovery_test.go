@@ -471,8 +471,8 @@ func TestSchemaFootprint_Minimal(t *testing.T) {
 	}
 
 	ratio := float64(len(minimalJSON)) / float64(len(coreJSON))
-	if ratio > 0.30 {
-		t.Errorf("minimal (%d bytes) is %.1f%% of core (%d bytes), expected < 30%%",
+	if ratio > 0.35 {
+		t.Errorf("minimal (%d bytes) is %.1f%% of core (%d bytes), expected < 35%%",
 			len(minimalJSON), ratio*100, len(coreJSON))
 	}
 }
