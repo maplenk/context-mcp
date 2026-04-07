@@ -233,9 +233,9 @@ type ReadDeltaParams struct {
 // IndexFunc is the callback for triggering a re-index
 type IndexFunc func(path string) error
 
-// RegisterTools registers all 17 tools for CLI mode and profile-gated tools for MCP SDK mode.
-// CLI tools: all 17 available via GetHandler/GetTools (always).
-// SDK tools (MCP protocol): gated by deps.Profile — "core" (7), "extended" (14), or "full" (17).
+// RegisterTools registers all 20 tools for CLI mode and profile-gated tools for MCP SDK mode.
+// CLI tools: all 20 available via GetHandler/GetTools (always).
+// SDK tools (MCP protocol): gated by deps.Profile — "minimal" (4), "core" (8), "extended" (15), or "full" (20).
 func RegisterTools(s *Server, deps ToolDeps, indexFn IndexFunc) {
 	// Initialize output store if not provided
 	if deps.OutputStore == nil {

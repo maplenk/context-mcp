@@ -114,6 +114,9 @@ understand                 Deep symbol understanding with callers, callees, and 
 assemble_context           Token-budgeted context assembly with ranked code snippets.
 checkpoint_context         Create a named checkpoint of the current index state.
 read_delta                 Compare current index against a named checkpoint.
+discover_tools             Activate tool bundles by describing your task (minimal profile).
+execute_tool               Proxy for calling tools before activation (minimal profile).
+retrieve_output            Paginated retrieval of sandboxed oversized responses.
 ```
 
 ---
@@ -274,9 +277,9 @@ Discovers relevant code symbols using multi-signal ranked search. Combines lexic
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `query` | string | yes | -- | Natural language or keyword query |
-| `limit` | integer | no | 10 | Max results to return |
+| `limit` | integer | no | 5 | Max results to return |
 | `mode` | string | no | `"search"` | `"search"` for hybrid search, `"architecture"` for community detection |
-| `max_per_file` | integer | no | 3 | Maximum results per unique file path |
+| `max_per_file` | integer | no | 1 | Maximum results per unique file path |
 | `active_files` | string[] | no | -- | File paths the developer is currently editing for PPR personalization |
 | `compact` | boolean | no | false | Strip verbose fields (Reason, WhyNow, NextTool, NextArgs) for smaller output |
 
@@ -289,7 +292,9 @@ Discovers relevant code symbols using multi-signal ranked search. Combines lexic
 }
 ```
 
-Returns ranked results with composite scores. If architecture documents (ARCHITECTURE.md, ADR.md, etc.) exist in the repo, they are included as `architecture_context` in the response.
+Returns ranked results with composite scores. Architecture documents are **not** included in search mode responses.
+
+In `architecture` mode, if architecture documents (ARCHITECTURE.md, ADR.md, etc.) exist in the repo, they are included as `architecture_context` in the response.
 
 **Architecture mode example:**
 
@@ -885,6 +890,17 @@ Fallback for calling tools that have not yet been activated via `discover_tools`
 }
 ```
 
+**Response (when tool is not activated):**
+
+```json
+{
+  "proxy_warning": "Tool 'context' was executed via proxy. Activate it with discover_tools for native access.",
+  "result": { "...tool output..." }
+}
+```
+
+When the requested tool has already been activated via `discover_tools`, the response contains no `proxy_warning` — just the tool result. Prefer activating tools first via `discover_tools` for native tool access with proper schema validation.
+
 ---
 
 ### `retrieve_output` -- Paginated Output Retrieval
@@ -898,6 +914,8 @@ Retrieves paginated content from a sandboxed (oversized) tool response. When any
 | `handle` | string | yes | -- | Handle from a sandboxed response |
 | `offset` | integer | no | 0 | Byte offset to start reading from |
 | `limit` | integer | no | 4000 | Maximum bytes to return (max: 16000) |
+
+> **Note:** The `offset` parameter is a **byte offset**, not a line number or symbol-aware section. Pagination is purely byte-based — use `next_args` from each response to page through content sequentially.
 
 **Example:**
 
@@ -972,7 +990,7 @@ Add context-mcp to your Claude Desktop MCP configuration:
 }
 ```
 
-Restart Claude Desktop after editing the config. Tools will appear based on your selected profile (default: core with 7+1 tools).
+Restart Claude Desktop after editing the config. Tools will appear based on your selected profile (default: core with 8 tools).
 
 ### Connecting to Claude Code
 
@@ -1113,7 +1131,7 @@ All options are set via CLI flags:
 | `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
 | `-embedding-dim` | `384` | Embedding vector dimension. TF-IDF defaults to 384; CodeRankEmbed uses 768 |
 | `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
-| `-profile` | `core` | Tool profile for MCP mode: `minimal` (3+discover), `core` (7), `extended` (14), `full` (17) |
+| `-profile` | `core` | Tool profile for MCP mode: `minimal` (4), `core` (8), `extended` (15), `full` (20) |
 | `-ollama-endpoint` | (empty) | Ollama API endpoint (e.g., `http://localhost:11434`) |
 | `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |
 | `-llamacpp-endpoint` | (empty) | llama.cpp server endpoint (e.g., `http://localhost:8080`) |
@@ -1270,13 +1288,13 @@ context-mcp automatically protects against context window overflow from large to
 }
 ```
 
-The output store holds up to 64 entries with a 10-minute TTL. Entries are evicted oldest-first when capacity is reached.
+The output store holds up to 50 entries with a 10-minute TTL. Entries are evicted oldest-first when capacity is reached.
 
 ---
 
 ## Minimal Profile
 
-The `minimal` profile starts with only 3 SDK-registered tools, keeping the initial tool schema under 35% of the core profile's size:
+The `minimal` profile starts with only 4 SDK-registered tools, keeping the initial tool schema under 35% of the core profile's size:
 
 | Tool | Purpose |
 |------|---------|
@@ -1301,6 +1319,17 @@ Plus `retrieve_output` which is always registered as infrastructure.
 5. Agent can activate more bundles as needed (max 5 tools per call)
 
 All 17 standard tools remain available -- they are built but deferred until activated. The `execute_tool` proxy can call any tool even before activation, but includes a `proxy_warning` for non-activated tools.
+
+**Profile activation matrix:**
+
+| Profile | Active at startup | Dynamic discovery? | Total available tools |
+|---------|------------------|-------------------|----------------------|
+| `minimal` | `discover_tools`, `execute_tool`, `health`, `retrieve_output` | Yes, via `discover_tools` | 4 (expandable) |
+| `core` | 7 core analysis tools + `retrieve_output` | No | 8 |
+| `extended` | 14 tools (core + extended) + `retrieve_output` | No | 15 |
+| `full` | All 20 tools | No (everything available) | 20 |
+
+`retrieve_output` is infrastructure — always registered in every profile for paginated retrieval of oversized responses.
 
 ---
 

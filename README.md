@@ -115,6 +115,8 @@ args = ["-repo", "/absolute/path/to/your/project", "-profile", "extended"]
 # Optional: -bearer-token dev-token
 ```
 
+> **Note:** `install` / `print-config` helpers do not yet emit client-specific auth header configuration for HTTP bearer-token setups. Configure auth headers manually in your client config.
+
 </details>
 
 ## How It Works
@@ -175,7 +177,7 @@ Run your own benchmarks with `./benchmarks/run_mcp_usage.sh`.
 | **Search & Discovery** | `context` | Hybrid ranked search combining lexical, semantic, and graph signals |
 | | `search_code` | Regex search across indexed source files |
 | | `explore` | Symbol search with optional dependency analysis |
-| **Code Reading** | `read_symbol` | Bounded source inspection (signature, section, flow\_summary, full modes) |
+| **Code Reading** | `read_symbol` | Safe-by-default source inspection — bounded, never dumps giant symbols. Supports signature, section, flow\_summary, full modes |
 | | `list_file_symbols` | File symbol inventory in source order |
 | **Impact & Architecture** | `impact` | Blast radius analysis with risk classification |
 | | `trace_call_path` | Call path tracing between two symbols |
@@ -209,7 +211,18 @@ Responses exceeding 16 KB are automatically sandboxed: the agent receives a shor
 
 ## Minimal Profile
 
-Start with just 3 tools (`discover_tools`, `execute_tool`, `health`) and activate more on demand:
+Start with just 4 tools (`discover_tools`, `execute_tool`, `health`, `retrieve_output`) and activate more on demand:
+
+| Profile | Active at startup | Can activate more? |
+|---------|------------------|--------------------|
+| `minimal` | `discover_tools`, `execute_tool`, `health`, `retrieve_output` | Yes, via `discover_tools` |
+| `core` | 7 core analysis tools + `retrieve_output` | No dynamic discovery |
+| `extended` | 14 tools + `retrieve_output` | No dynamic discovery |
+| `full` | All 20 tools | Everything available |
+
+`retrieve_output` is always registered in every profile as infrastructure for paginated retrieval of oversized responses.
+
+Use `minimal` when your agent's context window is constrained or when startup tool-definition cost matters. The agent discovers and activates only the tool bundles it needs, reducing initial schema overhead by ~65% compared to `extended`.
 
 ```bash
 ./context-mcp -repo /path/to/project -profile minimal
@@ -245,7 +258,7 @@ Python, Rust, and Java parsers are on the roadmap.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-repo` | `.` | Repository root path |
-| `-profile` | `core` | Tool profile: `minimal` (3+discover), `core` (7), `extended` (14), `full` (17) |
+| `-profile` | `core` | Tool profile: `minimal` (4), `core` (8), `extended` (15), `full` (20) |
 | `-workers` | `4` | Parallel parsing workers |
 | `-onnx-model` | (empty) | ONNX model directory for neural embeddings |
 | `-embedding-dim` | `384` | Vector dimension (384 TF-IDF, 768 ONNX) |
