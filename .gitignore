@@ -48,7 +48,8 @@ Thumbs.db
 # Internal development docs (kept locally, not in public repo)
 CLAUDE.md
 AGENTS.md
-docs/
+docs/*
+!docs/images/
 
 # Downloaded models
 models/

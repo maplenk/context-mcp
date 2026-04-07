@@ -1,125 +1,57 @@
 # context-mcp
 
-A local-first MCP daemon that gives LLM coding agents surgical, token-efficient code retrieval through structural graph analysis and semantic search.
+A local-first MCP server that gives LLM coding agents surgical, token-efficient code retrieval through structural graph analysis and hybrid ranked search.
 
 [![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/maplenk/context-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/maplenk/context-mcp/actions/workflows/ci.yml)
 
----
-
 ## The Problem
 
-LLM coding agents waste tokens brute-forcing through grep and glob results with no structural understanding of the codebase. They read entire files hoping to stumble on the right function, missing cross-file relationships and architectural context entirely. context-mcp builds a live AST graph and semantic index of your codebase and exposes 17 MCP tools, 5 prompt templates, and 4 resources for ranked, context-aware code discovery. Single binary, zero cloud dependencies, local-first.
+LLM coding agents waste thousands of tokens brute-forcing through grep and glob results with no structural understanding of the codebase. They read entire files hoping to find the right function, missing cross-file relationships entirely.
 
-## Key Features
+| | Without context-mcp | With context-mcp |
+|---|---|---|
+| **Discovery** | `grep -r "payment" . \| head -50` | `context {"query": "payment processing"}` |
+| **Files read** | 12 files, ~4800 lines | 10 ranked symbols, ~47 lines |
+| **Token cost** | ~9,600 tokens | ~940 tokens |
+| **Structure** | No cross-file awareness | Callers, callees, blast radius |
+| **Ranking** | Line match order | PPR + BM25 + Betweenness + Semantic |
 
-- **Hybrid ranked search** -- PPR + BM25 + Betweenness Centrality + Semantic Similarity with optimized weights
-- **17 MCP tools**: context, impact, read\_symbol, list\_file\_symbols, query, index, health, trace\_call\_path, get\_key\_symbols, search\_code, detect\_changes, get\_architecture\_summary, explore, understand, assemble\_context, checkpoint\_context, read\_delta
-- **5 MCP prompts**: review\_changes, trace\_impact, prepare\_fix\_context, onboard\_repo, collect\_minimal\_context
-- **4 MCP resources**: repo\_summary, index\_stats, changed\_symbols, hot\_paths
-- **Multi-language AST parsing**: Go (native go/ast), JavaScript, TypeScript, PHP (tree-sitter)
-- **Graph analysis**: Louvain community detection, betweenness centrality, blast radius, Personalized PageRank
-- **Incremental indexing** with filesystem watching (.gitignore-aware, hot-reload)
-- **Optional ONNX neural embeddings** (CodeRankEmbed by default; legacy Qwen2/Jina models still supported)
-- **Single statically-linked binary** -- SQLite + FTS5 + sqlite-vec, no external databases
-- **Cold Start**: Git history intent enrichment for better first-query results
+## Features
+
+- **Single binary, zero cloud dependencies** -- SQLite + FTS5 + sqlite-vec, runs entirely local
+- **Hybrid ranked search** -- Personalized PageRank + BM25 + Betweenness Centrality + Semantic Similarity
+- **17 MCP tools, 5 prompts, 4 resources** -- from symbol lookup to blast radius analysis to token-budgeted context assembly
+- **Sub-120ms query latency** -- tested on real-world 18K+ node codebases
+- **Multi-language** -- Go (native go/ast), JavaScript, TypeScript, PHP (tree-sitter)
+- **Incremental indexing** -- filesystem watching with .gitignore-aware hot-reload
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/maplenk/context-mcp.git
-cd context-mcp
+git clone https://github.com/maplenk/context-mcp.git && cd context-mcp
 go build -tags "fts5" -o context-mcp ./cmd/context-mcp
 
-# CLI mode -- query directly
+# Run as MCP server (connect Claude Code, Desktop, or Codex)
+./context-mcp -repo /path/to/your/project
+
+# Or query directly via CLI
 ./context-mcp -repo /path/to/your/project cli context '{"query": "authentication"}'
-
-# Daemon mode -- run as MCP server
-./context-mcp -repo /path/to/your/project
 ```
 
-## Installation
+Prerequisites: Go 1.25+ with CGO enabled, a C compiler (gcc/clang).
 
-### Prerequisites
+## Connect to Your Agent
 
-- Go 1.25+ with CGO enabled (required for SQLite FTS5 and tree-sitter)
-- A C compiler (gcc or clang) -- needed by `go-sqlite3`
-
-### Build from Source
+<details>
+<summary><strong>Claude Code</strong></summary>
 
 ```bash
-git clone https://github.com/maplenk/context-mcp.git
-cd context-mcp
-go build -tags "fts5" -o context-mcp ./cmd/context-mcp
+./context-mcp install --client claude-code --repo /absolute/path --profile extended
 ```
 
-The `-tags "fts5"` flag is **required** -- it enables SQLite full-text search.
-
-### Verify
-
-```bash
-./context-mcp cli --list
-```
-
-### Optional: ONNX Neural Embeddings
-
-By default, context-mcp uses TF-IDF for embeddings. For higher-quality local semantic search, build with the `onnx` tag and use CodeRankEmbed, the repo's default ONNX model (NomicBERT, INT8):
-
-```bash
-./scripts/download-model.sh
-go build -tags "fts5 onnx" -o context-mcp ./cmd/context-mcp
-
-# Explicit model path
-./context-mcp -repo /path/to/project -onnx-model models/CodeRankEmbed-onnx-int8 -onnx-lib /path/to/libonnxruntime.dylib
-
-# If the model is at the default path, context-mcp auto-detects it
-./context-mcp -repo /path/to/project -onnx-lib /path/to/libonnxruntime.dylib
-```
-
-CodeRankEmbed uses 768 dimensions. Legacy Qwen2/Jina ONNX exports are still supported; if you use one, set `-embedding-dim` to a model-compatible value.
-
-## Harness Integration
-
-### Stdio Transport
-
-Run the default MCP server over stdio:
-
-```bash
-./context-mcp -repo /path/to/your/project
-```
-
-### Streamable HTTP Transport
-
-Serve MCP over streamable HTTP on `http://127.0.0.1:8080/mcp`:
-
-```bash
-./context-mcp -repo /path/to/your/project serve-http -port 8080
-
-# Optional bearer auth
-./context-mcp -repo /path/to/your/project serve-http -port 8080 -bearer-token dev-token
-```
-
-You can also set the bearer token with `QB_CONTEXT_BEARER_TOKEN`. Current `install` and `print-config` helpers do not emit client-specific HTTP auth/header settings, so bearer-token setups are still a manual advanced path.
-
-### Install, Print, Doctor, Uninstall
-
-The binary includes helper subcommands for Claude Code and Codex:
-
-```bash
-./context-mcp install --client claude-code --repo /absolute/path/to/your/project --profile extended
-./context-mcp install --client codex --repo /absolute/path/to/your/project --profile extended
-
-./context-mcp print-config --client claude-code --repo /absolute/path/to/your/project --transport http --url http://127.0.0.1:8080/mcp
-./context-mcp doctor --repo /absolute/path/to/your/project
-./context-mcp uninstall --client claude-code --scope local
-```
-
-### Claude Code
-
-Claude Code supports `user`, `local`, and `project` scopes. `install` defaults to `user`; use `--scope local` or `--scope project` when needed.
-
-**Project-scoped stdio config (`.mcp.json`):**
+Or manual `.mcp.json`:
 
 ```json
 {
@@ -132,26 +64,12 @@ Claude Code supports `user`, `local`, and `project` scopes. `install` defaults t
 }
 ```
 
-**Project-scoped HTTP config (`.mcp.json`):**
+</details>
 
-```json
-{
-  "mcpServers": {
-    "context-mcp": {
-      "type": "http",
-      "url": "http://127.0.0.1:8080/mcp"
-    }
-  }
-}
-```
+<details>
+<summary><strong>Claude Desktop</strong></summary>
 
-`doctor` checks user, local, and project-scoped Claude Code installs, including local-scope entries stored in Claude's global `projects[...]` config.
-
-### Claude Desktop
-
-Add to your Claude Desktop config:
-
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ```json
 {
@@ -164,13 +82,16 @@ Add to your Claude Desktop config:
 }
 ```
 
-Restart Claude Desktop after editing the config. All tools will appear in Claude's tool list.
+</details>
 
-### Codex
+<details>
+<summary><strong>Codex</strong></summary>
 
-The helper installs Codex entries into `~/.codex/config.toml`. Codex also supports repo-local `.codex/config.toml` if you prefer project-scoped manual configuration.
+```bash
+./context-mcp install --client codex --repo /absolute/path --profile extended
+```
 
-**User-scoped stdio config (`~/.codex/config.toml` or `.codex/config.toml`):**
+Or manual `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.context-mcp]
@@ -178,138 +99,138 @@ command = "/absolute/path/to/context-mcp"
 args = ["-repo", "/absolute/path/to/your/project", "-profile", "extended"]
 ```
 
-**User-scoped HTTP config (`~/.codex/config.toml` or `.codex/config.toml`):**
+</details>
 
-```toml
-[mcp_servers.context-mcp]
-url = "http://127.0.0.1:8080/mcp"
+<details>
+<summary><strong>HTTP Transport</strong></summary>
+
+```bash
+./context-mcp -repo /path/to/project serve-http -port 8080
+# Optional: -bearer-token dev-token
 ```
 
-## Tools Overview
-
-| Tool | Description |
-|------|-------------|
-| `context` | Hybrid ranked search combining lexical, semantic, and graph signals |
-| `impact` | Blast radius analysis -- traces downstream dependents with risk classification |
-| `read_symbol` | Safely inspects a symbol with bounded, signature, section, flow-summary, and explicit full modes |
-| `list_file_symbols` | Lists indexed symbols in a file in source order with safe `read_symbol` follow-up args |
-| `query` | Executes read-only SQL against the structural database |
-| `index` | Triggers a full re-index of the repository |
-| `health` | Returns system health: uptime, node/edge counts, database size |
-| `trace_call_path` | Traces call paths between two symbols through the dependency graph |
-| `get_key_symbols` | Returns top symbols ranked by centrality metrics |
-| `search_code` | Regex search across indexed source files |
-| `detect_changes` | Detects changed symbols since a git ref |
-| `get_architecture_summary` | Architecture overview with community clusters, hubs, and entry points |
-| `explore` | Searches for a symbol with optional dependency analysis |
-| `understand` | Deep symbol analysis with callers, callees, PageRank, and community membership |
-| `assemble_context` | Token-budgeted context assembly -- returns ranked code snippets fitted within a token budget |
-| `checkpoint_context` | Creates a named checkpoint of the current index state |
-| `read_delta` | Compares current index state against a named checkpoint -- shows added, modified, and deleted symbols |
-
-For complete documentation with parameters and examples, see [USAGE.md](USAGE.md).
+</details>
 
 ## How It Works
 
-### Pipeline
+![Architecture](docs/images/architecture.png)
 
-1. **File discovery** -- walks the repo respecting `.gitignore` and excluded directories
-2. **AST parsing** -- extracts functions, classes, structs, methods, and builds call/import/implements edges
-3. **SQLite storage** -- upserts nodes and edges with FTS5 full-text index
-4. **Embedding generation** -- creates vector embeddings for semantic search (TF-IDF default, ONNX optional)
-5. **Graph construction** -- builds a directed dependency graph in memory using gonum
-6. **Centrality computation** -- runs Brandes' betweenness algorithm and stores scores
-7. **Filesystem watching** -- monitors for changes and incrementally re-indexes modified files
+context-mcp walks your repository, parses every source file into an AST, and stores functions, classes, and their relationships as nodes and edges in a local SQLite database with FTS5 full-text indexing. It generates vector embeddings for semantic search, builds an in-memory directed graph for centrality and PageRank computation, and watches the filesystem to incrementally re-index changed files -- keeping the structural model up to date as you code.
 
-### Search Ranking
-
-Queries are ranked using a multi-signal composite score:
+## Search Ranking
 
 ```
-score = 0.35 * PPR + 0.30 * BM25 + 0.20 * Betweenness + 0.15 * Semantic
+score = 0.35 x Personalized PageRank
+      + 0.30 x BM25 (FTS5)
+      + 0.20 x Betweenness Centrality
+      + 0.15 x Semantic Similarity
 ```
 
-All signals are normalized to \[0, 1\] before weighting. InDegree was eliminated (weight 0.00) after a 4-phase parameter sweep across ~130 configurations. FTS5 queries are enhanced with prefix matching, CamelCase splitting, and stop word filtering.
+![Ranking Weights](docs/images/ranking-weights.png)
 
-## Supported Languages
+Weights optimized via 4-phase parameter sweep across ~130 configurations. FTS5 queries enhanced with CamelCase splitting, prefix matching, and stop word filtering.
 
-| Language | Parser | Notes |
-|----------|--------|-------|
-| Go | Native `go/ast` | Full AST walk with type aliases, interfaces, and receiver methods |
-| JavaScript | tree-sitter | Declarations, call edges, class inheritance |
-| TypeScript | tree-sitter | Declarations, call edges, interfaces, enums, type aliases |
-| PHP | tree-sitter | Classes, methods, routes, inheritance, implements edges |
+## Performance
 
-## Benchmarks
+![Query Latency](docs/images/benchmark-latency.png)
 
-Tested against a real-world Laravel codebase (~18K nodes, ~25K edges):
+| Metric | Value |
+|--------|-------|
+| Exact symbol lookup | <1ms |
+| Concept search | 1-6ms |
+| Cross-file flow | 2-3ms |
+| Regex search | <80ms |
+| Index size tested | 18K+ nodes, 25K+ edges |
+| Indexing time | 19s (780 PHP files) |
+| PageRank (100 nodes) | 55us |
 
-- 15 diverse queries across exact match, concept search, and cross-file flow categories
-- **55.6% B+C accuracy** (concept + cross-file queries) -- up from 33.3% baseline
-- Optimized via 4-phase parameter sweep across ~130 configurations
-- All queries complete under 120ms latency
+Full benchmark methodology in [benchmarks/](benchmarks/).
 
-Highlights from the query suite:
+## Token Usage
 
-- C3 Webhook dispatch: 7/7 rubric items (perfect)
-- C4 OpenTelemetry tracing: 8/8 rubric items (perfect)
-- B3 Loyalty points: 4/4 rubric items (perfect)
-- B4 Database schema: 3/3 rubric items (perfect)
-- C5 Inventory writes: 5-6/8 rubric items
+![Token Usage](docs/images/token-usage.png)
 
-See [benchmarks/](benchmarks/) for full methodology, query suite, per-query scoring, and the live Claude/Codex MCP usage benchmark runner.
+Same real-world task ("find all differences between v1/order and v3/order API paths") run three ways on an 18K-node Laravel codebase:
+
+| Approach | Total Tokens | Tool Calls | MCP Calls |
+|----------|-------------|------------|-----------|
+| No MCP | 30.4K | 69 (brute-force grep/read) | 0 |
+| **context-mcp** | **21.4K** | **41** | **14** |
+| codebase-memory-mcp | 43.3K | 42 | 11 |
+
+context-mcp uses **30% fewer tokens** and **40% fewer tool calls** than no-MCP, and **2x fewer tokens** than the alternative MCP server -- while providing ranked, structural results instead of raw grep output.
+
+Run your own benchmarks with `./benchmarks/run_mcp_usage.sh`.
+
+## Tools
+
+| Category | Tool | Description |
+|----------|------|-------------|
+| **Search & Discovery** | `context` | Hybrid ranked search combining lexical, semantic, and graph signals |
+| | `search_code` | Regex search across indexed source files |
+| | `explore` | Symbol search with optional dependency analysis |
+| **Code Reading** | `read_symbol` | Bounded source inspection (signature, section, flow\_summary, full modes) |
+| | `list_file_symbols` | File symbol inventory in source order |
+| **Impact & Architecture** | `impact` | Blast radius analysis with risk classification |
+| | `trace_call_path` | Call path tracing between two symbols |
+| | `understand` | Deep symbol analysis with callers, callees, PageRank |
+| | `get_key_symbols` | Top symbols ranked by centrality |
+| | `get_architecture_summary` | Community clusters, hubs, and entry points |
+| **Change Tracking** | `detect_changes` | Changed symbols since a git ref |
+| | `checkpoint_context` | Create named index checkpoint |
+| | `read_delta` | Compare current state against checkpoint |
+| | `assemble_context` | Token-budgeted context assembly |
+| **System** | `query` | Read-only SQL against the structural database |
+| | `index` | Trigger full or targeted re-index |
+| | `health` | System health: uptime, node/edge counts, memory |
+
+Also includes **5 prompt templates** (review\_changes, trace\_impact, prepare\_fix\_context, onboard\_repo, collect\_minimal\_context) and **4 resources** (repo\_summary, index\_stats, changed\_symbols, hot\_paths). Full parameter documentation in [USAGE.md](USAGE.md).
+
+## Language Support
+
+| Language | Parser | Coverage |
+|----------|--------|----------|
+| Go | Native `go/ast` | Functions, types, interfaces, methods, imports |
+| JavaScript | tree-sitter | Functions, classes, imports, call edges |
+| TypeScript | tree-sitter | Interfaces, enums, type aliases, generics |
+| PHP | tree-sitter | Classes, methods, routes, inheritance |
+
+Python, Rust, and Java parsers are on the roadmap.
+
+## Why context-mcp?
+
+| | grep / glob | RAG Pipeline | context-mcp |
+|---|---|---|---|
+| **Structural awareness** | None | None | Full AST graph |
+| **Cross-file relationships** | None | Chunk-based | Call edges, imports, implements |
+| **Ranking** | Line match | Vector similarity | PPR + BM25 + Betweenness + Semantic |
+| **Token efficiency** | Low (full files) | Medium (chunks) | High (bounded, budget-aware) |
+| **Setup** | None | Cloud infra / API keys | Single binary, zero config |
+| **Latency** | Fast | Network-dependent | <120ms locally |
+| **Offline** | Yes | Usually no | Yes |
 
 ## Configuration
 
-All options are set via CLI flags:
-
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-repo` | `.` | Path to the repository root |
-| `-db` | `.context-mcp/index.db` | Path to the SQLite database |
-| `-debounce` | `500ms` | Filesystem event debounce interval |
-| `-max-depth` | `5` | Default max BFS depth for impact analysis |
-| `-batch-size` | `32` | Embedding batch size |
-| `-workers` | `4` | Number of parallel file-parsing workers |
-| `-onnx-model` | (empty) | Path to ONNX model directory (enables neural embeddings) |
-| `-onnx-lib` | (empty) | Path to ONNX Runtime shared library |
-| `-embedding-dim` | `384` | Embedding vector dimension. TF-IDF defaults to 384; CodeRankEmbed uses 768 |
-| `-profile` | `core` | Tool profile for MCP SDK: `core` (7 tools), `extended` (14), or `full` (17) |
-| `-cold-start` | `true` | Enable Git-derived intent metadata ingestion |
-| `-ollama-endpoint` | (empty) | Ollama API endpoint for embedding backend |
-| `-ollama-model` | `nomic-embed-code` | Ollama embedding model name |
-| `-llamacpp-endpoint` | (empty) | llama.cpp embedding server endpoint |
-| `-openai-endpoint` | (empty) | OpenAI-compatible embeddings endpoint |
-| `-openai-model` | `text-embedding-nomic-embed-code` | OpenAI-compatible embeddings model name |
-| `-port` | `8080` | HTTP port for `serve-http` |
-| `-bearer-token` | (empty) | Optional bearer token for HTTP auth |
+| `-repo` | `.` | Repository root path |
+| `-profile` | `core` | Tool profile: `core` (7), `extended` (14), `full` (17) |
+| `-workers` | `4` | Parallel parsing workers |
+| `-onnx-model` | (empty) | ONNX model directory for neural embeddings |
+| `-embedding-dim` | `384` | Vector dimension (384 TF-IDF, 768 ONNX) |
+| `-cold-start` | `true` | Git history intent enrichment |
+
+Full configuration reference in [USAGE.md](USAGE.md).
 
 ## Development
 
 ```bash
-go build -tags "fts5" ./...           # build (FTS5 tag required)
-go test -tags "fts5" -count=1 ./...   # run tests
-go vet -tags "fts5" ./...             # static analysis
+go build -tags "fts5" ./...           # Build (FTS5 tag required)
+go test -tags "fts5" -count=1 ./...   # Run tests
+go vet -tags "fts5" ./...             # Static analysis
 ```
 
-Manual client smoke tests are available on demand:
-
-```bash
-./scripts/smoke-claude-mcp.sh all /absolute/path/to/your/project
-./scripts/smoke-codex-mcp.sh all /absolute/path/to/your/project
-```
-
-They are intentionally not part of CI. Each script builds a temporary binary, runs Claude Code (`--model haiku`) or Codex (`-m gpt-5.4-mini`) against isolated `stdio` and `http` MCP configs, and saves raw logs plus extracted summaries to a temp directory.
-
-For a publishable benchmark artifact under `benchmarks/results/` with both `MCP` and `no MCP` runs, use:
-
-```bash
-./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
-```
-
-That run now emits both a machine-readable JSON artifact and a Markdown report with token, cost, pass-rate, and output-size comparison tables.
-
-CI: GitHub Actions runs build, vet, and race-detector tests on every push. Weekly security scanning with govulncheck, gosec, and trivy.
+CI runs build, vet, and race-detector tests on every push. Weekly security scanning with govulncheck, gosec, and trivy.
 
 ## Roadmap
 
@@ -318,7 +239,6 @@ CI: GitHub Actions runs build, vet, and race-detector tests on every push. Weekl
 - Semantic flow tracing for business concept queries
 - Enhanced route extraction for multi-version APIs
 - Betweenness sampling for large codebases (>50K nodes)
-- Structured logging
 
 ## License
 
