@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -90,7 +91,9 @@ func (cs *CheckpointStore) CreateCheckpoint(name, repoRoot string, store *storag
 
 	// Get HEAD commit
 	headCommit := ""
-	cmd := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD")
+	gitCtx, gitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer gitCancel()
+	cmd := exec.CommandContext(gitCtx, "git", "-C", repoRoot, "rev-parse", "HEAD")
 	if out, err := cmd.Output(); err == nil {
 		headCommit = strings.TrimSpace(string(out))
 	}

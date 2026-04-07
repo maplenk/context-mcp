@@ -1850,7 +1850,9 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 		args = append(args, "--", p.Path)
 	}
 
-	cmd := exec.Command("git", args...)
+	gitCtx, gitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer gitCancel()
+	cmd := exec.CommandContext(gitCtx, "git", args...)
 	cmd.Dir = deps.RepoRoot
 	output, err := cmd.Output()
 	if err != nil {

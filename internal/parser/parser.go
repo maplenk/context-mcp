@@ -53,6 +53,18 @@ type ParseResult struct {
 
 // ParseFile parses a source file and extracts AST nodes and edges
 func (p *Parser) ParseFile(filePath string, repoRoot string) (*ParseResult, error) {
+	// L10: Verify the resolved real path is within the repo root to prevent
+	// symlinks from causing us to index files outside the repository.
+	if resolvedRoot, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		if resolvedFile, err := filepath.EvalSymlinks(filePath); err == nil {
+			resolvedRoot = filepath.Clean(resolvedRoot)
+			resolvedFile = filepath.Clean(resolvedFile)
+			if resolvedFile != resolvedRoot && !strings.HasPrefix(resolvedFile, resolvedRoot+string(filepath.Separator)) {
+				return nil, fmt.Errorf("file %s resolves outside repo root (symlink escape), skipping", filePath)
+			}
+		}
+	}
+
 	// Check file size to prevent memory bloat (skip files > 5MB)
 	info, err := os.Stat(filePath)
 	if err != nil {
