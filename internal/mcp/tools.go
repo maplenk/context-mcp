@@ -36,6 +36,17 @@ type ToolDeps struct {
 	Checkpoints *CheckpointStore // nil-safe, tools skip if nil
 }
 
+// stripInspectable returns a compact version of an Inspectable.
+// Compact contract: Keep ID, Name, FilePath, Score/Rank, line spans.
+// Drop: Reason, WhyNow, NextTool, NextArgs.
+func stripInspectable(i types.Inspectable) types.Inspectable {
+	i.Reason = ""
+	i.WhyNow = ""
+	i.NextTool = ""
+	i.NextArgs = nil
+	return i
+}
+
 // isToolInProfile returns true if a tool should be registered for the MCP SDK
 // based on the given profile. CLI tools are always registered regardless.
 func isToolInProfile(toolName, profile string) bool {
@@ -75,12 +86,14 @@ type ContextParams struct {
 	Mode        string   `json:"mode,omitempty" jsonschema:"description=Search mode: 'search' (default) for hybrid search or 'architecture' for community detection"`
 	MaxPerFile  int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per unique file path (default: 1)"`
 	ActiveFiles []string `json:"active_files,omitempty" jsonschema:"description=File paths the developer is currently editing for PPR personalization"`
+	Compact     bool     `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // ImpactParams are the parameters for the impact tool.
 type ImpactParams struct {
 	SymbolID string `json:"symbol_id" jsonschema:"required,description=The ID or name of the symbol to analyze"`
 	Depth    int    `json:"depth,omitempty" jsonschema:"description=Maximum BFS traversal depth (default: 5)"`
+	Compact  bool   `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // ReadSymbolParams are the parameters for the read_symbol tool.
@@ -136,14 +149,16 @@ type SearchCodeParams struct {
 
 // DetectChangesParams are the parameters for the detect_changes tool
 type DetectChangesParams struct {
-	Since string `json:"since" jsonschema:"required,description=Git ref to compare against (e.g. HEAD~5 or main or a commit hash)"`
-	Path  string `json:"path,omitempty" jsonschema:"description=Optional path filter for changed files"`
-	Limit int    `json:"limit,omitempty" jsonschema:"description=Maximum number of ranked changes to return (default: 5)"`
+	Since   string `json:"since" jsonschema:"required,description=Git ref to compare against (e.g. HEAD~5 or main or a commit hash)"`
+	Path    string `json:"path,omitempty" jsonschema:"description=Optional path filter for changed files"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"description=Maximum number of ranked changes to return (default: 5)"`
+	Compact bool   `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // ArchitectureSummaryParams are the parameters for the get_architecture_summary tool
 type ArchitectureSummaryParams struct {
-	Limit int `json:"limit,omitempty" jsonschema:"description=Maximum number of structurally important nodes to return (default: 5)"`
+	Limit   int  `json:"limit,omitempty" jsonschema:"description=Maximum number of structurally important nodes to return (default: 5)"`
+	Compact bool `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // ExploreParams are the parameters for the explore tool
@@ -151,11 +166,13 @@ type ExploreParams struct {
 	Symbol      string `json:"symbol" jsonschema:"required,description=Symbol name to search for"`
 	IncludeDeps bool   `json:"include_deps,omitempty" jsonschema:"description=Whether to include dependency/dependent analysis (default: false)"`
 	Depth       int    `json:"depth,omitempty" jsonschema:"description=Depth for dependency traversal (default: 2)"`
+	Compact     bool   `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // UnderstandParams are the parameters for the understand tool
 type UnderstandParams struct {
-	Symbol string `json:"symbol" jsonschema:"required,description=Symbol name to understand"`
+	Symbol  string `json:"symbol" jsonschema:"required,description=Symbol name to understand"`
+	Compact bool   `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // AssembleContextParams are the parameters for the assemble_context tool
@@ -166,6 +183,7 @@ type AssembleContextParams struct {
 	ActiveFiles      []string `json:"active_files,omitempty" jsonschema:"description=File paths currently being edited for PPR personalization"`
 	MaxPerFile       int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per file (default: 2)"`
 	IncludeNeighbors bool     `json:"include_neighbors,omitempty" jsonschema:"description=Include callers/callees of top results (default: false)"`
+	Compact          bool     `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // AssembleContextResponse is the structured response from assemble_context
@@ -345,6 +363,14 @@ func contextHandler(deps ToolDeps, p ContextParams) (interface{}, error) {
 
 	summary := fmt.Sprintf("%d results for %q", len(inspectables), p.Query)
 
+	// Compact mode: strip verbose fields
+	if p.Compact {
+		for i := range inspectables {
+			inspectables[i] = stripInspectable(inspectables[i])
+		}
+		summary = ""
+	}
+
 	return types.InspectableResponse{
 		Inspectables: inspectables,
 		Total:        len(inspectables),
@@ -435,6 +461,10 @@ func registerContextTool(s *Server, deps ToolDeps) {
 					},
 					"description": "File paths the developer is currently editing for PPR personalization",
 				},
+				"compact": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Return compact output: IDs, scores, and line spans only",
+				},
 			},
 		},
 	}, cliHandler)
@@ -450,6 +480,7 @@ func registerContextTool(s *Server, deps ToolDeps) {
 			mcp.WithString("mode", mcp.Description("Search mode: 'search' (default) for hybrid search, 'architecture' for community detection")),
 			mcp.WithNumber("max_per_file", mcp.Description("Maximum results per unique file path (default: 1)")),
 			mcp.WithArray("active_files", mcp.Description("File paths the developer is currently editing for PPR personalization"), mcp.WithStringItems()),
+			mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
@@ -604,6 +635,29 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 		riskScore, totalDirect, len(direct), totalHighRisk, len(highRisk), totalMediumRisk, len(mediumRisk), totalLowRisk, len(lowRisk), len(affectedTests),
 	)
 
+	// Compact mode: keep only symbol_id, risk tiers with IDs only, total_affected
+	if p.Compact {
+		type compactNode struct {
+			ID         string `json:"id"`
+			SymbolName string `json:"symbol_name"`
+		}
+		compact := func(nodes []impactNode) []compactNode {
+			out := make([]compactNode, len(nodes))
+			for i, n := range nodes {
+				out[i] = compactNode{ID: n.ID, SymbolName: n.SymbolName}
+			}
+			return out
+		}
+		return map[string]interface{}{
+			"symbol":         p.SymbolID,
+			"affected_count": totalAffected,
+			"direct":         compact(direct),
+			"high_risk":      compact(highRisk),
+			"medium_risk":    compact(mediumRisk),
+			"low_risk":       compact(lowRisk),
+		}, nil
+	}
+
 	return map[string]interface{}{
 		"symbol":         p.SymbolID,
 		"depth":          p.Depth,
@@ -645,6 +699,10 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 					"description": "Maximum BFS traversal depth (default: 5)",
 					"default":     5,
 				},
+				"compact": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Return compact output: IDs, scores, and line spans only",
+				},
 			},
 			"required": []string{"symbol_id"},
 		},
@@ -658,6 +716,7 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("symbol_id", mcp.Description("The ID or name of the symbol to analyze"), mcp.Required()),
 			mcp.WithNumber("depth", mcp.Description("Maximum BFS traversal depth (default: 5)")),
+			mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
@@ -1913,6 +1972,14 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 	summary := fmt.Sprintf("%d high-risk changes (betweenness > 0.1), %d total modified symbols, %d new files, %d deleted",
 		highRiskCount, modifiedCount, newFileCount, deletedCount)
 
+	// Compact mode: strip verbose fields
+	if p.Compact {
+		for i := range inspectables {
+			inspectables[i] = stripInspectable(inspectables[i])
+		}
+		summary = ""
+	}
+
 	return types.InspectableResponse{
 		Inspectables: inspectables,
 		Total:        totalCandidates,
@@ -1950,6 +2017,10 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 					"type":        "integer",
 					"description": "Maximum number of ranked changes to return (default: 5)",
 				},
+				"compact": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Return compact output: IDs, scores, and line spans only",
+				},
 			},
 			"required": []string{"since"},
 		},
@@ -1964,6 +2035,7 @@ func registerDetectChangesTool(s *Server, deps ToolDeps) {
 			mcp.WithString("since", mcp.Description("Git ref to compare against (e.g. HEAD~5 or main or a commit hash)"), mcp.Required()),
 			mcp.WithString("path", mcp.Description("Optional path filter for changed files")),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of ranked changes to return (default: 5)")),
+			mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
@@ -2128,6 +2200,14 @@ func architectureSummaryHandler(deps ToolDeps, p ArchitectureSummaryParams) (int
 	summary := fmt.Sprintf("%d communities (modularity %.2f), %d nodes, %d edges — top %d structural nodes shown",
 		len(communities), modularity, deps.Graph.NodeCount(), deps.Graph.EdgeCount(), len(inspectables))
 
+	// Compact mode: strip verbose fields
+	if p.Compact {
+		for i := range inspectables {
+			inspectables[i] = stripInspectable(inspectables[i])
+		}
+		summary = ""
+	}
+
 	return types.InspectableResponse{
 		Inspectables: inspectables,
 		Total:        len(scored),
@@ -2158,6 +2238,10 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 					"description": "Maximum number of structurally important nodes to return (default: 5)",
 					"default":     5,
 				},
+				"compact": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Return compact output: IDs, scores, and line spans only",
+				},
 			},
 		},
 	}, cliHandler)
@@ -2169,6 +2253,7 @@ func registerArchitectureSummaryTool(s *Server, deps ToolDeps) {
 			mcp.WithTitleAnnotation("Architecture Summary"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithNumber("limit", mcp.Description("Maximum number of structurally important nodes to return (default: 5)")),
+			mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
@@ -2285,11 +2370,23 @@ func exploreHandler(deps ToolDeps, p ExploreParams) (interface{}, error) {
 		inspectables = inspectables[:10]
 	}
 
+	// Compact mode: strip verbose fields from inspectables
+	if p.Compact {
+		for i := range inspectables {
+			inspectables[i] = stripInspectable(inspectables[i])
+		}
+	}
+
+	summaryText := ""
+	if !p.Compact {
+		summaryText = fmt.Sprintf("Found %d matches for '%s'", totalMatches, p.Symbol)
+	}
+
 	result := map[string]interface{}{
 		"inspectables": inspectables,
 		"total":        totalMatches,
 		"query":        p.Symbol,
-		"summary":      fmt.Sprintf("Found %d matches for '%s'", totalMatches, p.Symbol),
+		"summary":      summaryText,
 	}
 
 	// Collect dependencies if requested
@@ -2541,6 +2638,10 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 					"description": "Depth for dependency traversal (default: 2)",
 					"default":     2,
 				},
+				"compact": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Return compact output: IDs, scores, and line spans only",
+				},
 			},
 			"required": []string{"symbol"},
 		},
@@ -2555,6 +2656,7 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 			mcp.WithString("symbol", mcp.Description("Symbol name to search for"), mcp.Required()),
 			mcp.WithBoolean("include_deps", mcp.Description("Whether to include dependency/dependent analysis (default: false)")),
 			mcp.WithNumber("depth", mcp.Description("Depth for dependency traversal (default: 2)")),
+			mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
@@ -2726,6 +2828,32 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 		}
 	}
 
+	// Compact mode: keep only symbol, callers/callees names+IDs, drop verbose fields
+	if p.Compact {
+		type compactDetail struct {
+			Name string `json:"name"`
+			ID   string `json:"id"`
+		}
+		compact := map[string]interface{}{
+			"symbol": found,
+		}
+		if callers, ok := result["callers"].([]symbolDetail); ok {
+			cc := make([]compactDetail, len(callers))
+			for i, c := range callers {
+				cc[i] = compactDetail{Name: c.Name, ID: c.ID}
+			}
+			compact["callers"] = cc
+		}
+		if callees, ok := result["callees"].([]symbolDetail); ok {
+			cc := make([]compactDetail, len(callees))
+			for i, c := range callees {
+				cc[i] = compactDetail{Name: c.Name, ID: c.ID}
+			}
+			compact["callees"] = cc
+		}
+		return compact, nil
+	}
+
 	// Add chaining hints
 	symbolRef := found.ID
 	if symbolRef == "" {
@@ -2762,6 +2890,10 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 					"type":        "string",
 					"description": "Symbol name to understand",
 				},
+				"compact": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Return compact output: IDs, scores, and line spans only",
+				},
 			},
 			"required": []string{"symbol"},
 		},
@@ -2774,6 +2906,7 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 			mcp.WithTitleAnnotation("Understand Symbol"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("symbol", mcp.Description("Symbol name to understand"), mcp.Required()),
+			mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
@@ -2972,6 +3105,21 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 		summary += fmt.Sprintf(", %d excluded (over budget)", excluded)
 	}
 
+	// Compact mode: truncate Content to first line (max 120 chars), drop Reason
+	if p.Compact {
+		for i := range items {
+			items[i].Reason = ""
+			content := items[i].Content
+			if idx := strings.IndexByte(content, '\n'); idx >= 0 {
+				content = content[:idx]
+			}
+			if len(content) > 120 {
+				content = content[:120]
+			}
+			items[i].Content = content
+		}
+	}
+
 	return AssembleContextResponse{
 		Query:        p.Query,
 		Mode:         p.Mode,
@@ -3066,6 +3214,7 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 				"active_files":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "File paths currently being edited"},
 				"max_per_file":      map[string]interface{}{"type": "integer", "description": "Maximum results per file (default: 2)", "default": 2},
 				"include_neighbors": map[string]interface{}{"type": "boolean", "description": "Include callers/callees of top results"},
+				"compact":           map[string]interface{}{"type": "boolean", "description": "Return compact output: IDs, scores, and line spans only"},
 			},
 			"required": []string{"query"},
 		},
@@ -3083,6 +3232,7 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 			mcp.WithArray("active_files", mcp.Description("File paths currently being edited"), mcp.WithStringItems()),
 			mcp.WithNumber("max_per_file", mcp.Description("Maximum results per file (default: 2)")),
 			mcp.WithBoolean("include_neighbors", mcp.Description("Include callers/callees of top results")),
+			mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 		)
 		tool.Meta = &mcp.Meta{
 			AdditionalFields: map[string]any{
