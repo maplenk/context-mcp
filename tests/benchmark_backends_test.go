@@ -214,9 +214,12 @@ func TestBenchmark_Jina_ONNX(t *testing.T) {
 	env := getSharedEnv(t)
 	_ = env // ensure shared env is available
 
-	jinaModelDir := os.Getenv("JINA_MODEL_DIR")
+	jinaModelDir := os.Getenv("CONTEXT_MCP_ONNX_MODEL")
 	if jinaModelDir == "" {
-		jinaModelDir = "/Users/naman/Documents/coindex/quantized_model/"
+		jinaModelDir = os.Getenv("QB_ONNX_MODEL") // backward compat
+	}
+	if jinaModelDir == "" {
+		t.Skip("CONTEXT_MCP_ONNX_MODEL not set")
 	}
 	dim := 256
 
@@ -266,9 +269,12 @@ func TestBenchmark_CompareAll(t *testing.T) {
 
 	// Try Jina
 	t.Run("Jina", func(t *testing.T) {
-		jinaModelDir := os.Getenv("JINA_MODEL_DIR")
+		jinaModelDir := os.Getenv("CONTEXT_MCP_ONNX_MODEL")
 		if jinaModelDir == "" {
-			jinaModelDir = "/Users/naman/Documents/coindex/quantized_model/"
+			jinaModelDir = os.Getenv("QB_ONNX_MODEL") // backward compat
+		}
+		if jinaModelDir == "" {
+			t.Skip("CONTEXT_MCP_ONNX_MODEL not set")
 		}
 		dim := 256
 		embedder := initONNXEmbedder(t, jinaModelDir, dim, "tokenizer.json")

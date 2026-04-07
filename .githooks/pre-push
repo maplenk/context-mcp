@@ -3,12 +3,12 @@
 # Pre-push hook for context-mcp
 # Detects version/schema changes in pushed commits and prompts for benchmarks.
 #
-# Skip: QB_SKIP_BENCH=1 git push   or   git push --no-verify
+# Skip: CONTEXT_MCP_SKIP_BENCH=1 git push   or   git push --no-verify
 
 set -euo pipefail
 
 # ── Skip gate ────────────────────────────────────────────────────────────────
-if [[ "${QB_SKIP_BENCH:-0}" == "1" ]]; then
+if [[ "${CONTEXT_MCP_SKIP_BENCH:-${QB_SKIP_BENCH:-0}}" == "1" ]]; then
     exit 0
 fi
 

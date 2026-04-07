@@ -19,7 +19,7 @@ import (
 //
 // The blueprint specified Reciprocal Rank Fusion (RRF): score = Sum(1/(k + rank_i)).
 // This implementation uses weighted linear combination instead:
-//   composite = 0.35*PPR + 0.25*BM25 + 0.15*Betweenness + 0.10*InDegree + 0.15*Semantic
+//   composite = 0.35*PPR + 0.30*BM25 + 0.20*Betweenness + 0.00*InDegree + 0.15*Semantic
 //
 // Rationale: The multi-signal composite approach (from the C reference project v0.8.0)
 // outperforms RRF on the internal 15-case benchmark (30→123 improvement). RRF is

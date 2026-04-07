@@ -19,13 +19,13 @@ Options:
   -h, --help                    Show this help
 
 Environment:
-  QB_TEST_REPO                  Default target repo if no positional repo path is provided
+  CONTEXT_MCP_TEST_REPO         Default target repo if no positional repo path is provided
 
 Examples:
-  ./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi
+  ./benchmarks/run_mcp_usage.sh /path/to/test/repo
   ./benchmarks/run_mcp_usage.sh --variant nomcp
   ./benchmarks/run_mcp_usage.sh --client claude --transport http
-  ./benchmarks/run_mcp_usage.sh /Users/naman/Documents/QBApps/qbapi --output benchmarks/results/mcp-usage-custom.json
+  ./benchmarks/run_mcp_usage.sh /path/to/test/repo --output benchmarks/results/mcp-usage-custom.json
 EOF
 }
 
@@ -110,7 +110,7 @@ case "$TRANSPORT" in
         ;;
 esac
 
-TARGET_REPO="${TARGET_REPO:-${QB_TEST_REPO:-/Users/naman/Documents/QBApps/qbapi}}"
+TARGET_REPO="${TARGET_REPO:-${CONTEXT_MCP_TEST_REPO:-${QB_TEST_REPO:-/path/to/test/repo}}}"
 if [[ ! -d "$TARGET_REPO" ]]; then
     echo "ERROR: target repo not found at $TARGET_REPO" >&2
     exit 1

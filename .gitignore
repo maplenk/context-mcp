@@ -29,7 +29,6 @@ Thumbs.db
 
 # Project index database
 .context-mcp/
-.context-mcp/
 
 # Agent tool configs and worktrees
 .claude/

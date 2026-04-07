@@ -61,8 +61,8 @@ type Config struct {
 	GitMaxIntentBytes int
 
 	// Profile selects which tools are registered for MCP SDK mode.
-	// Valid values: "core" (7 tools), "extended" (14 tools), "full" (all 17).
-	// CLI mode always registers all 17 tools regardless of profile.
+	// Valid values: "core" (8 tools), "extended" (15 tools), "full" (all 20).
+	// CLI mode always registers all 20 tools regardless of profile.
 	Profile string
 
 	// OllamaEndpoint is the Ollama API endpoint (e.g., http://localhost:11434).
@@ -137,7 +137,7 @@ func ParseFlags() (*Config, error) {
 	fs.IntVar(&cfg.GitPerFileCommitCap, "git-per-file-cap", cfg.GitPerFileCommitCap, "Maximum commits per file")
 	fs.IntVar(&cfg.GitMaxMessageBytes, "git-max-message", cfg.GitMaxMessageBytes, "Maximum bytes per commit message")
 	fs.IntVar(&cfg.GitMaxIntentBytes, "git-max-intent", cfg.GitMaxIntentBytes, "Maximum bytes per file intent summary")
-	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (7), extended (14), full (all 17), or minimal (3 + discover)")
+	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "Tool profile for MCP SDK: core (8), extended (15), full (all 20), or minimal (3 + discover)")
 	fs.StringVar(&cfg.OllamaEndpoint, "ollama-endpoint", cfg.OllamaEndpoint, "Ollama API endpoint (e.g., http://localhost:11434)")
 	fs.StringVar(&cfg.OllamaModel, "ollama-model", cfg.OllamaModel, "Ollama embedding model name")
 	fs.StringVar(&cfg.LlamaCppEndpoint, "llamacpp-endpoint", cfg.LlamaCppEndpoint, "llama.cpp server endpoint (e.g., http://localhost:8080)")
@@ -151,7 +151,10 @@ func ParseFlags() (*Config, error) {
 
 	// M4: Fall back to env var for bearer token
 	if cfg.HTTPBearerToken == "" {
-		cfg.HTTPBearerToken = os.Getenv("QB_CONTEXT_BEARER_TOKEN")
+		cfg.HTTPBearerToken = os.Getenv("CONTEXT_MCP_BEARER_TOKEN")
+		if cfg.HTTPBearerToken == "" {
+			cfg.HTTPBearerToken = os.Getenv("QB_CONTEXT_BEARER_TOKEN") // backward compat
+		}
 	}
 
 	// H21: Prevent zero or negative batch-size causing infinite loop

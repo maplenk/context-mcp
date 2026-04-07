@@ -153,7 +153,7 @@ Use `serve-http` when you want a local MCP endpoint on `http://127.0.0.1:<port>/
 ./context-mcp -repo /path/to/your/project serve-http -port 8080 -bearer-token dev-token
 ```
 
-If `-bearer-token` is set, clients must send `Authorization: Bearer <token>`. You can also provide the token with `QB_CONTEXT_BEARER_TOKEN`.
+If `-bearer-token` is set, clients must send `Authorization: Bearer <token>`. You can also provide the token with `CONTEXT_MCP_BEARER_TOKEN` (or the legacy `QB_CONTEXT_BEARER_TOKEN`).
 
 ### Stopping
 
@@ -1122,7 +1122,7 @@ The Codex smoke test uses `codex exec --json` with an isolated temp MCP config o
 
 If the client CLI exposes usage or cost telemetry, the scripts record it in `summary.json`. Missing usage fields are treated as informational, not fatal.
 
-For a publishable release artifact in [`benchmarks/results/`](/Users/naman/Documents/context-mcp/benchmarks/results), run [`benchmarks/run_mcp_usage.sh`](/Users/naman/Documents/context-mcp/benchmarks/run_mcp_usage.sh) against the canonical benchmark repo. By default it runs both `with MCP` and `without MCP` variants and emits both a JSON artifact and a Markdown comparison-table report.
+For a publishable release artifact in [`benchmarks/results/`](benchmarks/results), run [`benchmarks/run_mcp_usage.sh`](benchmarks/run_mcp_usage.sh) against the canonical benchmark repo. By default it runs both `with MCP` and `without MCP` variants and emits both a JSON artifact and a Markdown comparison-table report.
 
 ---
 

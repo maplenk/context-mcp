@@ -20,7 +20,10 @@ import (
 )
 
 var realRepoPath = func() string {
-	if p := os.Getenv("QB_TEST_REPO"); p != "" {
+	if p := os.Getenv("CONTEXT_MCP_TEST_REPO"); p != "" {
+		return p
+	}
+	if p := os.Getenv("QB_TEST_REPO"); p != "" { // backward compat
 		return p
 	}
 	return ""
@@ -89,7 +92,7 @@ var sharedEnv *realRepoEnv
 func TestMain(m *testing.M) {
 	// Check if real repo is configured and exists
 	if realRepoPath == "" {
-		fmt.Println("QB_TEST_REPO not set, skipping real-repo tests")
+		fmt.Println("CONTEXT_MCP_TEST_REPO not set, skipping real-repo tests")
 		os.Exit(0)
 	}
 	if _, err := os.Stat(realRepoPath); os.IsNotExist(err) {
@@ -298,7 +301,7 @@ func buildRealRepoEnv() (*realRepoEnv, error) {
 }
 
 // TestRealRepo_IndexAndQuery tests the full pipeline: parse -> store -> graph -> search
-// against the real Laravel repo at /Users/naman/Documents/QBApps/qbapi.
+// against a real Laravel repo (set via CONTEXT_MCP_TEST_REPO env var).
 func TestRealRepo_IndexAndQuery(t *testing.T) {
 	env := getSharedEnv(t)
 

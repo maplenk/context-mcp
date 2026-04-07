@@ -64,7 +64,7 @@ def generate_architecture():
         ("AST Parser",     ["go/ast (native)", "tree-sitter"],                3.5),
         ("SQLite + FTS5",  ["Nodes, Edges", "Embeddings (sqlite-vec)"],       6.0),
         ("Graph Engine",   ["PageRank, Betweenness", "Louvain Communities"],  8.5),
-        ("MCP Server",     ["17 Tools, 5 Prompts", "4 Resources"],           10.9),
+        ("MCP Server",     ["20 Tools, 5 Prompts", "4 Resources"],           10.9),
         ("LLM Agents",     ["Claude Code, Desktop", "Codex, Any MCP Client"],13.2),
     ]
 
