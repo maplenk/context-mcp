@@ -17,7 +17,9 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"models": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/api/embed":
 			var req ollamaEmbedRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -28,9 +30,11 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 			if req.Model != "test-model" {
 				t.Errorf("expected model test-model, got %s", req.Model)
 			}
-			json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			if err := json.NewEncoder(w).Encode(ollamaEmbedResponse{
 				Embeddings: [][]float64{mockEmbedding},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -69,12 +73,16 @@ func TestOllamaEmbedder_EmbedBatch(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"models": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/api/embed":
 			callCount++
-			json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			if err := json.NewEncoder(w).Encode(ollamaEmbedResponse{
 				Embeddings: [][]float64{{1.0, 0.0, 0.0}},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -104,12 +112,16 @@ func TestOllamaEmbedder_DimensionTooSmall(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"models": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/api/embed":
 			// Return 2-dim embedding but we request 4
-			json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			if err := json.NewEncoder(w).Encode(ollamaEmbedResponse{
 				Embeddings: [][]float64{{1.0, 2.0}},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -132,7 +144,9 @@ func TestOllamaEmbedder_ServerError(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"models": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/api/embed":
 			http.Error(w, "model not found", http.StatusNotFound)
 		default:
@@ -162,7 +176,9 @@ func TestOllamaEmbedder_ConnectFailure(t *testing.T) {
 func TestOllamaEmbedder_Dim(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+		if err := json.NewEncoder(w).Encode(map[string]any{"models": []any{}}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}))
 	defer srv.Close()
 
@@ -183,11 +199,15 @@ func TestOllamaEmbedder_Determinism(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"models": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/api/embed":
-			json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			if err := json.NewEncoder(w).Encode(ollamaEmbedResponse{
 				Embeddings: [][]float64{mockEmbedding},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
