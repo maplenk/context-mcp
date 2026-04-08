@@ -55,7 +55,7 @@ var validMatryoshkaDims = map[int]bool{
 // default embedding dimension. Returns 768 for NomicBERT (CodeRankEmbed),
 // 256 for Qwen2 (Jina), and 384 (TF-IDF fallback) if detection fails.
 func DefaultDimForModel(modelDir string) int {
-	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	data, err := readLocalModelFile(filepath.Join(modelDir, "config.json"))
 	if err != nil {
 		return 384 // TF-IDF fallback
 	}
@@ -78,7 +78,7 @@ func NewONNXEmbedder(modelDir string, dim int, libPath string) (*ONNXEmbedder, e
 	// Auto-detect model type from config.json
 	mtype := modelTypeQwen2 // default: backward compatible
 	configPath := filepath.Join(modelDir, "config.json")
-	if data, err := os.ReadFile(configPath); err == nil {
+	if data, err := readLocalModelFile(configPath); err == nil {
 		var cfg onnxModelConfig
 		if err := json.Unmarshal(data, &cfg); err == nil {
 			if cfg.ModelType == "nomic_bert" {
@@ -211,7 +211,7 @@ func (e *ONNXEmbedder) Embed(text string) ([]float32, error) {
 func (e *ONNXEmbedder) embedNomicBERT(inputIDsTensor, maskTensor *ort.Value) ([]float32, error) {
 	inputs := map[string]*ort.Value{
 		"input_ids":      inputIDsTensor,
-		"attention_mask":  maskTensor,
+		"attention_mask": maskTensor,
 	}
 
 	outputs, err := e.session.Run(context.Background(), inputs, ort.WithOutputNames("sentence_embedding"))
@@ -265,8 +265,8 @@ func (e *ONNXEmbedder) embedQwen2(inputIDsTensor, maskTensor *ort.Value, seqLen 
 	// Run inference
 	inputs := map[string]*ort.Value{
 		"input_ids":      inputIDsTensor,
-		"attention_mask":  maskTensor,
-		"position_ids":    posIDsTensor,
+		"attention_mask": maskTensor,
+		"position_ids":   posIDsTensor,
 	}
 
 	outputs, err := e.session.Run(context.Background(), inputs, ort.WithOutputNames("last_hidden_state"))

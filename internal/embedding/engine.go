@@ -28,7 +28,7 @@ func GetEmbeddingDim() int {
 
 // SetEmbeddingDim sets the embedding dimension (call before concurrent access).
 func SetEmbeddingDim(dim int) {
-	embeddingDim.Store(int32(dim))
+	embeddingDim.Store(clampInt32(dim))
 }
 
 // Embedder is the interface for generating vector embeddings
@@ -188,14 +188,18 @@ func (e *TFIDFEmbedder) Close() error {
 // producing a sparse random projection (similar to random indexing / SimHash).
 func projectToken(vec []float32, token string, weight float32) {
 	// Use 4 independent projections per token for good coverage
-	embDim := uint32(len(vec))
+	embDim := clampUint32Len(len(vec))
 	for seed := uint32(0); seed < 4; seed++ {
 		h := fnv.New32a()
 		// Mix seed into the hash
 		seedBytes := [4]byte{}
 		binary.LittleEndian.PutUint32(seedBytes[:], seed)
-		h.Write(seedBytes[:])
-		h.Write([]byte(token))
+		if _, err := h.Write(seedBytes[:]); err != nil {
+			panic(fmt.Sprintf("writing seed bytes into hash: %v", err))
+		}
+		if _, err := h.Write([]byte(token)); err != nil {
+			panic(fmt.Sprintf("writing token bytes into hash: %v", err))
+		}
 		hash := h.Sum32()
 
 		dim := hash % embDim

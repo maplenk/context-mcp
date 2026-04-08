@@ -46,8 +46,9 @@ func NewOllamaEmbedder(endpoint, model string, dim int) (*OllamaEmbedder, error)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to Ollama at %s: %w", endpoint, err)
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	if err := discardAndClose("Ollama tags", resp); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("Ollama at %s returned status %d", endpoint, resp.StatusCode)
 	}

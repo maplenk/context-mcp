@@ -3,7 +3,6 @@ package embedding
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -42,7 +41,7 @@ type wordPieceTokenizerJSON struct {
 // NewWordPieceTokenizer loads a WordPiece tokenizer from a HuggingFace model directory.
 func NewWordPieceTokenizer(modelDir string) (*WordPieceTokenizer, error) {
 	tokPath := filepath.Join(modelDir, "tokenizer.json")
-	data, err := os.ReadFile(tokPath)
+	data, err := readLocalModelFile(tokPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading tokenizer.json: %w", err)
 	}

@@ -130,6 +130,7 @@ func (d *Discoverer) Discover() ([]DiscoveredDoc, error) {
 func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
 	// Open the file first — all subsequent checks operate on this fd,
 	// so a symlink re-target after open cannot change what we read.
+	// #nosec G304 -- path is verified against the opened fd and repo root before any content is read.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

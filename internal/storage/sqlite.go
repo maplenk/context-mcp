@@ -16,10 +16,10 @@ import (
 	"time"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/maplenk/context-mcp/internal/gitmeta"
 	"github.com/maplenk/context-mcp/internal/tokenutil"
 	"github.com/maplenk/context-mcp/internal/types"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // DefaultEmbeddingDim is the default embedding dimension (TFIDF fallback).
@@ -50,6 +50,12 @@ type Store struct {
 	embeddingDim int  // configurable embedding dimension
 }
 
+func closeWithLog(label string, closer interface{ Close() error }) {
+	if err := closer.Close(); err != nil {
+		log.Printf("Warning: failed to close %s: %v", label, err)
+	}
+}
+
 // NewStore opens (or creates) a SQLite database at the given path and runs migrations.
 // embeddingDim sets the expected embedding vector dimension (0 uses DefaultEmbeddingDim).
 func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
@@ -60,7 +66,7 @@ func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("creating db directory: %w", err)
 	}
 
@@ -71,7 +77,7 @@ func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
 
 	// Verify connection
 	if err := db.Ping(); err != nil {
-		db.Close()
+		closeWithLog("database after ping failure", db)
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
@@ -87,7 +93,7 @@ func NewStore(dbPath string, embeddingDim ...int) (*Store, error) {
 	s := &Store{db: db, embeddingDim: dim}
 
 	if err := s.runMigrations(); err != nil {
-		db.Close()
+		closeWithLog("database after migration failure", db)
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
@@ -758,15 +764,16 @@ func (s *Store) SearchLexicalFilteredRaw(query string, nodeTypes []types.NodeTyp
 	}
 	args = append(args, limit)
 
-	sqlQuery := fmt.Sprintf(`
+	// #nosec G202 -- placeholders are generated internally from nodeTypes and values stay parameterized in args.
+	sqlQuery := `
 		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum,
 		       bm25(nodes_fts, 10.0, 1.0, 1.0, 5.0, 0.0) as score
 		FROM nodes_fts fts
 		JOIN nodes n ON n.id = fts.node_id
 		WHERE nodes_fts MATCH ?
-		AND n.node_type IN (%s)
+		AND n.node_type IN (` + strings.Join(placeholders, ", ") + `)
 		ORDER BY score
-		LIMIT ?`, strings.Join(placeholders, ", "))
+		LIMIT ?`
 
 	rows, err := s.db.Query(sqlQuery, args...)
 	if err != nil {
@@ -810,12 +817,13 @@ func (s *Store) FindRouteNodesByKeywords(keywords []string, limit int) ([]types.
 	args = append(args, uint8(types.NodeTypeRoute))
 	args = append(args, limit)
 
-	sqlQuery := fmt.Sprintf(`
+	// #nosec G202 -- conditions are fixed internal LIKE clauses; user keywords remain bound parameters in args.
+	sqlQuery := `
 		SELECT n.id, n.file_path, n.symbol_name, n.node_type, n.start_byte, n.end_byte, n.content_sum, n.search_terms
 		FROM nodes n
-		WHERE (%s)
+		WHERE (` + strings.Join(conditions, " OR ") + `)
 		AND n.node_type = ?
-		LIMIT ?`, strings.Join(conditions, " OR "))
+		LIMIT ?`
 
 	rows, err := s.db.Query(sqlQuery, args...)
 	if err != nil {
@@ -980,7 +988,7 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acquiring connection: %w", err)
 	}
-	defer conn.Close()
+	defer closeWithLog("raw query connection", conn)
 
 	// Enable query_only mode to prevent any writes
 	if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only = ON"); err != nil {
@@ -990,7 +998,7 @@ func (s *Store) RawQuery(query string) ([]map[string]interface{}, error) {
 	defer func() {
 		if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only = OFF"); err != nil {
 			log.Printf("Warning: failed to reset query_only on connection: %v", err)
-			conn.Close() // prevent returning a read-only connection to the pool
+			closeWithLog("read-only raw query connection", conn) // prevent returning a read-only connection to the pool
 		}
 	}()
 
@@ -1533,8 +1541,9 @@ func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileI
 			args[j] = p
 		}
 
-		query := fmt.Sprintf(`SELECT file_path, intent_text, source_hash, commit_count, last_commit_hash, last_updated_at
-			FROM git_file_intent WHERE file_path IN (%s)`, strings.Join(placeholders, ","))
+		// #nosec G202 -- IN-clause placeholders are generated internally; path values stay parameterized in args.
+		query := `SELECT file_path, intent_text, source_hash, commit_count, last_commit_hash, last_updated_at
+			FROM git_file_intent WHERE file_path IN (` + strings.Join(placeholders, ",") + `)`
 
 		rows, err := s.db.Query(query, args...)
 		if err != nil {
@@ -1545,7 +1554,7 @@ func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileI
 			var fi gitmeta.FileIntent
 			var lastUpdated string
 			if err := rows.Scan(&fi.FilePath, &fi.IntentText, &fi.SourceHash, &fi.CommitCount, &fi.LastCommitHash, &lastUpdated); err != nil {
-				rows.Close()
+				closeWithLog("git_file_intent rows after scan failure", rows)
 				return nil, err
 			}
 			parsedTime, parseErr := time.Parse(time.RFC3339, lastUpdated)
@@ -1555,7 +1564,7 @@ func (s *Store) GetFileIntentsByPaths(paths []string) (map[string]*gitmeta.FileI
 			fi.LastUpdatedAt = parsedTime
 			result[fi.FilePath] = &fi
 		}
-		rows.Close()
+		closeWithLog("git_file_intent rows", rows)
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}

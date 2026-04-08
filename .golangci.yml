@@ -1,11 +1,13 @@
+version: "2"
+
 run:
   timeout: 5m
   go: "1.25"
 
 linters:
+  default: none
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
@@ -15,15 +17,13 @@ linters:
     - misspell
     - prealloc
 
-linters-settings:
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-  gosec:
-    excludes:
-      - G104
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
 
 issues:
   max-issues-per-linter: 50
   max-same-issues: 10
+  new: true

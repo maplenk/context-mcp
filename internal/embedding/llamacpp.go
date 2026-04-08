@@ -54,8 +54,9 @@ func NewLlamaCppEmbedder(endpoint string, dim int) (*LlamaCppEmbedder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to llama.cpp server at %s: %w", endpoint, err)
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	if err := discardAndClose("llama.cpp health", resp); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("llama.cpp server at %s returned status %d", endpoint, resp.StatusCode)
 	}

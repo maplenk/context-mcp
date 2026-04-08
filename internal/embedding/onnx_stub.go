@@ -5,7 +5,6 @@ package embedding
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -18,7 +17,7 @@ type onnxModelConfigStub struct {
 // default embedding dimension. Returns 768 for NomicBERT (CodeRankEmbed),
 // 256 for Qwen2 (Jina), and 384 (TF-IDF fallback) if detection fails.
 func DefaultDimForModel(modelDir string) int {
-	data, err := os.ReadFile(filepath.Join(modelDir, "config.json"))
+	data, err := readLocalModelFile(filepath.Join(modelDir, "config.json"))
 	if err != nil {
 		return 384 // TF-IDF fallback
 	}
@@ -47,5 +46,5 @@ func (e *ONNXEmbedderStub) Embed(text string) ([]float32, error) {
 func (e *ONNXEmbedderStub) EmbedBatch(texts []string) ([][]float32, error) {
 	return nil, fmt.Errorf("ONNX embedder not available")
 }
-func (e *ONNXEmbedderStub) Dim() int      { return 0 }
-func (e *ONNXEmbedderStub) Close() error   { return nil }
+func (e *ONNXEmbedderStub) Dim() int     { return 0 }
+func (e *ONNXEmbedderStub) Close() error { return nil }

@@ -481,8 +481,8 @@ func emitRoute(nodes *[]types.ASTNode, edges *[]types.ASTEdge, relPath, method, 
 		FilePath:   relPath,
 		SymbolName: symbolName,
 		NodeType:   types.NodeTypeRoute,
-		StartByte:  uint32(max(start, 0)),
-		EndByte:    uint32(max(end, 0)),
+		StartByte:  clampUint32(max(start, 0)),
+		EndByte:    clampUint32(max(end, 0)),
 		ContentSum: contentSum,
 	}
 	*nodes = append(*nodes, node)

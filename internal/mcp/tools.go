@@ -2675,6 +2675,7 @@ func detectChangesHandler(deps ToolDeps, p DetectChangesParams) (interface{}, er
 
 	gitCtx, gitCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer gitCancel()
+	// #nosec G204 -- args are constrained to local git diff usage with validated ref/path inputs above.
 	cmd := exec.CommandContext(gitCtx, "git", args...)
 	cmd.Dir = deps.RepoRoot
 	output, err := cmd.Output()

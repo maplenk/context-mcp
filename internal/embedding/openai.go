@@ -50,8 +50,9 @@ func NewOpenAIEmbedder(endpoint, model string, dim int) (*OpenAIEmbedder, error)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to OpenAI-compatible server at %s: %w", endpoint, err)
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	if err := discardAndClose("OpenAI-compatible models", resp); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("OpenAI-compatible server at %s returned status %d", endpoint, resp.StatusCode)
 	}

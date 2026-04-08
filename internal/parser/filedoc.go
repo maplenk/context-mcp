@@ -45,6 +45,7 @@ func IsFileDocCandidate(relPath string) bool {
 // CreateFileDocNode reads a file and creates a searchable document node
 // with the file's content as a bounded text snippet.
 func CreateFileDocNode(filePath string, relPath string) (*types.ASTNode, error) {
+	// #nosec G304 -- callers pass repo-scoped file paths selected during indexing, not arbitrary user input.
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -78,7 +79,7 @@ func CreateFileDocNode(filePath string, relPath string) (*types.ASTNode, error) 
 		SymbolName: relPath,
 		NodeType:   types.NodeTypeFile,
 		StartByte:  0,
-		EndByte:    uint32(len(content)),
+		EndByte:    clampUint32(len(content)),
 		ContentSum: contentSum,
 	}
 

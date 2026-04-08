@@ -42,6 +42,12 @@ var asyncScoreWg sync.WaitGroup
 
 const maxCLIOutput = 5 * 1024 * 1024
 
+func logCleanupError(label string, err error) {
+	if err != nil {
+		log.Printf("Cleanup warning (%s): %v", label, err)
+	}
+}
+
 func main() {
 	// Route all logging to stderr to avoid corrupting MCP JSON-RPC on stdout
 	log.SetOutput(os.Stderr)
@@ -112,8 +118,8 @@ func main() {
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			close(memDone) // C14: stop memory monitor goroutine
-			store.Close()
-			embedder.Close()
+			logCleanupError("store close", store.Close())
+			logCleanupError("embedder close", embedder.Close())
 		})
 	}
 	defer func() {
@@ -143,7 +149,9 @@ func main() {
 	if err := w.Start(); err != nil {
 		log.Fatalf("Failed to start watcher: %v", err)
 	}
-	defer w.Stop() // safe: cleanup() above does not touch the watcher
+	defer func() {
+		logCleanupError("watcher stop", w.Stop())
+	}() // safe: cleanup() above does not touch the watcher
 	log.Printf("Filesystem watcher started")
 
 	// H6: Periodic memory monitoring (C14: with cancellation via memDone)
@@ -224,10 +232,10 @@ func main() {
 	go func() {
 		sig := <-sigCh
 		log.Printf("Shutting down gracefully (signal: %v)...", sig)
-		cancel()            // cancel the root context so the MCP server stops accepting requests
-		w.Stop()            // closes Events channel, causing handleFileEvents to return
-		fileEventsWg.Wait() // H35: wait for handleFileEvents to finish before cleanup
-		asyncScoreWg.Wait() // H42: wait for in-flight async score goroutines before closing store
+		cancel()                                  // cancel the root context so the MCP server stops accepting requests
+		logCleanupError("watcher stop", w.Stop()) // closes Events channel, causing handleFileEvents to return
+		fileEventsWg.Wait()                       // H35: wait for handleFileEvents to finish before cleanup
+		asyncScoreWg.Wait()                       // H42: wait for in-flight async score goroutines before closing store
 		close(done)
 	}()
 
@@ -247,7 +255,7 @@ func main() {
 	}
 
 	// Normal exit: stop watcher and wait for handleFileEvents before deferred cleanup runs
-	w.Stop()
+	logCleanupError("watcher stop", w.Stop())
 	fileEventsWg.Wait()
 }
 
@@ -277,14 +285,18 @@ func runCLI(cfg *config.Config, args []string) {
 	// Handle --list flag
 	if len(args) > 0 && args[0] == "--list" {
 		embedder := initEmbedder(cfg)
-		defer embedder.Close()
+		defer func() {
+			logCleanupError("embedder close", embedder.Close())
+		}()
 
 		store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
 			os.Exit(1)
 		}
-		defer store.Close()
+		defer func() {
+			logCleanupError("store close", store.Close())
+		}()
 		graphEngine := graph.New()
 		hybridSearch := search.New(store, embedder, graphEngine)
 
@@ -334,14 +346,18 @@ func runCLI(cfg *config.Config, args []string) {
 
 	// Boot pipeline — init embedder first so cfg.EmbeddingDim is set correctly
 	embedder := initEmbedder(cfg)
-	defer embedder.Close()
+	defer func() {
+		logCleanupError("embedder close", embedder.Close())
+	}()
 
 	store, err := storage.NewStore(cfg.DBPath, cfg.EmbeddingDim)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to init storage: %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() {
+		logCleanupError("store close", store.Close())
+	}()
 
 	p := parser.New()
 	graphEngine := graph.New()
@@ -462,8 +478,8 @@ func runServeHTTP(cfg *config.Config) {
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
-			store.Close()
-			embedder.Close()
+			logCleanupError("store close", store.Close())
+			logCleanupError("embedder close", embedder.Close())
 		})
 	}
 	defer func() {
@@ -493,7 +509,9 @@ func runServeHTTP(cfg *config.Config) {
 	if err := w.Start(); err != nil {
 		log.Fatalf("Failed to start watcher: %v", err)
 	}
-	defer w.Stop()
+	defer func() {
+		logCleanupError("watcher stop", w.Stop())
+	}()
 	log.Printf("Filesystem watcher started")
 
 	// 8. Start incremental update goroutine
@@ -591,7 +609,7 @@ func runServeHTTP(cfg *config.Config) {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown error: %v", err)
 		}
-		w.Stop()
+		logCleanupError("watcher stop", w.Stop())
 		fileEventsWg.Wait()
 		asyncScoreWg.Wait()
 		close(done)

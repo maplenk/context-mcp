@@ -19,6 +19,11 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
+func readClientConfig(path string) ([]byte, error) {
+	// #nosec G304 -- path targets local client config files under the user's home or repo directory.
+	return os.ReadFile(path)
+}
+
 // Client represents a supported agent client.
 type Client string
 
@@ -191,10 +196,16 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 	// Try the CLI path first.
 	if lookErr == nil {
 		if opts.Force {
+			// #nosec G204 -- claudePath comes from LookPath and arguments are fixed literals plus validated scope.
 			rmCmd := exec.Command(claudePath, "mcp", "remove", "--scope", scope, "context-mcp")
-			rmCmd.CombinedOutput() // ignore error (entry might not exist)
+			if out, err := rmCmd.CombinedOutput(); err != nil {
+				if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+					fmt.Fprintf(os.Stderr, "warning: claude mcp remove before reinstall failed: %v: %s\n", err, trimmed)
+				}
+			}
 		}
 
+		// #nosec G204 -- claudePath comes from LookPath and buildClaudeAddArgs only emits validated local CLI arguments.
 		cmd := exec.Command(claudePath, buildClaudeAddArgs(bin, opts)...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -211,7 +222,7 @@ func installClaudeCode(opts InstallOpts) (string, error) {
 	cfgPath := filepath.Join(home, ".claude.json")
 
 	root := make(map[string]any)
-	data, err := os.ReadFile(cfgPath)
+	data, err := readClientConfig(cfgPath)
 	if err == nil {
 		if err := json.Unmarshal(data, &root); err != nil {
 			return "", fmt.Errorf("failed to parse %s: %w", cfgPath, err)
@@ -281,7 +292,7 @@ func installCodex(opts InstallOpts) (string, error) {
 
 	// Read existing file (or start empty).
 	var content string
-	data, err := os.ReadFile(cfgPath)
+	data, err := readClientConfig(cfgPath)
 	if err == nil {
 		content = string(data)
 	} else if !os.IsNotExist(err) {
@@ -305,7 +316,7 @@ func installCodex(opts InstallOpts) (string, error) {
 	content += block
 
 	// Ensure parent dir exists.
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o750); err != nil {
 		return "", fmt.Errorf("cannot create config directory: %w", err)
 	}
 	if err := atomicWriteFile(cfgPath, []byte(content), 0600); err != nil {
@@ -370,6 +381,7 @@ func uninstallClaudeCode(opts UninstallOpts) (string, error) {
 			cmdArgs = append(cmdArgs, "--scope", opts.Scope)
 		}
 		cmdArgs = append(cmdArgs, "context-mcp")
+		// #nosec G204 -- claudePath comes from LookPath and cmdArgs are limited to local claude MCP uninstall flags.
 		cmd := exec.Command(claudePath, cmdArgs...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -385,7 +397,7 @@ func uninstallClaudeCode(opts UninstallOpts) (string, error) {
 	}
 	cfgPath := filepath.Join(home, ".claude.json")
 
-	data, err := os.ReadFile(cfgPath)
+	data, err := readClientConfig(cfgPath)
 	if os.IsNotExist(err) {
 		return "Nothing to uninstall: ~/.claude.json not found.", nil
 	}
@@ -427,7 +439,7 @@ func uninstallCodex() (string, error) {
 	}
 	cfgPath := filepath.Join(home, ".codex", "config.toml")
 
-	data, err := os.ReadFile(cfgPath)
+	data, err := readClientConfig(cfgPath)
 	if os.IsNotExist(err) {
 		return "Nothing to uninstall: ~/.codex/config.toml not found.", nil
 	}
@@ -673,7 +685,7 @@ func doctorClient(c Client, repoRoot string) ([]DoctorCheck, error) {
 func checkClaudeCodeJSON(prefix, scope, cfgPath string) (bool, string, []DoctorCheck) {
 	var checks []DoctorCheck
 
-	data, err := os.ReadFile(cfgPath)
+	data, err := readClientConfig(cfgPath)
 	if err != nil {
 		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/config-" + scope,
@@ -726,7 +738,7 @@ func checkClaudeCodeLocalProject(prefix, cfgPath, repoRoot string) (bool, string
 		return false, "", nil
 	}
 
-	data, err := os.ReadFile(cfgPath)
+	data, err := readClientConfig(cfgPath)
 	if err != nil {
 		return false, "", nil
 	}
@@ -845,7 +857,7 @@ func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 			filepath.Join(repoPath, ".claude", "settings.local.json"),
 		}
 		for _, pc := range projectConfigs {
-			pcData, err := os.ReadFile(pc)
+			pcData, err := readClientConfig(pc)
 			if err != nil {
 				continue // file doesn't exist, skip
 			}
@@ -872,7 +884,7 @@ func doctorClaudeCode(prefix, userCfgPath, repoRoot string) []DoctorCheck {
 func checkCodexTOML(prefix, scope, cfgPath string) (bool, string, []DoctorCheck) {
 	var checks []DoctorCheck
 
-	data, err := os.ReadFile(cfgPath)
+	data, err := readClientConfig(cfgPath)
 	if err != nil {
 		checks = append(checks, DoctorCheck{
 			Name:    prefix + "/config-" + scope,

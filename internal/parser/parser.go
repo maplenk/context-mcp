@@ -140,7 +140,7 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 		SymbolName: relPath,
 		NodeType:   types.NodeTypeFile,
 		StartByte:  0,
-		EndByte:    uint32(len(content)),
+		EndByte:    clampUint32(len(content)),
 		ContentSum: relPath,
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -149,8 +149,8 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 	for _, imp := range file.Imports {
 		importPath := strings.Trim(imp.Path.Value, `"`)
 		result.Edges = append(result.Edges, types.ASTEdge{
-			SourceID: types.GenerateNodeID(relPath, relPath),             // this file
-			TargetID: types.GenerateNodeID(importPath, importPath),       // target file's file node
+			SourceID: types.GenerateNodeID(relPath, relPath),       // this file
+			TargetID: types.GenerateNodeID(importPath, importPath), // target file's file node
 			EdgeType: types.EdgeTypeImports,
 		})
 	}
@@ -171,8 +171,8 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 				}
 			}
 
-			startByte := uint32(fset.Position(decl.Pos()).Offset)
-			endByte := uint32(fset.Position(decl.End()).Offset)
+			startByte := clampUint32(fset.Position(decl.Pos()).Offset)
+			endByte := clampUint32(fset.Position(decl.End()).Offset)
 
 			// M13: Build content summary from signature (including param types) + doc comment
 			contentSum := name
@@ -258,8 +258,8 @@ func (p *Parser) parseGo(content []byte, relPath string) (*ParseResult, error) {
 						nodeType = types.NodeTypeFunction
 					}
 
-					startByte := uint32(fset.Position(typeSpec.Pos()).Offset)
-					endByte := uint32(fset.Position(typeSpec.End()).Offset)
+					startByte := clampUint32(fset.Position(typeSpec.Pos()).Offset)
+					endByte := clampUint32(fset.Position(typeSpec.End()).Offset)
 
 					contentSum := name
 					doc := typeSpec.Doc
@@ -343,24 +343,8 @@ func extractGoCalls(body *ast.BlockStmt) []string {
 	return calls
 }
 
-// JavaScript/TypeScript regex patterns (kept for independent helper tests)
-// Note: removed (?m)^ line-start anchoring so indented declarations are found
-var (
-	jsFuncDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*[(<]`)
-	jsArrowFuncRe   = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[a-zA-Z_]\w*)\s*(?::\s*[^=]+?)?\s*=>`)
-	jsClassDeclRe   = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:default\s+)?class\s+(\w+)`)
-	jsMethodDeclRe  = regexp.MustCompile(`(?m)(?:^|\n)\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{`)
-	jsCallExprRe    = regexp.MustCompile(`(?:^|[^.\w])(\w+)\s*\(`)
-	jsImportFromRe  = regexp.MustCompile(`(?m)import\s+(?:(?:[\w{},\s*]+)\s+from\s+)?['"]([^'"]+)['"]`)
-	jsRequireRe     = regexp.MustCompile(`require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
-)
-
-// L17: TypeScript-specific regex patterns (kept for independent helper tests)
-var (
-	tsInterfaceDeclRe = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?interface\s+(\w+)`)
-	tsEnumDeclRe      = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?(?:const\s+)?enum\s+(\w+)`)
-	tsTypeDeclRe      = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:export\s+)?type\s+(\w+)\s*[=<]`)
-)
+// JavaScript/TypeScript regex patterns used for post-parse edge extraction.
+var jsCallExprRe = regexp.MustCompile(`(?:^|[^.\w])(\w+)\s*\(`)
 
 // parseJavaScript uses tree-sitter for JS/TS file parsing.
 // It falls back to regex if tree-sitter parsing fails.
@@ -375,7 +359,7 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		SymbolName: relPath,
 		NodeType:   types.NodeTypeFile,
 		StartByte:  0,
-		EndByte:    uint32(len(content)),
+		EndByte:    clampUint32(len(content)),
 		ContentSum: relPath,
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -701,7 +685,7 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface || node.NodeType == types.NodeTypeRoute {
 			continue
 		}
-		if node.EndByte > uint32(len(content)) {
+		if node.EndByte > clampUint32(len(content)) {
 			continue
 		}
 		bodyText := string(content[node.StartByte:node.EndByte])
@@ -715,7 +699,7 @@ func (p *Parser) parseJavaScript(content []byte, relPath string) (*ParseResult, 
 				continue
 			}
 			// M1/M2: Check if the match falls within a comment or string range
-			absPos := node.StartByte + uint32(idxMatch[2])
+			absPos := addClampedUint32(node.StartByte, idxMatch[2])
 			if isInRange(absPos, skipRanges) {
 				continue
 			}
@@ -848,16 +832,12 @@ func skipLeadingNewline(content []byte, pos int) int {
 	return pos
 }
 
-// PHP regex patterns (kept for edge extraction and independent helper tests)
+// PHP regex patterns used for post-parse edge extraction.
 var (
-	phpClassDeclRe    = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:abstract\s+)?class\s+(\w+)`)
-	phpMethodDeclRe   = regexp.MustCompile(`(?m)^[ \t]+(?:(?:public|protected|private)\s+)?(?:static\s+)?function\s+(\w+)\s*\(`)
-	phpFuncDeclRe     = regexp.MustCompile(`(?m)(?:^|\n)\s*function\s+(\w+)\s*\(`)
-	phpNewExprRe      = regexp.MustCompile(`new\s+(\w+)\s*\(`)
-	phpUseRe          = regexp.MustCompile(`(?m)^use\s+([\w\\]+)`)
-	phpMethodCallRe   = regexp.MustCompile(`(\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
-	phpStaticCallRe   = regexp.MustCompile(`([A-Z]\w+)\s*::\s*(\w+)\s*\(`)
-	phpFuncCallRe     = regexp.MustCompile(`(?:^|[^>\w])(\w+)\s*\(`)
+	phpNewExprRe    = regexp.MustCompile(`new\s+(\w+)\s*\(`)
+	phpMethodCallRe = regexp.MustCompile(`(\$this|\$\w+|self|static|parent)\s*(?:->|::)\s*(\w+)\s*\(`)
+	phpStaticCallRe = regexp.MustCompile(`([A-Z]\w+)\s*::\s*(\w+)\s*\(`)
+	phpFuncCallRe   = regexp.MustCompile(`(?:^|[^>\w])(\w+)\s*\(`)
 )
 
 // phpCallKeywords are PHP keywords/constructs that look like function calls but aren't
@@ -885,7 +865,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		SymbolName: relPath,
 		NodeType:   types.NodeTypeFile,
 		StartByte:  0,
-		EndByte:    uint32(len(content)),
+		EndByte:    clampUint32(len(content)),
 		ContentSum: relPath,
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -1110,7 +1090,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 		if node.NodeType == types.NodeTypeFile || node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct || node.NodeType == types.NodeTypeInterface || node.NodeType == types.NodeTypeRoute {
 			continue
 		}
-		if node.EndByte > uint32(len(content)) {
+		if node.EndByte > clampUint32(len(content)) {
 			continue
 		}
 		bodyText := string(content[node.StartByte:node.EndByte])
@@ -1121,7 +1101,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				continue
 			}
 			target := bodyText[idxMatch[2]:idxMatch[3]]
-			absPos := node.StartByte + uint32(idxMatch[2])
+			absPos := addClampedUint32(node.StartByte, idxMatch[2])
 			if isInRange(absPos, phpSkipRanges) {
 				continue
 			}
@@ -1151,11 +1131,11 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				continue
 			}
 			caller := bodyText[idxMatch[2]:idxMatch[3]]     // "$this", "$obj", "self", "static", "parent"
-			methodName := bodyText[idxMatch[4]:idxMatch[5]]  // bare method name
+			methodName := bodyText[idxMatch[4]:idxMatch[5]] // bare method name
 			if phpCallKeywords[methodName] {
 				continue
 			}
-			absPos := node.StartByte + uint32(idxMatch[4])
+			absPos := addClampedUint32(node.StartByte, idxMatch[4])
 			if isInRange(absPos, phpSkipRanges) {
 				continue
 			}
@@ -1191,7 +1171,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 			}
 			className := bodyText[idxMatch[2]:idxMatch[3]]
 			methodName := bodyText[idxMatch[4]:idxMatch[5]]
-			absPos := node.StartByte + uint32(idxMatch[2])
+			absPos := addClampedUint32(node.StartByte, idxMatch[2])
 			if isInRange(absPos, phpSkipRanges) {
 				continue
 			}
@@ -1219,7 +1199,7 @@ func (p *Parser) parsePHP(content []byte, relPath string) (*ParseResult, error) 
 				if phpCallKeywords[target] || target == extractBaseName(node.SymbolName) {
 					continue
 				}
-				absPos := node.StartByte + uint32(idxMatch[2])
+				absPos := addClampedUint32(node.StartByte, idxMatch[2])
 				if isInRange(absPos, phpSkipRanges) {
 					continue
 				}
@@ -1300,7 +1280,7 @@ func findBlockEnd(content []byte, startPos int) uint32 {
 			case '}':
 				depth--
 				if started && depth == 0 {
-					return uint32(i + 1)
+					return clampUint32(i + 1)
 				}
 			}
 
@@ -1364,7 +1344,7 @@ func findBlockEnd(content []byte, startPos int) uint32 {
 	}
 
 	// M10: If no matching brace found, return end of content
-	return uint32(len(content))
+	return clampUint32(len(content))
 }
 
 // looksLikeRegex determines if a '/' at position i is likely the start of a

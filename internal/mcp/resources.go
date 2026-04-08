@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os/exec"
 	"strings"
 
@@ -11,6 +12,27 @@ import (
 
 	"github.com/maplenk/context-mcp/internal/types"
 )
+
+func nodeTypeStringFromValue(value any) string {
+	switch n := value.(type) {
+	case int64:
+		if n < 0 || n > math.MaxUint8 {
+			return "unknown"
+		}
+		// #nosec G115 -- n is range-checked before conversion to NodeType's uint8 backing type.
+		return types.NodeType(n).String()
+	case float64:
+		if n < 0 || n > math.MaxUint8 || math.Trunc(n) != n {
+			return "unknown"
+		}
+		// #nosec G115 -- n is integral and range-checked before conversion.
+		return types.NodeType(int(n)).String()
+	case string:
+		return n
+	default:
+		return "unknown"
+	}
+}
 
 // RegisterResources registers all MCP resources with the server.
 func RegisterResources(s *Server, deps ToolDeps) {
@@ -102,15 +124,7 @@ func registerIndexStatsResource(s *Server, deps ToolDeps) {
 					nodeType := ""
 					count := 0
 					if v, ok := row["node_type"]; ok {
-						// node_type is stored as INTEGER in SQLite; convert to string name
-						switch n := v.(type) {
-						case int64:
-							nodeType = types.NodeType(n).String()
-						case float64:
-							nodeType = types.NodeType(int(n)).String()
-						case string:
-							nodeType = n
-						}
+						nodeType = nodeTypeStringFromValue(v)
 					}
 					if v, ok := row["cnt"]; ok {
 						switch c := v.(type) {
@@ -274,14 +288,7 @@ func registerHotPathsResource(s *Server, deps ToolDeps) {
 				for _, row := range rows {
 					nodeType := ""
 					if v, ok := row["node_type"]; ok {
-						switch n := v.(type) {
-						case int64:
-							nodeType = types.NodeType(n).String()
-						case float64:
-							nodeType = types.NodeType(int(n)).String()
-						case string:
-							nodeType = n
-						}
+						nodeType = nodeTypeStringFromValue(v)
 					}
 					entry := map[string]interface{}{
 						"id":          row["id"],

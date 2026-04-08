@@ -251,6 +251,7 @@ func loadSymbolFileContext(repoRoot, filePath string) (*symbolFileContext, error
 		return nil, fmt.Errorf("file too large: %s (%d bytes)", relPath, info.Size())
 	}
 
+	// #nosec G304 -- absPath is resolved, symlink-checked, and bounded under repoRoot by resolveRepoPath.
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading file %s: %w", relPath, err)

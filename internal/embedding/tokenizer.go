@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -45,9 +44,9 @@ type bpeMerge struct {
 // tokenizerJSON represents the HuggingFace tokenizer.json format (subset)
 type tokenizerJSON struct {
 	Model struct {
-		Type   string             `json:"type"`
-		Vocab  map[string]int     `json:"vocab"`
-		Merges []json.RawMessage  `json:"merges"`
+		Type   string            `json:"type"`
+		Vocab  map[string]int    `json:"vocab"`
+		Merges []json.RawMessage `json:"merges"`
 	} `json:"model"`
 	AddedTokens []struct {
 		ID      int    `json:"id"`
@@ -60,7 +59,7 @@ type tokenizerJSON struct {
 // Expects tokenizer.json to be present in the directory.
 func NewBPETokenizer(modelDir string) (*BPETokenizer, error) {
 	tokPath := filepath.Join(modelDir, "tokenizer.json")
-	data, err := os.ReadFile(tokPath)
+	data, err := readLocalModelFile(tokPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading tokenizer.json: %w", err)
 	}

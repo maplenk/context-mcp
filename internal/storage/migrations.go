@@ -6,6 +6,12 @@ import (
 	"log"
 )
 
+func rollbackWithLog(tx *sql.Tx, label string) {
+	if err := tx.Rollback(); err != nil {
+		log.Printf("Warning: failed to rollback %s: %v", label, err)
+	}
+}
+
 // currentSchemaVersion is the latest schema version.
 // Increment this when adding new migrations.
 const currentSchemaVersion = 5
@@ -284,7 +290,7 @@ func (s *Store) runMigrations() error {
 
 		for i, stmt := range stmts {
 			if _, err := tx.Exec(stmt); err != nil {
-				tx.Rollback()
+				rollbackWithLog(tx, fmt.Sprintf("migration %d statement %d", v, i))
 				return fmt.Errorf("migration %d statement %d failed: %w", v, i, err)
 			}
 		}
@@ -293,13 +299,13 @@ func (s *Store) runMigrations() error {
 		// the version bump. If the hook fails, the whole migration rolls back.
 		if hook, ok := postMigrationHooks[v]; ok {
 			if err := hook(tx, s); err != nil {
-				tx.Rollback()
+				rollbackWithLog(tx, fmt.Sprintf("post-migration hook for version %d", v))
 				return fmt.Errorf("post-migration hook for version %d: %w", v, err)
 			}
 		}
 
 		if err := setSchemaVersion(tx, v); err != nil {
-			tx.Rollback()
+			rollbackWithLog(tx, fmt.Sprintf("schema version update for migration %d", v))
 			return fmt.Errorf("recording schema version %d: %w", v, err)
 		}
 
