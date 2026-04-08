@@ -44,7 +44,9 @@ Prerequisites: Go 1.25+ with CGO enabled, a C compiler (gcc/clang).
 
 ## Direct Install
 
-For release-based installs, use the checksum-resolved `server.json` asset attached to each tagged GitHub Release. The checked-in [`server.json`](server.json) file is the manifest template tracked in git and is resolved with the release checksum during publishing. The first packaged release target is macOS Apple Silicon (`darwin/arm64`) and installs the prebuilt `context-mcp` binary over stdio.
+The latest packaged release is [`v0.3.0`](https://github.com/maplenk/context-mcp/releases/tag/v0.3.0). For release-based installs, use the checksum-resolved `server.json` asset attached to that GitHub Release. The checked-in [`server.json`](server.json) file is the manifest template tracked in git and is resolved with the release checksum during publishing. The current packaged release target is macOS Apple Silicon (`darwin/arm64`) and installs the prebuilt `context-mcp` binary over stdio.
+
+That packaged release runs with the default TF-IDF embedding path unless you manually configure an alternate backend such as ONNX at runtime.
 
 The client-specific commands below are the local-binary path. They assume `context-mcp` is already present on disk, whether you built it yourself or downloaded it from a release artifact.
 
@@ -152,7 +154,7 @@ Weights optimized via 4-phase parameter sweep across ~130 configurations. FTS5 q
 | Indexing time | 19s (780 PHP files) |
 | PageRank (100 nodes) | 55us |
 
-Full benchmark methodology in [benchmarks/](benchmarks/).
+Full benchmark methodology in [benchmarks/](benchmarks/). ONNX-specific benchmark comparisons are intentionally documented in [`benchmarks/README.md`](benchmarks/README.md); the packaged `v0.3.0` release described above uses the default TF-IDF path unless you opt into ONNX manually.
 
 ## Token Usage
 

@@ -552,6 +552,10 @@ older in-process Go test harness used by the release baseline JSON files above. 
 these numbers as a separate latency line for real CLI usage rather than a direct
 replacement for the release progression table.
 
+This ONNX comparison lives here intentionally instead of the top-level README. The
+packaged `v0.3.0` release ships with the default TF-IDF runtime path unless users
+manually provide ONNX configuration flags.
+
 Index stats: 16,214 nodes · 108,055 edges · 15,905 stored node scores
 
 Reindex time:
