@@ -178,10 +178,10 @@ Run your own benchmarks with `./benchmarks/run_mcp_usage.sh`.
 | | `search_code` | Regex search across indexed source files |
 | | `explore` | Symbol search with optional dependency analysis |
 | **Code Reading** | `read_symbol` | Safe-by-default source inspection — bounded first, then `flow_summary`, with full reads only when safe. Pair with `list_file_symbols` before escalating |
-| | `list_file_symbols` | File symbol inventory in source order; preferred before `read_symbol` for deep inspection |
-| **Impact & Architecture** | `impact` | Blast radius analysis with risk classification |
+| | `list_file_symbols` | File symbol inventory in source order with safe defaults, query narrowing, and bounded follow-up args |
+| **Impact & Architecture** | `impact` | Blast radius analysis with risk classification plus structured callers, routes, and downstream sections |
 | | `trace_call_path` | Call path tracing between two symbols |
-| | `understand` | Deep symbol analysis with callers, callees, PageRank |
+| | `understand` | Deep symbol analysis with callers, callees, PageRank, and alias-tolerant symbol lookup |
 | | `get_key_symbols` | Top symbols ranked by centrality |
 | | `get_architecture_summary` | Community clusters, hubs, and entry points |
 | **Change Tracking** | `detect_changes` | Changed symbols since a git ref |
@@ -199,7 +199,7 @@ Also includes **5 prompt templates** (review\_changes, trace\_impact, prepare\_f
 
 ## Compact Output
 
-High-output analysis tools (`context`, `impact`, `understand`, `explore`, `detect_changes`, `get_architecture_summary`, `assemble_context`) accept a `compact: true` parameter that strips verbose fields (Reason, WhyNow, NextTool, NextArgs) from each result. This reduces output tokens by 50-70% for agents that only need IDs and scores.
+High-output analysis tools (`context`, `impact`, `understand`, `explore`, `detect_changes`, `get_architecture_summary`, `assemble_context`) accept a `compact: true` parameter that strips verbose fields (Reason, WhyNow, NextTool, NextArgs) from each result. `list_file_symbols` also accepts `compact: true` and keeps only the minimal symbol inventory shape for large files. This reduces output tokens by 50-70% for agents that only need IDs and scores.
 
 ```json
 {"query": "payment processing", "compact": true}

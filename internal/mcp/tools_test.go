@@ -704,6 +704,94 @@ func TestUnderstand_FuzzyMatch(t *testing.T) {
 	}
 }
 
+func TestUnderstand_AliasParamsAccepted(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("understand")
+	if !ok {
+		t.Fatal("understand handler not registered")
+	}
+
+	node, err := deps.Store.GetNodeByName("processOrder")
+	if err != nil {
+		t.Fatalf("GetNodeByName(processOrder): %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		payload    string
+		wantResult string
+	}{
+		{name: "symbol_id", payload: `{"symbol_id":"` + node.ID + `"}`, wantResult: "id"},
+		{name: "query", payload: `{"query":"processOrder"}`, wantResult: "exact"},
+		{name: "name", payload: `{"name":"processOrder"}`, wantResult: "exact"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := handler(json.RawMessage(tc.payload))
+			if err != nil {
+				t.Fatalf("understand alias error: %v", err)
+			}
+
+			m, ok := result.(map[string]interface{})
+			if !ok {
+				t.Fatalf("expected map[string]interface{}, got %T", result)
+			}
+
+			resolution, ok := m["resolution"].(string)
+			if !ok {
+				t.Fatalf("expected resolution to be string, got %T", m["resolution"])
+			}
+			if resolution != tc.wantResult {
+				t.Fatalf("resolution = %q, want %q", resolution, tc.wantResult)
+			}
+		})
+	}
+}
+
+func TestUnderstandToolSchemaExposesAliases(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	var understand ToolDefinition
+	found := false
+	for _, tool := range server.GetTools() {
+		if tool.Name == "understand" {
+			understand = tool
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("understand tool definition not found")
+	}
+
+	schema, ok := understand.InputSchema.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected schema type %T", understand.InputSchema)
+	}
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected properties type %T", schema["properties"])
+	}
+	for _, alias := range []string{"symbol", "symbol_id", "query", "name"} {
+		if _, ok := properties[alias]; !ok {
+			t.Fatalf("expected %q property in understand schema", alias)
+		}
+	}
+	if _, ok := schema["anyOf"]; !ok {
+		t.Fatal("expected understand schema anyOf compatibility requirement")
+	}
+}
+
 func TestUnderstand_NotFound(t *testing.T) {
 	t.Skip("known issue: with semantic embedder enabled, FTS tier-3 fallback returns results for nonsense queries via embedding similarity")
 
@@ -1140,6 +1228,86 @@ func TestImpactHandler_QueryAlias(t *testing.T) {
 	}
 }
 
+func TestImpactHandler_StructuredSectionsAndProvenance(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("impact")
+	if !ok {
+		t.Fatal("impact handler not registered")
+	}
+
+	result, err := handler(json.RawMessage(`{"symbol_id":"validateOrder","depth":3}`))
+	if err != nil {
+		t.Fatalf("impact handler error: %v", err)
+	}
+
+	payloadBytes, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal result: %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+
+	target, ok := payload["target"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected target object, got %T", payload["target"])
+	}
+	if target["provenance"] != "extracted" {
+		t.Fatalf("target provenance = %v, want extracted", target["provenance"])
+	}
+
+	if got := int(payload["direct_callers_total"].(float64)); got != 1 {
+		t.Fatalf("direct_callers_total = %d, want 1", got)
+	}
+	directCallers, ok := payload["direct_callers"].([]interface{})
+	if !ok || len(directCallers) == 0 {
+		t.Fatalf("expected direct_callers array, got %T", payload["direct_callers"])
+	}
+	firstDirect := directCallers[0].(map[string]interface{})
+	if firstDirect["provenance"] != "extracted" {
+		t.Fatalf("direct caller provenance = %v, want extracted", firstDirect["provenance"])
+	}
+
+	if got := int(payload["routes_affected_total"].(float64)); got != 2 {
+		t.Fatalf("routes_affected_total = %d, want 2", got)
+	}
+	routes, ok := payload["routes_affected"].([]interface{})
+	if !ok || len(routes) != 2 {
+		t.Fatalf("expected 2 route rows, got %T len=%d", payload["routes_affected"], len(routes))
+	}
+	for _, route := range routes {
+		if route.(map[string]interface{})["provenance"] != "extracted" {
+			t.Fatalf("expected extracted route provenance, got %v", route.(map[string]interface{})["provenance"])
+		}
+	}
+
+	if got := int(payload["downstream_callees_total"].(float64)); got != 1 {
+		t.Fatalf("downstream_callees_total = %d, want 1", got)
+	}
+
+	riskSummary, ok := payload["risk_summary"].([]interface{})
+	if !ok || len(riskSummary) == 0 {
+		t.Fatalf("expected risk_summary array, got %T", payload["risk_summary"])
+	}
+	inferredFound := false
+	for _, item := range riskSummary {
+		row := item.(map[string]interface{})
+		if row["provenance"] == "inferred" {
+			inferredFound = true
+			break
+		}
+	}
+	if !inferredFound {
+		t.Fatal("expected at least one inferred risk summary row")
+	}
+}
+
 func TestReadSymbolHandler_Basic(t *testing.T) {
 	deps, cleanup := setupTestEnv(t)
 	defer cleanup()
@@ -1249,6 +1417,59 @@ func TestSearchCode_QueryAliasAccepted(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestListFileSymbolsToolSchemaExposesQueryAndCompact(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	var listFileSymbols ToolDefinition
+	found := false
+	for _, tool := range server.GetTools() {
+		if tool.Name == "list_file_symbols" {
+			listFileSymbols = tool
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("list_file_symbols tool definition not found")
+	}
+
+	schema, ok := listFileSymbols.InputSchema.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected schema type %T", listFileSymbols.InputSchema)
+	}
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected properties type %T", schema["properties"])
+	}
+
+	for _, key := range []string{"path", "query", "limit", "kinds", "compact"} {
+		if _, ok := properties[key]; !ok {
+			t.Fatalf("expected %q property in list_file_symbols schema", key)
+		}
+	}
+
+	limitSchema, ok := properties["limit"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected limit schema type %T", properties["limit"])
+	}
+	switch got := limitSchema["default"].(type) {
+	case int:
+		if got != 25 {
+			t.Fatalf("list_file_symbols limit default = %d, want 25", got)
+		}
+	case float64:
+		if int(got) != 25 {
+			t.Fatalf("list_file_symbols limit default = %d, want 25", int(got))
+		}
+	default:
+		t.Fatalf("unexpected default type %T", limitSchema["default"])
 	}
 }
 

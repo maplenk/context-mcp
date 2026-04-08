@@ -363,9 +363,21 @@ Traces all downstream dependents of a symbol via BFS graph traversal and classif
   "medium_risk": [...],
   "low_risk": [...],
   "affected_tests": [...],
+  "target": {"id": "...", "symbol_name": "handlePayment", "provenance": "extracted"},
+  "direct_callers": [...],
+  "direct_callers_total": 3,
+  "routes_affected": [...],
+  "routes_affected_total": 2,
+  "indirect_callers": [...],
+  "downstream_callees": [...],
+  "risk_summary": [
+    {"label": "overall_assessment", "value": "high", "provenance": "inferred"}
+  ],
   "summary": "Symbol has betweenness 0.73 -- 3 direct dependents, 12 total affected, 2 tests impacted"
 }
 ```
+
+The additive structured sections (`target`, `direct_callers`, `routes_affected`, `indirect_callers`, `downstream_callees`, `risk_summary`) are capped and include `provenance`, `basis`, and `evidence` so callers can distinguish extracted graph facts from inferred rollups.
 
 **Risk levels by hop distance:**
 
@@ -451,15 +463,18 @@ Lists indexed symbols in a file in source order. Use it when you need a method i
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `path` | string | yes | -- | Repo-relative path or absolute-under-repo path |
-| `limit` | integer | no | `200` | Maximum symbols to return |
+| `query` | string | no | -- | Optional case-insensitive symbol/signature query used to narrow large-file inventories |
+| `limit` | integer | no | `25` | Maximum symbols to return (hard cap `100`) |
 | `kinds` | string[] | no | -- | Optional filters such as `function`, `method`, `class`, `struct`, `interface`, `route` |
+| `compact` | boolean | no | `false` | Keep only the minimal inventory shape; omits extra display-only metadata |
 
 **Example:**
 
 ```json
 {
   "path": "app/Http/Controllers/OrderController.php",
-  "limit": 50,
+  "query": "postOrder createDummyOrder",
+  "limit": 25,
   "kinds": ["method"]
 }
 ```
@@ -469,6 +484,9 @@ Lists indexed symbols in a file in source order. Use it when you need a method i
 ```json
 {
   "path": "app/Http/Controllers/OrderController.php",
+  "query": "postOrder createDummyOrder",
+  "query_terms": ["postorder", "createdummyorder"],
+  "applied_limit": 25,
   "count": 3,
   "total": 3,
   "truncated": false,
@@ -488,6 +506,8 @@ Lists indexed symbols in a file in source order. Use it when you need a method i
   ]
 }
 ```
+
+Filter order is deterministic: file -> kind -> query -> limit. Multi-token queries are treated as a union of case-insensitive matches against normalized `symbol_name` and `signature`.
 
 ---
 
@@ -734,16 +754,21 @@ Provides deep understanding of a symbol using 3-tier resolution (exact match, fu
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `symbol` | string | yes | -- | Symbol name to analyze |
+| `symbol` | string | yes* | -- | Canonical parameter: symbol name or hash ID to analyze |
+| `symbol_id` | string | no | -- | Alias for `symbol` accepted for client compatibility |
+| `query` | string | no | -- | Alias for `symbol` accepted for client compatibility |
+| `name` | string | no | -- | Alias for `symbol` accepted for client compatibility |
 | `compact` | boolean | no | false | Strip verbose fields for smaller output |
 
 **Example:**
 
 ```json
 {
-  "symbol": "ComputePageRank"
+  "symbol_id": "ComputePageRank"
 }
 ```
+
+\* Provide one of `symbol`, `symbol_id`, `query`, or `name`.
 
 ---
 

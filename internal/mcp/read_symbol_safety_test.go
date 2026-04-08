@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maplenk/context-mcp/internal/storage"
 	"github.com/maplenk/context-mcp/internal/types"
@@ -46,11 +47,15 @@ type readSymbolTestResponse struct {
 }
 
 type listFileSymbolsTestResponse struct {
-	Path      string `json:"path"`
-	Count     int    `json:"count"`
-	Total     int    `json:"total"`
-	Truncated bool   `json:"truncated"`
-	Symbols   []struct {
+	Path         string   `json:"path"`
+	Query        string   `json:"query"`
+	QueryTerms   []string `json:"query_terms"`
+	Kinds        []string `json:"kinds"`
+	AppliedLimit int      `json:"applied_limit"`
+	Count        int      `json:"count"`
+	Total        int      `json:"total"`
+	Truncated    bool     `json:"truncated"`
+	Symbols      []struct {
 		ID             string            `json:"id"`
 		SymbolName     string            `json:"symbol_name"`
 		NodeType       string            `json:"node_type"`
@@ -517,6 +522,9 @@ func TestListFileSymbols_UsesSafeReadArgsAndSourceOrder(t *testing.T) {
 	if resp.Path != fixture.RelPath {
 		t.Fatalf("path = %q, want %q", resp.Path, fixture.RelPath)
 	}
+	if resp.AppliedLimit != 25 {
+		t.Fatalf("applied_limit = %d, want 25", resp.AppliedLimit)
+	}
 	if resp.Count != 25 {
 		t.Fatalf("count = %d, want 25", resp.Count)
 	}
@@ -540,5 +548,140 @@ func TestListFileSymbols_UsesSafeReadArgsAndSourceOrder(t *testing.T) {
 	}
 	if len(resp.Symbols) > 1 && resp.Symbols[0].StartLine >= resp.Symbols[1].StartLine {
 		t.Fatalf("expected source-ordered symbols, got %d then %d", resp.Symbols[0].StartLine, resp.Symbols[1].StartLine)
+	}
+}
+
+func TestListFileSymbols_DefaultLimitIsSafe(t *testing.T) {
+	fixture := setupLargeControllerFixture(t)
+	defer fixture.Cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, fixture.Deps, nil)
+
+	handler, ok := server.GetHandler("list_file_symbols")
+	if !ok {
+		t.Fatal("list_file_symbols handler not registered")
+	}
+
+	result, err := handler(json.RawMessage(`{"path":"` + fixture.AbsPath + `","kinds":["method"]}`))
+	if err != nil {
+		t.Fatalf("list_file_symbols error: %v", err)
+	}
+
+	var resp listFileSymbolsTestResponse
+	decodeToolResult(t, result, &resp)
+
+	if resp.AppliedLimit != 25 {
+		t.Fatalf("applied_limit = %d, want 25", resp.AppliedLimit)
+	}
+	if resp.Count != 25 {
+		t.Fatalf("count = %d, want 25", resp.Count)
+	}
+	if !resp.Truncated {
+		t.Fatal("expected truncated=true for default bounded inventory")
+	}
+}
+
+func TestListFileSymbols_QueryNarrowsLargeInventory(t *testing.T) {
+	fixture := setupLargeControllerFixture(t)
+	defer fixture.Cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, fixture.Deps, nil)
+
+	handler, ok := server.GetHandler("list_file_symbols")
+	if !ok {
+		t.Fatal("list_file_symbols handler not registered")
+	}
+
+	params, _ := json.Marshal(ListFileSymbolsParams{
+		Path:  fixture.AbsPath,
+		Query: "processOrder helper017",
+		Kinds: []string{"method"},
+	})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("list_file_symbols error: %v", err)
+	}
+
+	var resp listFileSymbolsTestResponse
+	decodeToolResult(t, result, &resp)
+
+	if resp.Total != 2 || resp.Count != 2 {
+		t.Fatalf("expected exactly 2 query matches, got total=%d count=%d", resp.Total, resp.Count)
+	}
+	if resp.Truncated {
+		t.Fatal("did not expect truncated query-focused inventory")
+	}
+	if resp.Query != "processOrder helper017" {
+		t.Fatalf("query = %q, want %q", resp.Query, "processOrder helper017")
+	}
+	if len(resp.QueryTerms) != 2 {
+		t.Fatalf("query_terms = %v, want 2 terms", resp.QueryTerms)
+	}
+	if got := resp.Symbols[0].SymbolName; got != "OrderController.processOrder" {
+		t.Fatalf("first symbol = %q, want OrderController.processOrder", got)
+	}
+	if got := resp.Symbols[1].SymbolName; got != "OrderController.helper017" {
+		t.Fatalf("second symbol = %q, want OrderController.helper017", got)
+	}
+
+	store := NewOutputStore(50, 10*time.Minute)
+	toolResult, err := toCallToolResultWithName(result, "list_file_symbols", store)
+	if err != nil {
+		t.Fatalf("toCallToolResultWithName: %v", err)
+	}
+	text := extractText(toolResult)
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("failed to parse tool result JSON: %v", err)
+	}
+	if _, ok := parsed["sandboxed"]; ok {
+		t.Fatal("expected query-focused inventory to stay inline, not sandbox")
+	}
+}
+
+func TestListFileSymbols_LargeExplicitInventorySandboxesWithHint(t *testing.T) {
+	fixture := setupLargeControllerFixture(t)
+	defer fixture.Cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, fixture.Deps, nil)
+
+	handler, ok := server.GetHandler("list_file_symbols")
+	if !ok {
+		t.Fatal("list_file_symbols handler not registered")
+	}
+
+	params, _ := json.Marshal(ListFileSymbolsParams{
+		Path:  fixture.AbsPath,
+		Limit: 100,
+		Kinds: []string{"method"},
+	})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("list_file_symbols error: %v", err)
+	}
+
+	store := NewOutputStore(50, 10*time.Minute)
+	toolResult, err := toCallToolResultWithName(result, "list_file_symbols", store)
+	if err != nil {
+		t.Fatalf("toCallToolResultWithName: %v", err)
+	}
+
+	text := extractText(toolResult)
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("failed to parse tool result JSON: %v", err)
+	}
+	if parsed["sandboxed"] != true {
+		t.Fatalf("expected sandboxed=true, got %v", parsed["sandboxed"])
+	}
+	if parsed["tool"] != "list_file_symbols" {
+		t.Fatalf("tool = %v, want list_file_symbols", parsed["tool"])
+	}
+	recoveryHint, _ := parsed["recovery_hint"].(string)
+	if !strings.Contains(recoveryHint, "query=") {
+		t.Fatalf("recovery_hint = %q, want query narrowing guidance", recoveryHint)
 	}
 }

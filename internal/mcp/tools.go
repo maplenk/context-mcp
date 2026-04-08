@@ -26,6 +26,8 @@ import (
 // Version is set by ldflags during release builds.
 var Version = "dev"
 
+var listFileSymbolsQuerySanitizer = regexp.MustCompile(`[^a-z0-9_\.]+`)
+
 // ToolDeps holds dependencies needed by MCP tools
 type ToolDeps struct {
 	Store       *storage.Store
@@ -125,9 +127,11 @@ type ReadSymbolParams struct {
 
 // ListFileSymbolsParams are the parameters for the list_file_symbols tool.
 type ListFileSymbolsParams struct {
-	Path  string   `json:"path" jsonschema:"required,description=Repo-relative or absolute-under-repo file path to inspect"`
-	Limit int      `json:"limit,omitempty" jsonschema:"description=Maximum symbols to return (default: 200)"`
-	Kinds []string `json:"kinds,omitempty" jsonschema:"description=Optional node-type filters such as function, method, class, struct, interface, route"`
+	Path    string   `json:"path" jsonschema:"required,description=Repo-relative or absolute-under-repo file path to inspect"`
+	Query   string   `json:"query,omitempty" jsonschema:"description=Optional case-insensitive symbol/signature query used to narrow large-file inventories"`
+	Limit   int      `json:"limit,omitempty" jsonschema:"description=Maximum symbols to return (default: 25, hard cap: 100)"`
+	Kinds   []string `json:"kinds,omitempty" jsonschema:"description=Optional node-type filters such as function, method, class, struct, interface, route"`
+	Compact bool     `json:"compact,omitempty" jsonschema:"description=Return the minimal inventory shape only; omits extra display-only metadata"`
 }
 
 // QueryParams are the parameters for the query tool.
@@ -184,9 +188,28 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func summarizeResolutionLabel(resolution string) string {
+	switch resolution {
+	case "id":
+		return "id"
+	case "exact_name", "normalized_exact":
+		return "exact"
+	case "":
+		return ""
+	default:
+		return "fuzzy"
+	}
+}
+
 func normalizeImpactParams(p *ImpactParams) {
 	if p.SymbolID == "" {
 		p.SymbolID = firstNonEmpty(p.Symbol, p.Query, p.Name)
+	}
+}
+
+func normalizeUnderstandParams(p *UnderstandParams) {
+	if p.Symbol == "" {
+		p.Symbol = firstNonEmpty(p.SymbolID, p.Query, p.Name)
 	}
 }
 
@@ -206,6 +229,49 @@ func normalizeSearchCodeParams(p *SearchCodeParams) {
 	if p.Pattern == "" {
 		p.Pattern = firstNonEmpty(p.Query)
 	}
+}
+
+func normalizeListFileSymbolsQuery(query string) string {
+	normalized := normalizeSymbolReference(query)
+	normalized = strings.ToLower(normalized)
+	normalized = listFileSymbolsQuerySanitizer.ReplaceAllString(normalized, " ")
+	return strings.Join(strings.Fields(normalized), " ")
+}
+
+func listFileSymbolsQueryTerms(query string) []string {
+	if strings.TrimSpace(query) == "" {
+		return nil
+	}
+	parts := strings.Fields(normalizeListFileSymbolsQuery(query))
+	if len(parts) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(parts))
+	terms := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		terms = append(terms, part)
+	}
+	return terms
+}
+
+func listFileSymbolsMatchesQuery(symbolName, signature string, queryTerms []string) bool {
+	if len(queryTerms) == 0 {
+		return true
+	}
+	haystack := normalizeListFileSymbolsQuery(symbolName + " " + signature)
+	if haystack == "" {
+		return false
+	}
+	for _, term := range queryTerms {
+		if strings.Contains(haystack, term) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeSymbolReference(symbol string) string {
@@ -406,8 +472,11 @@ type ExploreParams struct {
 
 // UnderstandParams are the parameters for the understand tool
 type UnderstandParams struct {
-	Symbol  string `json:"symbol" jsonschema:"required,description=Symbol name to understand"`
-	Compact bool   `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
+	Symbol   string `json:"symbol,omitempty" jsonschema:"description=Canonical parameter: symbol name or ID to understand"`
+	SymbolID string `json:"symbol_id,omitempty"`
+	Query    string `json:"query,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Compact  bool   `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
 
 // AssembleContextParams are the parameters for the assemble_context tool
@@ -805,7 +874,7 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 		return nil, fmt.Errorf("graph engine not initialized")
 	}
 
-	targetNode, _, candidates, err := resolveSymbolNodeDetailed(deps, p.SymbolID)
+	targetNode, resolvedBy, candidates, err := resolveSymbolNodeDetailed(deps, p.SymbolID)
 	if err != nil {
 		return nil, err
 	}
@@ -825,6 +894,165 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 	}
 	nodeID := targetNode.ID
 
+	type impactNode struct {
+		ID         string            `json:"id"`
+		SymbolName string            `json:"symbol_name"`
+		FilePath   string            `json:"file_path"`
+		NextTool   string            `json:"next_tool"`
+		NextArgs   map[string]string `json:"next_args,omitempty"`
+	}
+
+	type impactStructuredNode struct {
+		ID         string            `json:"id"`
+		SymbolName string            `json:"symbol_name"`
+		FilePath   string            `json:"file_path"`
+		NodeType   string            `json:"node_type"`
+		StartLine  int               `json:"start_line,omitempty"`
+		EndLine    int               `json:"end_line,omitempty"`
+		Signature  string            `json:"signature,omitempty"`
+		Depth      int               `json:"depth,omitempty"`
+		ViaSymbols []string          `json:"via_symbols,omitempty"`
+		NextTool   string            `json:"next_tool,omitempty"`
+		NextArgs   map[string]string `json:"next_args,omitempty"`
+		Resolution string            `json:"resolution,omitempty"`
+		Provenance string            `json:"provenance"`
+		Basis      string            `json:"basis"`
+		Evidence   string            `json:"evidence"`
+	}
+
+	type impactRoute struct {
+		ID         string         `json:"id"`
+		Symbol     string         `json:"symbol"`
+		Method     string         `json:"method"`
+		Path       string         `json:"path"`
+		FilePath   string         `json:"file_path"`
+		Handler    map[string]any `json:"handler,omitempty"`
+		ViaSymbol  string         `json:"via_symbol,omitempty"`
+		Provenance string         `json:"provenance"`
+		Basis      string         `json:"basis"`
+		Evidence   string         `json:"evidence"`
+	}
+
+	type impactRiskSummaryItem struct {
+		Label      string      `json:"label"`
+		Value      interface{} `json:"value"`
+		Provenance string      `json:"provenance"`
+		Basis      string      `json:"basis"`
+		Evidence   string      `json:"evidence"`
+	}
+
+	const (
+		impactStructuredSectionLimit = 8
+		impactRiskSummaryLimit       = 8
+	)
+
+	fileCtxCache := make(map[string]*symbolFileContext)
+	inspectNode := func(node types.ASTNode) symbolInspection {
+		if cached, ok := fileCtxCache[node.FilePath]; ok {
+			return buildSymbolInspection(node, cached)
+		}
+		fileCtx, err := loadSymbolFileContext(deps.RepoRoot, node.FilePath)
+		if err != nil {
+			return symbolInspection{Node: node}
+		}
+		fileCtxCache[node.FilePath] = fileCtx
+		return buildSymbolInspection(node, fileCtx)
+	}
+
+	buildStructuredNode := func(node types.ASTNode, nextTool string, nextArgs map[string]string, provenance, basis, evidence string) impactStructuredNode {
+		inspection := inspectNode(node)
+		item := impactStructuredNode{
+			ID:         node.ID,
+			SymbolName: node.SymbolName,
+			FilePath:   node.FilePath,
+			NodeType:   node.NodeType.String(),
+			StartLine:  inspection.SymbolStartLine,
+			EndLine:    inspection.SymbolEndLine,
+			Signature:  inspection.Signature,
+			NextTool:   nextTool,
+			NextArgs:   nextArgs,
+			Provenance: provenance,
+			Basis:      basis,
+			Evidence:   evidence,
+		}
+		if item.Signature == "" {
+			item.Signature = symbolSignature(deps.RepoRoot, node)
+		}
+		return item
+	}
+
+	sortImpactNodes := func(nodes []impactNode) {
+		sort.Slice(nodes, func(i, j int) bool {
+			if nodes[i].FilePath == nodes[j].FilePath {
+				return nodes[i].SymbolName < nodes[j].SymbolName
+			}
+			return nodes[i].FilePath < nodes[j].FilePath
+		})
+	}
+
+	sortStructuredNodes := func(items []impactStructuredNode) {
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Depth == items[j].Depth {
+				if items[i].FilePath == items[j].FilePath {
+					if items[i].StartLine == items[j].StartLine {
+						return items[i].SymbolName < items[j].SymbolName
+					}
+					return items[i].StartLine < items[j].StartLine
+				}
+				return items[i].FilePath < items[j].FilePath
+			}
+			return items[i].Depth < items[j].Depth
+		})
+	}
+
+	sortRoutes := func(items []impactRoute) {
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Method == items[j].Method {
+				if items[i].Path == items[j].Path {
+					return items[i].ViaSymbol < items[j].ViaSymbol
+				}
+				return items[i].Path < items[j].Path
+			}
+			return items[i].Method < items[j].Method
+		})
+	}
+
+	sortEdges := func(edges []types.ASTEdge) {
+		sort.Slice(edges, func(i, j int) bool {
+			if edges[i].SourceID == edges[j].SourceID {
+				if edges[i].TargetID == edges[j].TargetID {
+					return edges[i].EdgeType < edges[j].EdgeType
+				}
+				return edges[i].TargetID < edges[j].TargetID
+			}
+			return edges[i].SourceID < edges[j].SourceID
+		})
+	}
+
+	capStructuredNodes := func(items []impactStructuredNode) ([]impactStructuredNode, int, bool) {
+		total := len(items)
+		if total > impactStructuredSectionLimit {
+			return items[:impactStructuredSectionLimit], total, true
+		}
+		return items, total, false
+	}
+
+	capRoutes := func(items []impactRoute) ([]impactRoute, int, bool) {
+		total := len(items)
+		if total > impactStructuredSectionLimit {
+			return items[:impactStructuredSectionLimit], total, true
+		}
+		return items, total, false
+	}
+
+	capRiskSummary := func(items []impactRiskSummaryItem) ([]impactRiskSummaryItem, int, bool) {
+		total := len(items)
+		if total > impactRiskSummaryLimit {
+			return items[:impactRiskSummaryLimit], total, true
+		}
+		return items, total, false
+	}
+
 	// Get affected nodes with their hop depths
 	affectedWithDepth := deps.Graph.BlastRadiusWithDepth(nodeID, p.Depth)
 	if affectedWithDepth == nil {
@@ -838,15 +1066,6 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 	var riskScore float64
 	if score, err := deps.Store.GetNodeScore(nodeID); err == nil {
 		riskScore = score.Betweenness
-	}
-
-	// impactNode is a minimal node descriptor for the response
-	type impactNode struct {
-		ID         string            `json:"id"`
-		SymbolName string            `json:"symbol_name"`
-		FilePath   string            `json:"file_path"`
-		NextTool   string            `json:"next_tool"`
-		NextArgs   map[string]string `json:"next_args,omitempty"`
 	}
 
 	// Group affected nodes by risk level based on hop depth
@@ -916,6 +1135,12 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 		}
 	}
 
+	sortImpactNodes(direct)
+	sortImpactNodes(highRisk)
+	sortImpactNodes(mediumRisk)
+	sortImpactNodes(lowRisk)
+	sortImpactNodes(affectedTests)
+
 	// Record original counts before capping
 	totalDirect := len(direct)
 	totalHighRisk := len(highRisk)
@@ -942,6 +1167,268 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 		riskScore, totalDirect, len(direct), totalHighRisk, len(highRisk), totalMediumRisk, len(mediumRisk), totalLowRisk, len(lowRisk), len(affectedTests),
 	)
 
+	callDepths := make(map[string]int)
+	callParents := make(map[string]string)
+	callVisited := map[string]bool{nodeID: true}
+	callQueue := []struct {
+		ID    string
+		Depth int
+	}{{ID: nodeID, Depth: 0}}
+	for len(callQueue) > 0 {
+		current := callQueue[0]
+		callQueue = callQueue[1:]
+		if current.Depth >= p.Depth {
+			continue
+		}
+		incomingEdges, err := deps.Store.GetEdgesTo(current.ID)
+		if err != nil {
+			continue
+		}
+		sortEdges(incomingEdges)
+		for _, edge := range incomingEdges {
+			if edge.EdgeType != types.EdgeTypeCalls || edge.SourceID == "" || callVisited[edge.SourceID] {
+				continue
+			}
+			callVisited[edge.SourceID] = true
+			callDepths[edge.SourceID] = current.Depth + 1
+			callParents[edge.SourceID] = current.ID
+			callQueue = append(callQueue, struct {
+				ID    string
+				Depth int
+			}{ID: edge.SourceID, Depth: current.Depth + 1})
+		}
+	}
+
+	targetItem := buildStructuredNode(
+		*targetNode,
+		"read_symbol",
+		defaultReadSymbolArgs(targetNode.ID),
+		"extracted",
+		"resolved symbol node",
+		fmt.Sprintf("Resolved %q via %s to %s", p.SymbolID, resolvedBy, targetNode.SymbolName),
+	)
+	targetItem.Resolution = summarizeResolutionLabel(resolvedBy)
+
+	directCallerIDs := make([]string, 0)
+	for id, depth := range callDepths {
+		if depth == 1 {
+			directCallerIDs = append(directCallerIDs, id)
+		}
+	}
+	sort.Strings(directCallerIDs)
+
+	var directCallerItems []impactStructuredNode
+	directCallerNodes := make(map[string]types.ASTNode)
+	for _, callerID := range directCallerIDs {
+		node, err := deps.Store.GetNode(callerID)
+		if err != nil || node == nil {
+			continue
+		}
+		directCallerNodes[callerID] = *node
+		item := buildStructuredNode(
+			*node,
+			"trace_call_path",
+			map[string]string{"from": node.ID, "to": nodeID},
+			"extracted",
+			"incoming calls edge",
+			fmt.Sprintf("%s directly calls %s", node.SymbolName, targetNode.SymbolName),
+		)
+		item.Depth = 1
+		directCallerItems = append(directCallerItems, item)
+	}
+	sortStructuredNodes(directCallerItems)
+	directCallerItems, directCallersTotal, directCallersTruncated := capStructuredNodes(directCallerItems)
+
+	routeSeen := make(map[string]bool)
+	var routeItems []impactRoute
+	addRouteItem := func(routeNode types.ASTNode, handler map[string]any, viaSymbol, basis, evidence string) {
+		if routeSeen[routeNode.ID] {
+			return
+		}
+		routeSeen[routeNode.ID] = true
+		method, path, _ := parseRouteSymbol(routeNode.SymbolName)
+		routeItems = append(routeItems, impactRoute{
+			ID:         routeNode.ID,
+			Symbol:     routeNode.SymbolName,
+			Method:     method,
+			Path:       path,
+			FilePath:   routeNode.FilePath,
+			Handler:    handler,
+			ViaSymbol:  viaSymbol,
+			Provenance: "extracted",
+			Basis:      basis,
+			Evidence:   evidence,
+		})
+	}
+
+	targetIncomingEdges, _ := deps.Store.GetEdgesTo(nodeID)
+	sortEdges(targetIncomingEdges)
+	for _, edge := range targetIncomingEdges {
+		if edge.EdgeType != types.EdgeTypeHandles || edge.SourceID == "" {
+			continue
+		}
+		routeNode, err := deps.Store.GetNode(edge.SourceID)
+		if err != nil || routeNode == nil || routeNode.NodeType != types.NodeTypeRoute {
+			continue
+		}
+		addRouteItem(
+			*routeNode,
+			nodeSummary(targetNode),
+			targetNode.SymbolName,
+			"route handler edge",
+			fmt.Sprintf("%s handles %s directly", routeNode.SymbolName, targetNode.SymbolName),
+		)
+	}
+	for callerID, callerNode := range directCallerNodes {
+		incomingEdges, _ := deps.Store.GetEdgesTo(callerID)
+		sortEdges(incomingEdges)
+		for _, edge := range incomingEdges {
+			if edge.EdgeType != types.EdgeTypeHandles || edge.SourceID == "" {
+				continue
+			}
+			routeNode, err := deps.Store.GetNode(edge.SourceID)
+			if err != nil || routeNode == nil || routeNode.NodeType != types.NodeTypeRoute {
+				continue
+			}
+			addRouteItem(
+				*routeNode,
+				nodeSummary(&callerNode),
+				callerNode.SymbolName,
+				"route handler edge plus direct caller edge",
+				fmt.Sprintf("%s handles %s, which directly calls %s", routeNode.SymbolName, callerNode.SymbolName, targetNode.SymbolName),
+			)
+		}
+	}
+	sortRoutes(routeItems)
+	routeItems, routesAffectedTotal, routesAffectedTruncated := capRoutes(routeItems)
+
+	var indirectCallerItems []impactStructuredNode
+	indirectCallerIDs := make([]string, 0)
+	for id, depth := range callDepths {
+		if depth >= 2 {
+			indirectCallerIDs = append(indirectCallerIDs, id)
+		}
+	}
+	sort.Strings(indirectCallerIDs)
+	for _, indirectID := range indirectCallerIDs {
+		node, err := deps.Store.GetNode(indirectID)
+		if err != nil || node == nil || node.NodeType == types.NodeTypeRoute {
+			continue
+		}
+		var viaSymbols []string
+		for cursor := callParents[indirectID]; cursor != "" && cursor != nodeID; cursor = callParents[cursor] {
+			midNode, err := deps.Store.GetNode(cursor)
+			if err != nil || midNode == nil {
+				continue
+			}
+			viaSymbols = append(viaSymbols, midNode.SymbolName)
+		}
+		evidence := fmt.Sprintf("%s reaches %s through a %d-hop incoming call path", node.SymbolName, targetNode.SymbolName, callDepths[indirectID])
+		if len(viaSymbols) > 0 {
+			evidence = fmt.Sprintf("%s reaches %s via %s", node.SymbolName, targetNode.SymbolName, strings.Join(viaSymbols, " -> "))
+		}
+		item := buildStructuredNode(
+			*node,
+			"trace_call_path",
+			map[string]string{"from": node.ID, "to": nodeID},
+			"extracted",
+			"transitive incoming calls path",
+			evidence,
+		)
+		item.Depth = callDepths[indirectID]
+		item.ViaSymbols = viaSymbols
+		indirectCallerItems = append(indirectCallerItems, item)
+	}
+	sortStructuredNodes(indirectCallerItems)
+	indirectCallerItems, indirectCallersTotal, indirectCallersTruncated := capStructuredNodes(indirectCallerItems)
+
+	outgoingEdges, _ := deps.Store.GetEdgesFrom(nodeID)
+	sortEdges(outgoingEdges)
+	var downstreamCalleeItems []impactStructuredNode
+	downstreamSeen := make(map[string]bool)
+	for _, edge := range outgoingEdges {
+		if edge.EdgeType != types.EdgeTypeCalls || edge.TargetID == "" || downstreamSeen[edge.TargetID] {
+			continue
+		}
+		downstreamSeen[edge.TargetID] = true
+		node, err := deps.Store.GetNode(edge.TargetID)
+		if err != nil || node == nil {
+			continue
+		}
+		item := buildStructuredNode(
+			*node,
+			"read_symbol",
+			defaultReadSymbolArgs(node.ID),
+			"extracted",
+			"outgoing calls edge",
+			fmt.Sprintf("%s directly calls %s", targetNode.SymbolName, node.SymbolName),
+		)
+		downstreamCalleeItems = append(downstreamCalleeItems, item)
+	}
+	sortStructuredNodes(downstreamCalleeItems)
+	downstreamCalleeItems, downstreamCalleesTotal, downstreamCalleesTruncated := capStructuredNodes(downstreamCalleeItems)
+
+	overallRisk := "low"
+	switch {
+	case directCallersTotal >= 4 || routesAffectedTotal >= 2 || downstreamCalleesTotal >= 8 || totalAffected >= 20 || riskScore >= 0.5:
+		overallRisk = "high"
+	case directCallersTotal >= 1 || routesAffectedTotal >= 1 || indirectCallersTotal >= 2 || downstreamCalleesTotal >= 3 || totalAffected >= 5 || riskScore >= 0.15:
+		overallRisk = "medium"
+	}
+
+	riskSummary := []impactRiskSummaryItem{
+		{
+			Label:      "risk_score",
+			Value:      riskScore,
+			Provenance: "extracted",
+			Basis:      "stored betweenness centrality",
+			Evidence:   fmt.Sprintf("Node score lookup for %s", targetNode.SymbolName),
+		},
+		{
+			Label:      "affected_count",
+			Value:      totalAffected,
+			Provenance: "extracted",
+			Basis:      "blast radius traversal",
+			Evidence:   fmt.Sprintf("BFS depth %d found %d affected nodes", p.Depth, totalAffected),
+		},
+		{
+			Label:      "direct_callers",
+			Value:      directCallersTotal,
+			Provenance: "extracted",
+			Basis:      "incoming calls edges",
+			Evidence:   fmt.Sprintf("%d direct callers were found", directCallersTotal),
+		},
+		{
+			Label:      "routes_affected",
+			Value:      routesAffectedTotal,
+			Provenance: "extracted",
+			Basis:      "route handler edges",
+			Evidence:   fmt.Sprintf("%d routes directly handle the target or its direct callers", routesAffectedTotal),
+		},
+		{
+			Label:      "downstream_callees",
+			Value:      downstreamCalleesTotal,
+			Provenance: "extracted",
+			Basis:      "outgoing calls edges",
+			Evidence:   fmt.Sprintf("%d direct downstream callees were found", downstreamCalleesTotal),
+		},
+		{
+			Label:      "affected_tests",
+			Value:      len(affectedTests),
+			Provenance: "extracted",
+			Basis:      "blast radius nodes classified by symbol name",
+			Evidence:   fmt.Sprintf("%d affected nodes matched test naming heuristics", len(affectedTests)),
+		},
+		{
+			Label:      "overall_assessment",
+			Value:      overallRisk,
+			Provenance: "inferred",
+			Basis:      "aggregated extracted impact signals",
+			Evidence:   fmt.Sprintf("Combined risk_score=%.2f, direct_callers=%d, routes=%d, downstream_callees=%d, affected=%d", riskScore, directCallersTotal, routesAffectedTotal, downstreamCalleesTotal, totalAffected),
+		},
+	}
+	riskSummary, riskSummaryTotal, riskSummaryTruncated := capRiskSummary(riskSummary)
+
 	// Compact mode: keep only symbol_id, risk tiers with IDs only, total_affected
 	if p.Compact {
 		type compactNode struct {
@@ -966,21 +1453,37 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"symbol":         p.SymbolID,
-		"depth":          p.Depth,
-		"risk_score":     riskScore,
-		"affected_count": totalAffected,
-		"direct":         direct,
-		"high_risk":      highRisk,
-		"medium_risk":    mediumRisk,
-		"low_risk":       lowRisk,
-		"affected_tests": affectedTests,
-		"summary":        summary,
+		"symbol":                       p.SymbolID,
+		"depth":                        p.Depth,
+		"risk_score":                   riskScore,
+		"affected_count":               totalAffected,
+		"direct":                       direct,
+		"high_risk":                    highRisk,
+		"medium_risk":                  mediumRisk,
+		"low_risk":                     lowRisk,
+		"affected_tests":               affectedTests,
+		"summary":                      summary,
+		"target":                       targetItem,
+		"direct_callers":               directCallerItems,
+		"direct_callers_total":         directCallersTotal,
+		"direct_callers_truncated":     directCallersTruncated,
+		"routes_affected":              routeItems,
+		"routes_affected_total":        routesAffectedTotal,
+		"routes_affected_truncated":    routesAffectedTruncated,
+		"indirect_callers":             indirectCallerItems,
+		"indirect_callers_total":       indirectCallersTotal,
+		"indirect_callers_truncated":   indirectCallersTruncated,
+		"downstream_callees":           downstreamCalleeItems,
+		"downstream_callees_total":     downstreamCalleesTotal,
+		"downstream_callees_truncated": downstreamCalleesTruncated,
+		"risk_summary":                 riskSummary,
+		"risk_summary_total":           riskSummaryTotal,
+		"risk_summary_truncated":       riskSummaryTruncated,
 	}, nil
 }
 
 func registerImpactTool(s *Server, deps ToolDeps) {
-	desc := "Blast radius: finds all downstream dependents of a symbol, grouped by risk level (CRITICAL/HIGH/MEDIUM/LOW). Use before making changes to assess risk."
+	desc := "Blast radius: finds downstream dependents of a symbol, grouped by risk level (CRITICAL/HIGH/MEDIUM/LOW), and adds structured callers/routes/downstream sections with provenance labels."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -1130,6 +1633,7 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 	}
 	symbolRefJSON, _ := json.Marshal(symbolRef)
 	filePathJSON, _ := json.Marshal(node.FilePath)
+	fileSymbolQueryJSON, _ := json.Marshal(symbolBaseName(node.SymbolName))
 
 	response := map[string]interface{}{
 		"symbol_name":          node.SymbolName,
@@ -1155,7 +1659,7 @@ func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
 		"next_tools": []map[string]string{
 			{"tool": "understand", "args_hint": `{"symbol": ` + string(symbolRefJSON) + `}`},
 			{"tool": "impact", "args_hint": `{"symbol_id": ` + string(symbolRefJSON) + `}`},
-			{"tool": "list_file_symbols", "args_hint": `{"path": ` + string(filePathJSON) + `, "limit": 50}`},
+			{"tool": "list_file_symbols", "args_hint": `{"path": ` + string(filePathJSON) + `, "limit": 25, "query": ` + string(fileSymbolQueryJSON) + `}`},
 		},
 	}
 
@@ -2902,10 +3406,10 @@ func listFileSymbolsHandler(deps ToolDeps, p ListFileSymbolsParams) (interface{}
 		return nil, fmt.Errorf("'path' is required")
 	}
 	if p.Limit <= 0 {
-		p.Limit = 200
+		p.Limit = 25
 	}
-	if p.Limit > 500 {
-		p.Limit = 500
+	if p.Limit > 100 {
+		p.Limit = 100
 	}
 
 	fileCtx, err := loadSymbolFileContext(deps.RepoRoot, p.Path)
@@ -2919,6 +3423,7 @@ func listFileSymbolsHandler(deps ToolDeps, p ListFileSymbolsParams) (interface{}
 	}
 
 	kindFilter := make(map[string]bool)
+	var normalizedKinds []string
 	for _, kind := range p.Kinds {
 		if kind == "" {
 			continue
@@ -2927,10 +3432,13 @@ func listFileSymbolsHandler(deps ToolDeps, p ListFileSymbolsParams) (interface{}
 		switch kind {
 		case "function", "class", "struct", "method", "interface", "file", "route":
 			kindFilter[kind] = true
+			normalizedKinds = append(normalizedKinds, kind)
 		default:
 			return nil, fmt.Errorf("invalid kind %q: must be one of function, class, struct, method, interface, file, route", kind)
 		}
 	}
+	sort.Strings(normalizedKinds)
+	queryTerms := listFileSymbolsQueryTerms(p.Query)
 
 	sort.Slice(nodes, func(i, j int) bool {
 		if nodes[i].StartByte == nodes[j].StartByte {
@@ -2950,12 +3458,16 @@ func listFileSymbolsHandler(deps ToolDeps, p ListFileSymbolsParams) (interface{}
 			continue
 		}
 
+		inspection := buildSymbolInspection(node, fileCtx)
+		if !listFileSymbolsMatchesQuery(node.SymbolName, inspection.Signature, queryTerms) {
+			continue
+		}
+
 		totalMatching++
 		if len(symbols) >= p.Limit {
 			continue
 		}
 
-		inspection := buildSymbolInspection(node, fileCtx)
 		symbolRef := node.ID
 		if symbolRef == "" {
 			symbolRef = node.SymbolName
@@ -2972,17 +3484,28 @@ func listFileSymbolsHandler(deps ToolDeps, p ListFileSymbolsParams) (interface{}
 		})
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"path":      fileCtx.RelPath,
 		"count":     len(symbols),
 		"total":     totalMatching,
 		"truncated": totalMatching > len(symbols),
 		"symbols":   symbols,
-	}, nil
+	}
+	if !p.Compact {
+		result["applied_limit"] = p.Limit
+		if len(normalizedKinds) > 0 {
+			result["kinds"] = normalizedKinds
+		}
+		if strings.TrimSpace(p.Query) != "" {
+			result["query"] = p.Query
+			result["query_terms"] = queryTerms
+		}
+	}
+	return result, nil
 }
 
 func registerListFileSymbolsTool(s *Server, deps ToolDeps) {
-	desc := "List indexed symbols in a file in source order with safe read_symbol follow-up args. Use instead of grep when you need method or symbol inventory."
+	desc := "List indexed symbols in a file in source order with safe bounded defaults, optional query narrowing, and read_symbol follow-up args. Use instead of grep for method inventory."
 
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
 		var p ListFileSymbolsParams
@@ -3002,15 +3525,23 @@ func registerListFileSymbolsTool(s *Server, deps ToolDeps) {
 					"type":        "string",
 					"description": "Repo-relative or absolute-under-repo file path to inspect",
 				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional case-insensitive symbol/signature query used to narrow large-file inventories",
+				},
 				"limit": map[string]interface{}{
 					"type":        "integer",
-					"description": "Maximum symbols to return (default: 200)",
-					"default":     200,
+					"description": "Maximum symbols to return (default: 25, hard cap: 100)",
+					"default":     25,
 				},
 				"kinds": map[string]interface{}{
 					"type":        "array",
 					"description": "Optional node-type filters such as function, method, class, struct, interface, route",
 					"items":       map[string]interface{}{"type": "string"},
+				},
+				"compact": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Return the minimal inventory shape only; omits extra display-only metadata",
 				},
 			},
 			"required": []string{"path"},
@@ -3023,8 +3554,10 @@ func registerListFileSymbolsTool(s *Server, deps ToolDeps) {
 		mcp.WithTitleAnnotation("List File Symbols"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("path", mcp.Description("Repo-relative or absolute-under-repo file path to inspect"), mcp.Required()),
-		mcp.WithNumber("limit", mcp.Description("Maximum symbols to return (default: 200)")),
+		mcp.WithString("query", mcp.Description("Optional case-insensitive symbol/signature query used to narrow large-file inventories")),
+		mcp.WithNumber("limit", mcp.Description("Maximum symbols to return (default: 25, hard cap: 100)")),
 		mcp.WithArray("kinds", mcp.Description("Optional node-type filters such as function, method, class, struct, interface, route"), mcp.WithStringItems()),
+		mcp.WithBoolean("compact", mcp.Description("Return the minimal inventory shape only; omits extra display-only metadata")),
 	)
 	tool.Meta = &mcp.Meta{
 		AdditionalFields: map[string]any{
@@ -3040,7 +3573,7 @@ func registerListFileSymbolsTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "list_file_symbols", deps.OutputStore)
 	}
 
 	if isToolInProfile("list_file_symbols", deps.Profile) {
@@ -3128,8 +3661,9 @@ func registerExploreTool(s *Server, deps ToolDeps) {
 // ----- Tool 13: understand -----
 
 func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
+	normalizeUnderstandParams(&p)
 	if p.Symbol == "" {
-		return nil, fmt.Errorf("'symbol' is required")
+		return nil, fmt.Errorf("one of 'symbol', 'symbol_id', 'query', or 'name' is required")
 	}
 
 	type symbolDetail struct {
@@ -3139,36 +3673,23 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 		ID       string `json:"id"`
 	}
 
-	// Tier 1: Exact match
 	var found *symbolDetail
 	var resolvedID string
-	resolution := "exact"
+	resolution := ""
 
-	exactNode, err := deps.Store.GetNodeByName(p.Symbol)
-	if err == nil {
-		found = &symbolDetail{
-			Name:     exactNode.SymbolName,
-			FilePath: exactNode.FilePath,
-			NodeType: exactNode.NodeType.String(),
-			ID:       exactNode.ID,
-		}
-		resolvedID = exactNode.ID
+	node, resolvedBy, candidates, err := resolveSymbolNodeDetailed(deps, p.Symbol)
+	if err != nil {
+		return nil, err
 	}
-
-	// Tier 2: Fuzzy match (pattern search)
-	if found == nil {
-		resolution = "fuzzy"
-		patternNodes, err := deps.Store.SearchNodesByName(p.Symbol)
-		if err == nil && len(patternNodes) > 0 {
-			n := patternNodes[0]
-			found = &symbolDetail{
-				Name:     n.SymbolName,
-				FilePath: n.FilePath,
-				NodeType: n.NodeType.String(),
-				ID:       n.ID,
-			}
-			resolvedID = n.ID
+	if node != nil {
+		found = &symbolDetail{
+			Name:     node.SymbolName,
+			FilePath: node.FilePath,
+			NodeType: node.NodeType.String(),
+			ID:       node.ID,
 		}
+		resolvedID = node.ID
+		resolution = summarizeResolutionLabel(resolvedBy)
 	}
 
 	// Tier 3: FTS search (file-scoped search)
@@ -3203,7 +3724,18 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 	}
 
 	if found == nil {
-		return nil, fmt.Errorf("symbol not found: %s", p.Symbol)
+		resp := map[string]any{
+			"error":  "symbol not resolved uniquely",
+			"symbol": p.Symbol,
+		}
+		if len(candidates) == 0 {
+			resp["error"] = "symbol not found"
+			return resp, nil
+		}
+		resp["candidates"] = buildSymbolCandidates(candidates, "understand", func(candidate types.ASTNode) map[string]string {
+			return map[string]string{"symbol": candidate.ID}
+		})
+		return resp, nil
 	}
 
 	result := map[string]interface{}{
@@ -3317,7 +3849,7 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 }
 
 func registerUnderstandTool(s *Server, deps ToolDeps) {
-	desc := "Deep analysis of a symbol: callers, callees, PageRank importance, community membership, and recent file changes. Use to understand what a symbol does and why it matters."
+	desc := "Deep analysis of a symbol: callers, callees, PageRank importance, community membership, and recent file changes. Accepts symbol, symbol_id, query, or name."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -3336,14 +3868,31 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 			"properties": map[string]interface{}{
 				"symbol": map[string]interface{}{
 					"type":        "string",
-					"description": "Symbol name to understand",
+					"description": "Canonical parameter: symbol name or ID to understand",
+				},
+				"symbol_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for symbol accepted for client compatibility",
+				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for symbol accepted for client compatibility",
+				},
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for symbol accepted for client compatibility",
 				},
 				"compact": map[string]interface{}{
 					"type":        "boolean",
 					"description": "Return compact output: IDs, scores, and line spans only",
 				},
 			},
-			"required": []string{"symbol"},
+			"anyOf": []map[string]interface{}{
+				{"required": []string{"symbol"}},
+				{"required": []string{"symbol_id"}},
+				{"required": []string{"query"}},
+				{"required": []string{"name"}},
+			},
 		},
 	}, cliHandler)
 
@@ -3352,7 +3901,10 @@ func registerUnderstandTool(s *Server, deps ToolDeps) {
 		mcp.WithDescription(desc),
 		mcp.WithTitleAnnotation("Understand Symbol"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("symbol", mcp.Description("Symbol name to understand"), mcp.Required()),
+		mcp.WithString("symbol", mcp.Description("Canonical parameter: symbol name or ID to understand")),
+		mcp.WithString("symbol_id", mcp.Description("Alias for symbol accepted for client compatibility")),
+		mcp.WithString("query", mcp.Description("Alias for symbol accepted for client compatibility")),
+		mcp.WithString("name", mcp.Description("Alias for symbol accepted for client compatibility")),
 		mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 	)
 	tool.Meta = &mcp.Meta{
@@ -4752,6 +5304,7 @@ const (
 var recoveryHints = map[string]string{
 	"understand":               "Try compact=true to reduce output size",
 	"impact":                   "Try compact=true or reduce depth",
+	"list_file_symbols":        "Try query=... or a smaller limit to narrow large-file inventories",
 	"assemble_context":         "Try a smaller budget_tokens or mode=signatures",
 	"get_architecture_summary": "Try compact=true or a smaller limit",
 	"context":                  "Try compact=true or a smaller limit",

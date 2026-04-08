@@ -61,8 +61,9 @@ func registerTraceImpactPrompt(s *Server) {
 
 Steps:
 1. Call impact on "%s" to find all downstream dependents and upstream dependencies
-2. For the top 3 upstream callers, call trace_call_path with from=<caller> and to="%s" to understand how they reach this symbol
-3. Summarize the blast radius: how many symbols are affected, which files are involved, and recommend specific test coverage for the impacted areas`, symbol, symbol, symbol))),
+2. Inspect impact.direct_callers, impact.routes_affected, and impact.downstream_callees before composing any summary
+3. For the top 3 upstream callers, call trace_call_path with from=<caller> and to="%s" to understand how they reach this symbol
+4. Summarize the blast radius: how many symbols are affected, which files are involved, and recommend specific test coverage for the impacted areas`, symbol, symbol, symbol))),
 				},
 			), nil
 		},
@@ -93,10 +94,10 @@ func registerPrepareFixContextPrompt(s *Server) {
 
 Steps:
 1. Call context with the bug description to find relevant code symbols
-2. If a likely file is identified, call list_file_symbols on that file to inventory the available symbols
+2. If a likely file is identified, call list_file_symbols on that file with a focused query to inventory only the relevant symbols (especially for large files)
 3. Call read_symbol with mode="bounded" on the top 3 relevant symbols to inspect them safely
 4. Call read_symbol with mode="flow_summary" on the most relevant symbol before escalating to full reads
-5. Call understand on the most relevant symbol to see its relationships and dependencies
+5. Call understand on the most relevant symbol to see its relationships and dependencies (symbol or symbol_id are both accepted)
 6. Prepare a concise summary of the code area, the likely root cause, and a suggested fix approach`, description, fileHint))),
 				},
 			), nil
@@ -150,7 +151,7 @@ Token budget: %s
 
 Steps:
 1. Call context with the task description to find relevant symbols
-2. Call list_file_symbols on the most likely files to inventory available symbols
+2. Call list_file_symbols on the most likely files with a focused query to inventory only the relevant symbols
 3. Call read_symbol with mode="bounded" on the most relevant symbols
 4. Call read_symbol with mode="flow_summary" on the top symbol before escalating to full reads
 5. Call assemble_context with query="%s", budget_tokens=%s, and mode="snippets" to get optimally ranked context within the token budget
