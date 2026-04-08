@@ -22,9 +22,11 @@ func TestLlamaCppEmbedder_Embed(t *testing.T) {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			json.NewEncoder(w).Encode(llamaCppEmbedResponse{
+			if err := json.NewEncoder(w).Encode(llamaCppEmbedResponse{
 				Embedding: mockEmbedding,
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -63,13 +65,15 @@ func TestLlamaCppEmbedder_EmbedBatch(t *testing.T) {
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 		case "/embedding":
-			json.NewEncoder(w).Encode(llamaCppBatchResponse{
+			if err := json.NewEncoder(w).Encode(llamaCppBatchResponse{
 				Results: []llamaCppBatchItem{
 					{Embedding: []float64{1.0, 0.0, 0.0}},
 					{Embedding: []float64{0.0, 1.0, 0.0}},
 					{Embedding: []float64{0.0, 0.0, 1.0}},
 				},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -107,9 +111,11 @@ func TestLlamaCppEmbedder_DimensionTooSmall(t *testing.T) {
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 		case "/embedding":
-			json.NewEncoder(w).Encode(llamaCppEmbedResponse{
+			if err := json.NewEncoder(w).Encode(llamaCppEmbedResponse{
 				Embedding: []float64{1.0, 2.0},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -189,19 +195,26 @@ func TestLlamaCppEmbedder_BatchFallbackToSequential(t *testing.T) {
 			}
 			// If content is a string → single request; if array → batch (return wrong count to trigger fallback)
 			var req struct{ Content json.RawMessage }
-			json.Unmarshal(raw, &req)
+			if err := json.Unmarshal(raw, &req); err != nil {
+				http.Error(w, "bad", http.StatusBadRequest)
+				return
+			}
 			if len(req.Content) > 0 && req.Content[0] == '"' {
 				singleCalls++
-				json.NewEncoder(w).Encode(llamaCppEmbedResponse{
+				if err := json.NewEncoder(w).Encode(llamaCppEmbedResponse{
 					Embedding: []float64{1.0, 0.0, 0.0},
-				})
+				}); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
 			} else {
 				// Return wrong count to trigger fallback
-				json.NewEncoder(w).Encode(llamaCppBatchResponse{
+				if err := json.NewEncoder(w).Encode(llamaCppBatchResponse{
 					Results: []llamaCppBatchItem{
 						{Embedding: []float64{1.0, 0.0, 0.0}},
 					},
-				})
+				}); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
 			}
 		default:
 			http.NotFound(w, r)

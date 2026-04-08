@@ -62,7 +62,7 @@ func NewOllamaEmbedder(endpoint, model string, dim int) (*OllamaEmbedder, error)
 }
 
 // Embed generates an embedding vector for a single text.
-func (e *OllamaEmbedder) Embed(text string) ([]float32, error) {
+func (e *OllamaEmbedder) Embed(text string) (_ []float32, err error) {
 	reqBody, err := json.Marshal(ollamaEmbedRequest{
 		Model: e.model,
 		Input: text,
@@ -75,7 +75,11 @@ func (e *OllamaEmbedder) Embed(text string) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Ollama embed request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("closing Ollama embed response body: %w", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

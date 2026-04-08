@@ -127,7 +127,7 @@ func (d *Discoverer) Discover() ([]DiscoveredDoc, error) {
 // It opens the file first, then verifies the open fd's real path is within the
 // repo root, eliminating the TOCTOU window where a symlink target could change
 // between resolution and read.
-func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
+func (d *Discoverer) readDoc(path string) (_ *DiscoveredDoc, err error) {
 	// Open the file first — all subsequent checks operate on this fd,
 	// so a symlink re-target after open cannot change what we read.
 	// #nosec G304 -- path is verified against the opened fd and repo root before any content is read.
@@ -135,7 +135,11 @@ func (d *Discoverer) readDoc(path string) (*DiscoveredDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("closing %s: %w", path, closeErr)
+		}
+	}()
 
 	// Resolve the real path of the open file descriptor via /dev/fd or Stat.
 	// On most systems, f.Name() returns the original path, so we use Fd + readlink

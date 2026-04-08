@@ -69,7 +69,7 @@ func NewLlamaCppEmbedder(endpoint string, dim int) (*LlamaCppEmbedder, error) {
 }
 
 // Embed generates an embedding vector for a single text.
-func (e *LlamaCppEmbedder) Embed(text string) ([]float32, error) {
+func (e *LlamaCppEmbedder) Embed(text string) (_ []float32, err error) {
 	reqBody, err := json.Marshal(llamaCppEmbedRequest{Content: text})
 	if err != nil {
 		return nil, fmt.Errorf("marshaling llama.cpp request: %w", err)
@@ -79,7 +79,11 @@ func (e *LlamaCppEmbedder) Embed(text string) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("llama.cpp embed request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("closing llama.cpp embed response body: %w", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -108,7 +112,7 @@ func (e *LlamaCppEmbedder) Embed(text string) ([]float32, error) {
 // EmbedBatch generates embeddings for multiple texts. Attempts batch via
 // /embedding first; falls back to sequential Embed() calls if the server
 // doesn't support batch format or returns an unexpected response.
-func (e *LlamaCppEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
+func (e *LlamaCppEmbedder) EmbedBatch(texts []string) (_ [][]float32, err error) {
 	reqBody, err := json.Marshal(llamaCppEmbedRequest{Content: texts})
 	if err != nil {
 		return e.embedSequential(texts)
@@ -118,7 +122,11 @@ func (e *LlamaCppEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	if err != nil {
 		return e.embedSequential(texts)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("closing llama.cpp batch response body: %w", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return e.embedSequential(texts)
