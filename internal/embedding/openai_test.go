@@ -16,7 +16,9 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"data": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/v1/embeddings":
 			var req openAIEmbedRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -27,11 +29,13 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 			if req.Model != "test-model" {
 				t.Errorf("expected model test-model, got %s", req.Model)
 			}
-			json.NewEncoder(w).Encode(openAIEmbedResponse{
+			if err := json.NewEncoder(w).Encode(openAIEmbedResponse{
 				Data: []openAIEmbedData{
 					{Embedding: mockEmbedding, Index: 0},
 				},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -70,17 +74,21 @@ func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"data": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/v1/embeddings":
 			callCount++
 			// Return batch with out-of-order indices to test sorting
-			json.NewEncoder(w).Encode(openAIEmbedResponse{
+			if err := json.NewEncoder(w).Encode(openAIEmbedResponse{
 				Data: []openAIEmbedData{
 					{Embedding: []float64{0.0, 0.0, 1.0}, Index: 2},
 					{Embedding: []float64{1.0, 0.0, 0.0}, Index: 0},
 					{Embedding: []float64{0.0, 1.0, 0.0}, Index: 1},
 				},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -114,13 +122,17 @@ func TestOpenAIEmbedder_DimensionTooSmall(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"data": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/v1/embeddings":
-			json.NewEncoder(w).Encode(openAIEmbedResponse{
+			if err := json.NewEncoder(w).Encode(openAIEmbedResponse{
 				Data: []openAIEmbedData{
 					{Embedding: []float64{1.0, 2.0}, Index: 0},
 				},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -143,7 +155,9 @@ func TestOpenAIEmbedder_ServerError(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"data": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/v1/embeddings":
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		default:
@@ -173,7 +187,9 @@ func TestOpenAIEmbedder_ConnectFailure(t *testing.T) {
 func TestOpenAIEmbedder_Dim(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		if err := json.NewEncoder(w).Encode(map[string]any{"data": []any{}}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}))
 	defer srv.Close()
 
@@ -194,13 +210,17 @@ func TestOpenAIEmbedder_Determinism(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+			if err := json.NewEncoder(w).Encode(map[string]any{"data": []any{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		case "/v1/embeddings":
-			json.NewEncoder(w).Encode(openAIEmbedResponse{
+			if err := json.NewEncoder(w).Encode(openAIEmbedResponse{
 				Data: []openAIEmbedData{
 					{Embedding: mockEmbedding, Index: 0},
 				},
-			})
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}

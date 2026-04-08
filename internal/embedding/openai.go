@@ -65,7 +65,7 @@ func NewOpenAIEmbedder(endpoint, model string, dim int) (*OpenAIEmbedder, error)
 	}, nil
 }
 
-func (e *OpenAIEmbedder) Embed(text string) ([]float32, error) {
+func (e *OpenAIEmbedder) Embed(text string) (_ []float32, err error) {
 	reqBody, err := json.Marshal(openAIEmbedRequest{Model: e.model, Input: text})
 	if err != nil {
 		return nil, fmt.Errorf("marshaling OpenAI request: %w", err)
@@ -75,7 +75,11 @@ func (e *OpenAIEmbedder) Embed(text string) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("OpenAI embed request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("closing OpenAI embed response body: %w", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -107,7 +111,7 @@ func (e *OpenAIEmbedder) Embed(text string) ([]float32, error) {
 
 // EmbedBatch generates embeddings for multiple texts using native batch support.
 // The OpenAI /v1/embeddings API accepts an array of strings as input.
-func (e *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
+func (e *OpenAIEmbedder) EmbedBatch(texts []string) (_ [][]float32, err error) {
 	reqBody, err := json.Marshal(openAIEmbedRequest{Model: e.model, Input: texts})
 	if err != nil {
 		return nil, fmt.Errorf("marshaling OpenAI batch request: %w", err)
@@ -117,7 +121,11 @@ func (e *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("OpenAI batch embed request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("closing OpenAI batch response body: %w", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
