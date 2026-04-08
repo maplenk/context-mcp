@@ -999,7 +999,19 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 			"properties": map[string]interface{}{
 				"symbol_id": map[string]interface{}{
 					"type":        "string",
-					"description": "The ID or name of the symbol to analyze",
+					"description": "Canonical parameter: the ID or name of the symbol to analyze",
+				},
+				"symbol": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for symbol_id accepted for client compatibility",
+				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for symbol_id accepted for client compatibility",
+				},
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for symbol_id accepted for client compatibility",
 				},
 				"depth": map[string]interface{}{
 					"type":        "integer",
@@ -1020,7 +1032,10 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 		mcp.WithDescription(desc),
 		mcp.WithTitleAnnotation("Impact Analysis"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("symbol_id", mcp.Description("The ID or name of the symbol to analyze"), mcp.Required()),
+		mcp.WithString("symbol_id", mcp.Description("Canonical parameter: the ID or name of the symbol to analyze"), mcp.Required()),
+		mcp.WithString("symbol", mcp.Description("Alias for symbol_id accepted for client compatibility")),
+		mcp.WithString("query", mcp.Description("Alias for symbol_id accepted for client compatibility")),
+		mcp.WithString("name", mcp.Description("Alias for symbol_id accepted for client compatibility")),
 		mcp.WithNumber("depth", mcp.Description("Maximum BFS traversal depth (default: 5)")),
 		mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
 	)
@@ -1647,11 +1662,27 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 			"properties": map[string]interface{}{
 				"from": map[string]interface{}{
 					"type":        "string",
-					"description": "Source symbol name or ID",
+					"description": "Canonical parameter: source symbol name or ID",
 				},
 				"to": map[string]interface{}{
 					"type":        "string",
-					"description": "Target symbol name or ID",
+					"description": "Canonical parameter: target symbol name or ID",
+				},
+				"from_symbol": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for from accepted for client compatibility",
+				},
+				"to_symbol": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for to accepted for client compatibility",
+				},
+				"direction": map[string]interface{}{
+					"type":        "string",
+					"description": "Compatibility field accepted but ignored; trace_call_path always returns forward call paths from from to to",
+				},
+				"depth": map[string]interface{}{
+					"type":        "integer",
+					"description": "Alias for max_depth accepted for client compatibility",
 				},
 				"max_depth": map[string]interface{}{
 					"type":        "integer",
@@ -1668,8 +1699,12 @@ func registerTraceCallPathTool(s *Server, deps ToolDeps) {
 		mcp.WithDescription(desc),
 		mcp.WithTitleAnnotation("Trace Call Path"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("from", mcp.Description("Source symbol name or ID"), mcp.Required()),
-		mcp.WithString("to", mcp.Description("Target symbol name or ID"), mcp.Required()),
+		mcp.WithString("from", mcp.Description("Canonical parameter: source symbol name or ID"), mcp.Required()),
+		mcp.WithString("to", mcp.Description("Canonical parameter: target symbol name or ID"), mcp.Required()),
+		mcp.WithString("from_symbol", mcp.Description("Alias for from accepted for client compatibility")),
+		mcp.WithString("to_symbol", mcp.Description("Alias for to accepted for client compatibility")),
+		mcp.WithString("direction", mcp.Description("Compatibility field accepted but ignored; trace_call_path always returns forward call paths from from to to")),
+		mcp.WithNumber("depth", mcp.Description("Alias for max_depth accepted for client compatibility")),
 		mcp.WithNumber("max_depth", mcp.Description("Maximum path depth to search (default: 10)")),
 	)
 	tool.Meta = &mcp.Meta{
@@ -2035,7 +2070,11 @@ func registerSearchCodeTool(s *Server, deps ToolDeps) {
 			"properties": map[string]interface{}{
 				"pattern": map[string]interface{}{
 					"type":        "string",
-					"description": "Regex pattern to search for in file contents",
+					"description": "Canonical parameter: regex pattern to search for in file contents",
+				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Alias for pattern accepted for client compatibility",
 				},
 				"file_filter": map[string]interface{}{
 					"type":        "string",
@@ -2056,7 +2095,8 @@ func registerSearchCodeTool(s *Server, deps ToolDeps) {
 		mcp.WithDescription(desc),
 		mcp.WithTitleAnnotation("Search Code"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("pattern", mcp.Description("Regex pattern to search for in file contents"), mcp.Required()),
+		mcp.WithString("pattern", mcp.Description("Canonical parameter: regex pattern to search for in file contents"), mcp.Required()),
+		mcp.WithString("query", mcp.Description("Alias for pattern accepted for client compatibility")),
 		mcp.WithString("file_filter", mcp.Description("Optional glob pattern to filter files")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of matching lines to return (default: 20)")),
 	)
