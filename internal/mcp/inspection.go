@@ -20,6 +20,10 @@ const (
 	hardReadSymbolMaxChars    = 20000
 	readSymbolAutoWindowLines = 40
 	readSymbolMaxFileSize     = 5 * 1024 * 1024
+	flowSummaryMaxSteps       = 12
+	flowSummaryMaxHelperCalls = 12
+	flowSummaryMaxValidations = 12
+	flowSummaryMaxSideEffects = 8
 )
 
 var (
@@ -75,11 +79,12 @@ type readSymbolOutlineItem struct {
 }
 
 type flowSummaryStep struct {
-	Index     int    `json:"index"`
-	Label     string `json:"label"`
-	StartLine int    `json:"start_line"`
-	EndLine   int    `json:"end_line"`
-	Detail    string `json:"detail"`
+	Index     int      `json:"index"`
+	Label     string   `json:"label"`
+	StartLine int      `json:"start_line"`
+	EndLine   int      `json:"end_line"`
+	Detail    string   `json:"detail"`
+	Signals   []string `json:"signals,omitempty"`
 }
 
 type flowSummaryHelperCall struct {
@@ -119,6 +124,7 @@ type readSymbolFlowSummary struct {
 	Validations   []flowSummaryValidation `json:"validations"`
 	SideEffects   flowSummarySideEffects  `json:"side_effects"`
 	FollowUpReads []flowSummaryFollowUp   `json:"follow_up_reads"`
+	Truncated     bool                    `json:"truncated"`
 }
 
 type symbolInspection struct {
@@ -681,15 +687,27 @@ func flowSummaryForInspection(inspection symbolInspection, symbolRef string) rea
 		lower := strings.ToLower(trimmed)
 
 		helperCalls := extractHelperCalls(trimmed, absLine)
-		summary.HelperCalls = append(summary.HelperCalls, helperCalls...)
+		for _, call := range helperCalls {
+			if len(summary.HelperCalls) >= flowSummaryMaxHelperCalls {
+				summary.Truncated = true
+				break
+			}
+			summary.HelperCalls = append(summary.HelperCalls, call)
+		}
 
 		if looksLikeValidation(lower) {
-			summary.Validations = append(summary.Validations, flowSummaryValidation{
-				Line:   absLine,
-				Detail: truncateDisplay(trimmed, 160),
-			})
+			if len(summary.Validations) < flowSummaryMaxValidations {
+				summary.Validations = append(summary.Validations, flowSummaryValidation{
+					Line:   absLine,
+					Detail: truncateDisplay(trimmed, 160),
+				})
+			} else {
+				summary.Truncated = true
+			}
 		}
-		appendSideEffects(&summary.SideEffects, lower, absLine, trimmed)
+		if appendSideEffects(&summary.SideEffects, lower, absLine, trimmed) {
+			summary.Truncated = true
+		}
 
 		var labelHints []string
 		if looksLikeValidation(lower) {
@@ -742,13 +760,21 @@ func flowSummaryForInspection(inspection symbolInspection, symbolRef string) rea
 				hints = append(hints, current.labelHints...)
 				continue
 			}
+			if len(summary.Steps) >= flowSummaryMaxSteps {
+				summary.Truncated = true
+				break
+			}
 			summary.Steps = append(summary.Steps, buildFlowStep(stepIndex, inspection.SymbolStartLine, lines, blockStart, blockEnd, hints))
 			stepIndex++
 			blockStart = current.index
 			blockEnd = current.index
 			hints = append([]string(nil), current.labelHints...)
 		}
-		summary.Steps = append(summary.Steps, buildFlowStep(stepIndex, inspection.SymbolStartLine, lines, blockStart, blockEnd, hints))
+		if len(summary.Steps) < flowSummaryMaxSteps {
+			summary.Steps = append(summary.Steps, buildFlowStep(stepIndex, inspection.SymbolStartLine, lines, blockStart, blockEnd, hints))
+		} else {
+			summary.Truncated = true
+		}
 	}
 
 	helperCount := len(summary.HelperCalls)
@@ -804,6 +830,7 @@ func buildFlowStep(index, symbolStartLine int, lines []string, relStart, relEnd 
 		StartLine: startLine,
 		EndLine:   endLine,
 		Detail:    detail,
+		Signals:   uniqueHints,
 	}
 }
 
@@ -991,24 +1018,46 @@ func hasControlFlow(lower string) bool {
 	return false
 }
 
-func appendSideEffects(target *flowSummarySideEffects, lower string, line int, detail string) {
+func appendSideEffects(target *flowSummarySideEffects, lower string, line int, detail string) bool {
+	truncated := false
 	item := flowSummarySideEffect{
 		Line:   line,
 		Detail: truncateDisplay(strings.TrimSpace(detail), 160),
 	}
 	if hasDBWrite(lower) {
-		target.DBWrites = append(target.DBWrites, item)
+		if len(target.DBWrites) < flowSummaryMaxSideEffects {
+			target.DBWrites = append(target.DBWrites, item)
+		} else {
+			truncated = true
+		}
 	}
 	if hasJobDispatch(lower) {
-		target.Jobs = append(target.Jobs, item)
+		if len(target.Jobs) < flowSummaryMaxSideEffects {
+			target.Jobs = append(target.Jobs, item)
+		} else {
+			truncated = true
+		}
 	}
 	if hasEventEmission(lower) {
-		target.Events = append(target.Events, item)
+		if len(target.Events) < flowSummaryMaxSideEffects {
+			target.Events = append(target.Events, item)
+		} else {
+			truncated = true
+		}
 	}
 	if hasNotification(lower) {
-		target.Notifications = append(target.Notifications, item)
+		if len(target.Notifications) < flowSummaryMaxSideEffects {
+			target.Notifications = append(target.Notifications, item)
+		} else {
+			truncated = true
+		}
 	}
 	if hasIntegration(lower) {
-		target.Integrations = append(target.Integrations, item)
+		if len(target.Integrations) < flowSummaryMaxSideEffects {
+			target.Integrations = append(target.Integrations, item)
+		} else {
+			truncated = true
+		}
 	}
+	return truncated
 }

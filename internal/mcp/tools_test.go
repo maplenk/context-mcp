@@ -1119,6 +1119,27 @@ func TestImpactHandler_Basic(t *testing.T) {
 	}
 }
 
+func TestImpactHandler_QueryAlias(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("impact")
+	if !ok {
+		t.Fatal("impact handler not registered")
+	}
+
+	result, err := handler(json.RawMessage(`{"query":"processOrder","depth":3}`))
+	if err != nil {
+		t.Fatalf("impactHandler alias error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
 func TestReadSymbolHandler_Basic(t *testing.T) {
 	deps, cleanup := setupTestEnv(t)
 	defer cleanup()
@@ -1141,6 +1162,32 @@ func TestReadSymbolHandler_Basic(t *testing.T) {
 	}
 }
 
+func TestResolveSymbolNode_NormalizesQualifiedMethod(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	node := types.ASTNode{
+		ID:         types.GenerateNodeID("app/Order.php", "App.Http.Controllers.Order.postOrder"),
+		FilePath:   "app/Order.php",
+		SymbolName: "App.Http.Controllers.Order.postOrder",
+		NodeType:   types.NodeTypeMethod,
+		StartByte:  0,
+		EndByte:    50,
+		ContentSum: "order post order handler",
+	}
+	if err := deps.Store.UpsertNodes([]types.ASTNode{node}); err != nil {
+		t.Fatalf("UpsertNodes: %v", err)
+	}
+
+	resolved, err := resolveSymbolNode(deps, "Order::postOrder")
+	if err != nil {
+		t.Fatalf("resolveSymbolNode: %v", err)
+	}
+	if resolved.ID != node.ID {
+		t.Fatalf("resolved ID = %q, want %q", resolved.ID, node.ID)
+	}
+}
+
 func TestQueryHandler_Basic(t *testing.T) {
 	deps, cleanup := setupTestEnv(t)
 	defer cleanup()
@@ -1157,6 +1204,48 @@ func TestQueryHandler_Basic(t *testing.T) {
 	result, err := handler(params)
 	if err != nil {
 		t.Fatalf("queryHandler error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestTraceCallPath_AliasParamsAccepted(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("trace_call_path")
+	if !ok {
+		t.Fatal("trace_call_path handler not registered")
+	}
+
+	result, err := handler(json.RawMessage(`{"from_symbol":"processOrder","to_symbol":"calculateTotal","direction":"callers","depth":4}`))
+	if err != nil {
+		t.Fatalf("trace_call_path alias error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestSearchCode_QueryAliasAccepted(t *testing.T) {
+	deps, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("search_code")
+	if !ok {
+		t.Fatal("search_code handler not registered")
+	}
+
+	result, err := handler(json.RawMessage(`{"query":"processOrder","limit":5}`))
+	if err != nil {
+		t.Fatalf("search_code alias error: %v", err)
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")

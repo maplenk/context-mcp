@@ -61,8 +61,8 @@ func registerTraceImpactPrompt(s *Server) {
 
 Steps:
 1. Call impact on "%s" to find all downstream dependents and upstream dependencies
-2. Call trace_call_path for the top 3 upstream callers to understand how they reach this symbol
-3. Summarize the blast radius: how many symbols are affected, which files are involved, and recommend specific test coverage for the impacted areas`, symbol, symbol))),
+2. For the top 3 upstream callers, call trace_call_path with from=<caller> and to="%s" to understand how they reach this symbol
+3. Summarize the blast radius: how many symbols are affected, which files are involved, and recommend specific test coverage for the impacted areas`, symbol, symbol, symbol))),
 				},
 			), nil
 		},

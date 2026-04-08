@@ -105,6 +105,9 @@ type ContextParams struct {
 // ImpactParams are the parameters for the impact tool.
 type ImpactParams struct {
 	SymbolID string `json:"symbol_id" jsonschema:"required,description=The ID or name of the symbol to analyze"`
+	Symbol   string `json:"symbol,omitempty"`
+	Query    string `json:"query,omitempty"`
+	Name     string `json:"name,omitempty"`
 	Depth    int    `json:"depth,omitempty" jsonschema:"description=Maximum BFS traversal depth (default: 5)"`
 	Compact  bool   `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
 }
@@ -142,9 +145,13 @@ type IndexParams struct {
 
 // TraceCallPathParams are the parameters for the trace_call_path tool
 type TraceCallPathParams struct {
-	From     string `json:"from" jsonschema:"required,description=Source symbol name or ID"`
-	To       string `json:"to" jsonschema:"required,description=Target symbol name or ID"`
-	MaxDepth int    `json:"max_depth,omitempty" jsonschema:"description=Maximum path depth to search (default: 10)"`
+	From       string `json:"from" jsonschema:"required,description=Source symbol name or ID"`
+	To         string `json:"to" jsonschema:"required,description=Target symbol name or ID"`
+	FromSymbol string `json:"from_symbol,omitempty"`
+	ToSymbol   string `json:"to_symbol,omitempty"`
+	Direction  string `json:"direction,omitempty"`
+	Depth      int    `json:"depth,omitempty"`
+	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"description=Maximum path depth to search (default: 10)"`
 }
 
 // GetKeySymbolsParams are the parameters for the get_key_symbols tool
@@ -156,8 +163,223 @@ type GetKeySymbolsParams struct {
 // SearchCodeParams are the parameters for the search_code tool
 type SearchCodeParams struct {
 	Pattern    string `json:"pattern" jsonschema:"required,description=Regex pattern to search for in file contents"`
+	Query      string `json:"query,omitempty"`
 	FileFilter string `json:"file_filter,omitempty" jsonschema:"description=Optional glob pattern to filter files"`
 	Limit      int    `json:"limit,omitempty" jsonschema:"description=Maximum number of matching lines to return (default: 20)"`
+}
+
+type rankedSymbolCandidate struct {
+	Node       types.ASTNode
+	Score      int
+	Resolution string
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func normalizeImpactParams(p *ImpactParams) {
+	if p.SymbolID == "" {
+		p.SymbolID = firstNonEmpty(p.Symbol, p.Query, p.Name)
+	}
+}
+
+func normalizeTraceCallPathParams(p *TraceCallPathParams) {
+	if p.From == "" {
+		p.From = firstNonEmpty(p.FromSymbol)
+	}
+	if p.To == "" {
+		p.To = firstNonEmpty(p.ToSymbol)
+	}
+	if p.MaxDepth == 0 && p.Depth > 0 {
+		p.MaxDepth = p.Depth
+	}
+}
+
+func normalizeSearchCodeParams(p *SearchCodeParams) {
+	if p.Pattern == "" {
+		p.Pattern = firstNonEmpty(p.Query)
+	}
+}
+
+func normalizeSymbolReference(symbol string) string {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return ""
+	}
+	symbol = strings.ReplaceAll(symbol, "::", ".")
+	symbol = strings.ReplaceAll(symbol, "\\", ".")
+	symbol = strings.ReplaceAll(symbol, "/", ".")
+	symbol = strings.ReplaceAll(symbol, "..", ".")
+	symbol = strings.Trim(symbol, ".")
+	for strings.Contains(symbol, "..") {
+		symbol = strings.ReplaceAll(symbol, "..", ".")
+	}
+	return symbol
+}
+
+func symbolQueryVariants(symbol string) []string {
+	raw := strings.TrimSpace(symbol)
+	normalized := normalizeSymbolReference(raw)
+	base := symbolBaseName(normalized)
+
+	var variants []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range variants {
+			if strings.EqualFold(existing, value) {
+				return
+			}
+		}
+		variants = append(variants, value)
+	}
+
+	add(raw)
+	add(normalized)
+	add(base)
+	return variants
+}
+
+func scoreSymbolCandidate(query string, node types.ASTNode) (int, string) {
+	rawQuery := strings.TrimSpace(query)
+	normalizedQuery := normalizeSymbolReference(rawQuery)
+	queryBase := strings.ToLower(symbolBaseName(normalizedQuery))
+
+	rawCandidate := strings.TrimSpace(node.SymbolName)
+	normalizedCandidate := normalizeSymbolReference(rawCandidate)
+	candidateBase := strings.ToLower(symbolBaseName(normalizedCandidate))
+
+	switch {
+	case rawQuery != "" && strings.EqualFold(rawCandidate, rawQuery):
+		return 1000, "exact_name"
+	case normalizedQuery != "" && strings.EqualFold(normalizedCandidate, normalizedQuery):
+		return 950, "normalized_exact"
+	case normalizedQuery != "" && strings.HasSuffix(strings.ToLower(normalizedCandidate), "."+strings.ToLower(normalizedQuery)):
+		return 900, "normalized_suffix"
+	case queryBase != "" && strings.EqualFold(candidateBase, queryBase) && normalizedQuery != "" && strings.Contains(normalizedQuery, "."):
+		return 700, "method_name"
+	case queryBase != "" && strings.EqualFold(candidateBase, queryBase):
+		return 600, "base_name"
+	case normalizedQuery != "" && strings.Contains(strings.ToLower(normalizedCandidate), strings.ToLower(normalizedQuery)):
+		return 500, "contains_query"
+	case queryBase != "" && strings.Contains(strings.ToLower(normalizedCandidate), queryBase):
+		return 400, "contains_base"
+	default:
+		return 0, ""
+	}
+}
+
+func shouldResolveCandidate(scored []rankedSymbolCandidate) bool {
+	if len(scored) == 0 {
+		return false
+	}
+	if len(scored) == 1 {
+		return true
+	}
+	best := scored[0].Score
+	next := scored[1].Score
+	if best >= 900 {
+		return true
+	}
+	return best >= 700 && best-next >= 100
+}
+
+func resolveSymbolNodeDetailed(deps ToolDeps, symbolID string) (*types.ASTNode, string, []types.ASTNode, error) {
+	symbolID = strings.TrimSpace(symbolID)
+	if symbolID == "" {
+		return nil, "", nil, fmt.Errorf("'symbol_id' is required")
+	}
+
+	if node, err := deps.Store.GetNode(symbolID); err == nil {
+		return node, "id", nil, nil
+	}
+
+	for _, variant := range symbolQueryVariants(symbolID) {
+		if node, err := deps.Store.GetNodeByName(variant); err == nil {
+			return node, "exact_name", nil, nil
+		}
+	}
+
+	candidateMap := make(map[string]types.ASTNode)
+	for _, variant := range symbolQueryVariants(symbolID) {
+		nodes, err := deps.Store.SearchNodesByName(variant)
+		if err != nil {
+			continue
+		}
+		for _, node := range nodes {
+			candidateMap[node.ID] = node
+		}
+	}
+	if len(candidateMap) == 0 {
+		return nil, "", nil, nil
+	}
+
+	scored := make([]rankedSymbolCandidate, 0, len(candidateMap))
+	for _, node := range candidateMap {
+		score, resolution := scoreSymbolCandidate(symbolID, node)
+		if score <= 0 {
+			continue
+		}
+		scored = append(scored, rankedSymbolCandidate{
+			Node:       node,
+			Score:      score,
+			Resolution: resolution,
+		})
+	}
+	if len(scored) == 0 {
+		return nil, "", nil, nil
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].Score == scored[j].Score {
+			if scored[i].Node.SymbolName == scored[j].Node.SymbolName {
+				return scored[i].Node.FilePath < scored[j].Node.FilePath
+			}
+			return scored[i].Node.SymbolName < scored[j].Node.SymbolName
+		}
+		return scored[i].Score > scored[j].Score
+	})
+
+	candidates := make([]types.ASTNode, 0, len(scored))
+	for i, candidate := range scored {
+		if i == 5 {
+			break
+		}
+		candidates = append(candidates, candidate.Node)
+	}
+
+	if shouldResolveCandidate(scored) {
+		return &scored[0].Node, scored[0].Resolution, candidates, nil
+	}
+	return nil, "ambiguous", candidates, nil
+}
+
+func buildSymbolCandidates(candidates []types.ASTNode, nextTool string, nextArgs func(types.ASTNode) map[string]string) []map[string]any {
+	out := make([]map[string]any, 0, len(candidates))
+	for _, candidate := range candidates {
+		entry := map[string]any{
+			"id":          candidate.ID,
+			"symbol_name": candidate.SymbolName,
+			"file_path":   candidate.FilePath,
+		}
+		if nextTool != "" {
+			entry["next_tool"] = nextTool
+		}
+		if nextArgs != nil {
+			entry["next_args"] = nextArgs(candidate)
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // DetectChangesParams are the parameters for the detect_changes tool
@@ -569,6 +791,7 @@ func registerContextTool(s *Server, deps ToolDeps) {
 // ----- Tool 2: impact -----
 
 func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
+	normalizeImpactParams(&p)
 	if p.SymbolID == "" {
 		return nil, fmt.Errorf("'symbol_id' is required")
 	}
@@ -582,16 +805,33 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 		return nil, fmt.Errorf("graph engine not initialized")
 	}
 
-	// Try to resolve symbol name to ID
-	nodeID := p.SymbolID
-	if node, err := deps.Store.GetNodeByName(p.SymbolID); err == nil {
-		nodeID = node.ID
+	targetNode, _, candidates, err := resolveSymbolNodeDetailed(deps, p.SymbolID)
+	if err != nil {
+		return nil, err
 	}
+	if targetNode == nil {
+		resp := map[string]any{
+			"error":  "symbol not resolved uniquely",
+			"symbol": p.SymbolID,
+		}
+		if len(candidates) == 0 {
+			resp["error"] = "symbol not found in graph"
+			return resp, nil
+		}
+		resp["candidates"] = buildSymbolCandidates(candidates, "impact", func(candidate types.ASTNode) map[string]string {
+			return map[string]string{"symbol_id": candidate.ID}
+		})
+		return resp, nil
+	}
+	nodeID := targetNode.ID
 
 	// Get affected nodes with their hop depths
 	affectedWithDepth := deps.Graph.BlastRadiusWithDepth(nodeID, p.Depth)
 	if affectedWithDepth == nil {
-		return nil, fmt.Errorf("symbol not found in graph: %s", p.SymbolID)
+		return map[string]any{
+			"error":  "symbol not found in graph",
+			"symbol": p.SymbolID,
+		}, nil
 	}
 
 	// Get betweenness score for the target node
@@ -643,7 +883,7 @@ func impactHandler(deps ToolDeps, p ImpactParams) (interface{}, error) {
 				SymbolName: node.SymbolName,
 				FilePath:   node.FilePath,
 				NextTool:   "trace_call_path",
-				NextArgs:   map[string]string{"from": p.SymbolID, "to": node.SymbolName},
+				NextArgs:   map[string]string{"from": node.ID, "to": nodeID},
 			}
 			direct = append(direct, n)
 		case 2:
@@ -811,23 +1051,41 @@ func registerImpactTool(s *Server, deps ToolDeps) {
 // ----- Tool 3: read_symbol -----
 
 func resolveSymbolNode(deps ToolDeps, symbolID string) (*types.ASTNode, error) {
-	if symbolID == "" {
-		return nil, fmt.Errorf("'symbol_id' is required")
+	node, _, candidates, err := resolveSymbolNodeDetailed(deps, symbolID)
+	if err != nil {
+		return nil, err
 	}
-	if node, err := deps.Store.GetNodeByName(symbolID); err == nil {
+	if node != nil {
 		return node, nil
 	}
-	node, err := deps.Store.GetNode(symbolID)
-	if err != nil {
+	if len(candidates) == 0 {
 		return nil, fmt.Errorf("symbol not found: %s", symbolID)
 	}
-	return node, nil
+	var names []string
+	for _, candidate := range candidates {
+		names = append(names, fmt.Sprintf("%s (%s)", candidate.SymbolName, candidate.FilePath))
+	}
+	return nil, fmt.Errorf("symbol not resolved uniquely: %s; candidates: %s", symbolID, strings.Join(names, ", "))
 }
 
 func readSymbolHandler(deps ToolDeps, p ReadSymbolParams) (interface{}, error) {
-	node, err := resolveSymbolNode(deps, p.SymbolID)
+	node, _, candidates, err := resolveSymbolNodeDetailed(deps, p.SymbolID)
 	if err != nil {
 		return nil, err
+	}
+	if node == nil {
+		resp := map[string]any{
+			"error":     "symbol not resolved uniquely",
+			"symbol_id": p.SymbolID,
+		}
+		if len(candidates) == 0 {
+			resp["error"] = "symbol not found"
+			return resp, nil
+		}
+		resp["candidates"] = buildSymbolCandidates(candidates, "read_symbol", func(candidate types.ASTNode) map[string]string {
+			return defaultReadSymbolArgs(candidate.ID)
+		})
+		return resp, nil
 	}
 	if node.EndByte <= node.StartByte {
 		return nil, fmt.Errorf("invalid byte range for %s: start=%d end=%d", node.SymbolName, node.StartByte, node.EndByte)
@@ -1032,7 +1290,7 @@ func registerReadSymbolTool(s *Server, deps ToolDeps) {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return toCallToolResult(result)
+		return toCallToolResultWithName(result, "read_symbol", deps.OutputStore)
 	}
 
 	if isToolInProfile("read_symbol", deps.Profile) {
@@ -1273,6 +1531,7 @@ func registerIndexTool(s *Server, deps ToolDeps, indexFn IndexFunc) {
 // ----- Tool 7: trace_call_path -----
 
 func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, error) {
+	normalizeTraceCallPathParams(&p)
 	if p.From == "" || p.To == "" {
 		return nil, fmt.Errorf("both 'from' and 'to' are required")
 	}
@@ -1286,15 +1545,34 @@ func traceCallPathHandler(deps ToolDeps, p TraceCallPathParams) (interface{}, er
 		return nil, fmt.Errorf("graph engine not initialized")
 	}
 
-	// Resolve symbol names to IDs
-	fromHash := p.From
-	if node, err := deps.Store.GetNodeByName(p.From); err == nil {
-		fromHash = node.ID
+	fromNode, _, fromCandidates, err := resolveSymbolNodeDetailed(deps, p.From)
+	if err != nil {
+		return nil, err
 	}
-	toHash := p.To
-	if node, err := deps.Store.GetNodeByName(p.To); err == nil {
-		toHash = node.ID
+	toNode, _, toCandidates, err := resolveSymbolNodeDetailed(deps, p.To)
+	if err != nil {
+		return nil, err
 	}
+	if fromNode == nil || toNode == nil {
+		resp := map[string]any{
+			"error": "trace_call_path could not resolve one or more symbols",
+			"from":  p.From,
+			"to":    p.To,
+		}
+		if fromNode == nil {
+			resp["from_candidates"] = buildSymbolCandidates(fromCandidates, "read_symbol", func(candidate types.ASTNode) map[string]string {
+				return defaultReadSymbolArgs(candidate.ID)
+			})
+		}
+		if toNode == nil {
+			resp["to_candidates"] = buildSymbolCandidates(toCandidates, "read_symbol", func(candidate types.ASTNode) map[string]string {
+				return defaultReadSymbolArgs(candidate.ID)
+			})
+		}
+		return resp, nil
+	}
+	fromHash := fromNode.ID
+	toHash := toNode.ID
 
 	paths := deps.Graph.TraceCallPath(fromHash, toHash, p.MaxDepth)
 
@@ -1589,6 +1867,7 @@ func registerGetKeySymbolsTool(s *Server, deps ToolDeps) {
 // ----- Tool 9: search_code -----
 
 func searchCodeHandler(deps ToolDeps, p SearchCodeParams) (interface{}, error) {
+	normalizeSearchCodeParams(&p)
 	if p.Pattern == "" {
 		return nil, fmt.Errorf("'pattern' is required")
 	}
@@ -2991,7 +3270,7 @@ func understandHandler(deps ToolDeps, p UnderstandParams) (interface{}, error) {
 	symbolRefJSON, _ := json.Marshal(symbolRef)
 	result["next_tools"] = []map[string]string{
 		{"tool": "impact", "args_hint": `{"symbol_id": ` + string(symbolRefJSON) + `}`},
-		{"tool": "trace_call_path", "args_hint": `{"from": ` + string(symbolRefJSON) + `}`},
+		{"tool": "trace_call_path", "args_hint": `{"from": "<caller-or-entrypoint>", "to": ` + string(symbolRefJSON) + `}`},
 	}
 
 	return result, nil
@@ -3066,14 +3345,14 @@ type compactNameID struct {
 }
 
 type routeResultItem struct {
-	ID        string         `json:"id"`
-	Symbol    string         `json:"symbol"`
-	Method    string         `json:"method"`
-	Path      string         `json:"path"`
-	FilePath  string         `json:"file_path"`
-	Score     float64        `json:"score,omitempty"`
-	Handler   map[string]any `json:"handler,omitempty"`
-	Summary   string         `json:"summary,omitempty"`
+	ID       string         `json:"id"`
+	Symbol   string         `json:"symbol"`
+	Method   string         `json:"method"`
+	Path     string         `json:"path"`
+	FilePath string         `json:"file_path"`
+	Score    float64        `json:"score,omitempty"`
+	Handler  map[string]any `json:"handler,omitempty"`
+	Summary  string         `json:"summary,omitempty"`
 }
 
 type goalCandidate struct {
@@ -3313,12 +3592,12 @@ func compareSymbolsHandler(deps ToolDeps, p CompareSymbolsParams) (interface{}, 
 	}
 
 	result := map[string]any{
-		"left":              nodeSummary(leftNode),
-		"right":             nodeSummary(rightNode),
-		"left_signature":    symbolSignature(deps.RepoRoot, *leftNode),
-		"right_signature":   symbolSignature(deps.RepoRoot, *rightNode),
-		"shared_callers":    summarizeIDs(deps.Store, intersect(leftCallers, rightCallers)),
-		"left_only_callers": summarizeIDs(deps.Store, diff(leftCallers, rightCallers)),
+		"left":               nodeSummary(leftNode),
+		"right":              nodeSummary(rightNode),
+		"left_signature":     symbolSignature(deps.RepoRoot, *leftNode),
+		"right_signature":    symbolSignature(deps.RepoRoot, *rightNode),
+		"shared_callers":     summarizeIDs(deps.Store, intersect(leftCallers, rightCallers)),
+		"left_only_callers":  summarizeIDs(deps.Store, diff(leftCallers, rightCallers)),
 		"right_only_callers": summarizeIDs(deps.Store, diff(rightCallers, leftCallers)),
 		"shared_callees":     summarizeIDs(deps.Store, intersect(leftCallees, rightCallees)),
 		"left_only_callees":  summarizeIDs(deps.Store, diff(leftCallees, rightCallees)),
@@ -3485,17 +3764,17 @@ func compareRoutesHandler(deps ToolDeps, p CompareRoutesParams) (interface{}, er
 		return out
 	}
 	result := map[string]any{
-		"left":                   routeItemFromResult(deps, *leftNode, 1, true, p.Compact),
-		"right":                  routeItemFromResult(deps, *rightNode, 1, true, p.Compact),
-		"same_method":            leftMethod == rightMethod,
-		"left_path":              leftPath,
-		"right_path":             rightPath,
-		"left_handler":           nodeSummary(leftHandler),
-		"right_handler":          nodeSummary(rightHandler),
-		"shared_downstream":      summarizeIDs(deps.Store, shared(leftDownstream, rightDownstream)),
-		"left_only_downstream":   summarizeIDs(deps.Store, diff(leftDownstream, rightDownstream)),
-		"right_only_downstream":  summarizeIDs(deps.Store, diff(rightDownstream, leftDownstream)),
-		"summary":                fmt.Sprintf("Compared routes %s and %s", leftNode.SymbolName, rightNode.SymbolName),
+		"left":                  routeItemFromResult(deps, *leftNode, 1, true, p.Compact),
+		"right":                 routeItemFromResult(deps, *rightNode, 1, true, p.Compact),
+		"same_method":           leftMethod == rightMethod,
+		"left_path":             leftPath,
+		"right_path":            rightPath,
+		"left_handler":          nodeSummary(leftHandler),
+		"right_handler":         nodeSummary(rightHandler),
+		"shared_downstream":     summarizeIDs(deps.Store, shared(leftDownstream, rightDownstream)),
+		"left_only_downstream":  summarizeIDs(deps.Store, diff(leftDownstream, rightDownstream)),
+		"right_only_downstream": summarizeIDs(deps.Store, diff(rightDownstream, leftDownstream)),
+		"summary":               fmt.Sprintf("Compared routes %s and %s", leftNode.SymbolName, rightNode.SymbolName),
 	}
 	return applyCompactSummary(result, p.Compact), nil
 }
@@ -3513,9 +3792,9 @@ func registerCompareSymbolsTool(s *Server, deps ToolDeps) {
 		Name:        "compare_symbols",
 		Description: desc,
 		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
-			"left": map[string]interface{}{"type": "string"},
-			"right": map[string]interface{}{"type": "string"},
-			"depth": map[string]interface{}{"type": "integer", "default": 1},
+			"left":    map[string]interface{}{"type": "string"},
+			"right":   map[string]interface{}{"type": "string"},
+			"depth":   map[string]interface{}{"type": "integer", "default": 1},
 			"compact": map[string]interface{}{"type": "boolean"},
 		}, "required": []string{"left", "right"}},
 	}, cliHandler)
@@ -3558,11 +3837,11 @@ func registerFindRoutesTool(s *Server, deps ToolDeps) {
 		Name:        "find_routes",
 		Description: desc,
 		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
-			"query": map[string]interface{}{"type": "string"},
-			"method": map[string]interface{}{"type": "string"},
-			"limit": map[string]interface{}{"type": "integer", "default": 10},
+			"query":            map[string]interface{}{"type": "string"},
+			"method":           map[string]interface{}{"type": "string"},
+			"limit":            map[string]interface{}{"type": "integer", "default": 10},
 			"include_handlers": map[string]interface{}{"type": "boolean", "default": true},
-			"compact": map[string]interface{}{"type": "boolean"},
+			"compact":          map[string]interface{}{"type": "boolean"},
 		}, "required": []string{"query"}},
 	}, cliHandler)
 	tool := mcp.NewTool("find_routes",
@@ -3605,8 +3884,8 @@ func registerTraceRouteTool(s *Server, deps ToolDeps) {
 		Name:        "trace_route",
 		Description: desc,
 		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
-			"route": map[string]interface{}{"type": "string"},
-			"depth": map[string]interface{}{"type": "integer", "default": 2},
+			"route":   map[string]interface{}{"type": "string"},
+			"depth":   map[string]interface{}{"type": "integer", "default": 2},
 			"compact": map[string]interface{}{"type": "boolean"},
 		}, "required": []string{"route"}},
 	}, cliHandler)
@@ -3648,9 +3927,9 @@ func registerCompareRoutesTool(s *Server, deps ToolDeps) {
 		Name:        "compare_routes",
 		Description: desc,
 		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
-			"left": map[string]interface{}{"type": "string"},
-			"right": map[string]interface{}{"type": "string"},
-			"depth": map[string]interface{}{"type": "integer", "default": 2},
+			"left":    map[string]interface{}{"type": "string"},
+			"right":   map[string]interface{}{"type": "string"},
+			"depth":   map[string]interface{}{"type": "integer", "default": 2},
 			"compact": map[string]interface{}{"type": "boolean"},
 		}, "required": []string{"left", "right"}},
 	}, cliHandler)

@@ -372,6 +372,55 @@ func TestReadSymbol_FlowSummarySchema(t *testing.T) {
 	}
 }
 
+func TestReadSymbol_FlowSummaryCapsLargeMethods(t *testing.T) {
+	fixture := setupLargeControllerFixture(t)
+	defer fixture.Cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, fixture.Deps, nil)
+
+	handler, _ := server.GetHandler("read_symbol")
+	params, _ := json.Marshal(ReadSymbolParams{
+		SymbolID: fixture.ProcessSymbol,
+		Mode:     "flow_summary",
+	})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("read_symbol error: %v", err)
+	}
+
+	var resp readSymbolTestResponse
+	decodeToolResult(t, result, &resp)
+
+	if len(resp.FlowSummary.Steps) > flowSummaryMaxSteps {
+		t.Fatalf("steps = %d, want <= %d", len(resp.FlowSummary.Steps), flowSummaryMaxSteps)
+	}
+	if len(resp.FlowSummary.HelperCalls) > flowSummaryMaxHelperCalls {
+		t.Fatalf("helper_calls = %d, want <= %d", len(resp.FlowSummary.HelperCalls), flowSummaryMaxHelperCalls)
+	}
+	if len(resp.FlowSummary.Validations) > flowSummaryMaxValidations {
+		t.Fatalf("validations = %d, want <= %d", len(resp.FlowSummary.Validations), flowSummaryMaxValidations)
+	}
+	if len(resp.FlowSummary.SideEffects.DBWrites) > flowSummaryMaxSideEffects {
+		t.Fatalf("db_writes = %d, want <= %d", len(resp.FlowSummary.SideEffects.DBWrites), flowSummaryMaxSideEffects)
+	}
+	if len(resp.FlowSummary.SideEffects.Jobs) > flowSummaryMaxSideEffects {
+		t.Fatalf("jobs = %d, want <= %d", len(resp.FlowSummary.SideEffects.Jobs), flowSummaryMaxSideEffects)
+	}
+	if len(resp.FlowSummary.SideEffects.Events) > flowSummaryMaxSideEffects {
+		t.Fatalf("events = %d, want <= %d", len(resp.FlowSummary.SideEffects.Events), flowSummaryMaxSideEffects)
+	}
+	if len(resp.FlowSummary.SideEffects.Notifications) > flowSummaryMaxSideEffects {
+		t.Fatalf("notifications = %d, want <= %d", len(resp.FlowSummary.SideEffects.Notifications), flowSummaryMaxSideEffects)
+	}
+	if len(resp.FlowSummary.SideEffects.Integrations) > flowSummaryMaxSideEffects {
+		t.Fatalf("integrations = %d, want <= %d", len(resp.FlowSummary.SideEffects.Integrations), flowSummaryMaxSideEffects)
+	}
+	if !resp.FlowSummary.Truncated {
+		t.Fatal("expected flow_summary to report truncation for large methods")
+	}
+}
+
 func TestReadSymbol_FullHonoredForSmallMethod(t *testing.T) {
 	fixture := setupLargeControllerFixture(t)
 	defer fixture.Cleanup()
