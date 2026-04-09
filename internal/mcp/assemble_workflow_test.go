@@ -4,6 +4,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,13 @@ func newRouteQueryDeps(t *testing.T) (deps ToolDeps, cleanup func()) {
 			ContentSum: "GET /v3/orders/{id} v3 order api endpoint",
 		},
 		{
+			ID:         types.GenerateNodeID("routes_v2.php", "POST /v2/orders"),
+			FilePath:   "routes_v2.php",
+			SymbolName: "POST /v2/orders",
+			NodeType:   types.NodeTypeRoute,
+			ContentSum: "POST /v2/orders v2 order api endpoint",
+		},
+		{
 			ID:         types.GenerateNodeID("routes_v2.php", "POST /v2/orders/create"),
 			FilePath:   "routes_v2.php",
 			SymbolName: "POST /v2/orders/create",
@@ -126,6 +134,101 @@ func newRouteQueryDeps(t *testing.T) (deps ToolDeps, cleanup func()) {
 		},
 	}
 	return newCustomToolDeps(t, nil, nodes, nil)
+}
+
+func testNode(filePath, symbolName string, nodeType types.NodeType, content string) types.ASTNode {
+	return types.ASTNode{
+		ID:         types.GenerateNodeID(filePath, symbolName),
+		FilePath:   filePath,
+		SymbolName: symbolName,
+		NodeType:   nodeType,
+		ContentSum: content,
+	}
+}
+
+type verifyWorkflowFixture struct {
+	Route           types.ASTNode
+	UnresolvedRoute types.ASTNode
+	BrokenRoute     types.ASTNode
+	Handler         types.ASTNode
+	Core            types.ASTNode
+	State           types.ASTNode
+	OrphanState     types.ASTNode
+	AsyncDirect     types.ASTNode
+	AsyncWeak       types.ASTNode
+	DetachedEntry   types.ASTNode
+	UnreachableCore types.ASTNode
+	DetachedState   types.ASTNode
+	AsyncTrigger    types.ASTNode
+}
+
+func newVerifyWorkflowDeps(t *testing.T) (deps ToolDeps, cleanup func(), fixture verifyWorkflowFixture) {
+	t.Helper()
+
+	fixture = verifyWorkflowFixture{
+		Route:           testNode("routes.go", "POST /v1/orders", types.NodeTypeRoute, "verified order entry route"),
+		UnresolvedRoute: testNode("routes.go", "POST /v1/pending-orders", types.NodeTypeRoute, "route with missing handler"),
+		BrokenRoute:     testNode("routes.go", "POST /v1/broken-orders", types.NodeTypeRoute, "route missing handler edge"),
+		Handler:         testNode("handlers.go", "HandleOrders", types.NodeTypeMethod, "route handler"),
+		Core:            testNode("service.go", "ProcessOrder", types.NodeTypeFunction, "core order processor"),
+		State:           testNode("repo.go", "OrderRepository", types.NodeTypeClass, "order repository"),
+		OrphanState:     testNode("repo.go", "AuditStore", types.NodeTypeClass, "orphaned state store"),
+		AsyncDirect:     testNode("async.go", "PublishOrderEvent", types.NodeTypeFunction, "order event publisher"),
+		AsyncWeak:       testNode("async.go", "QueueOrderNotification", types.NodeTypeFunction, "weak async notification queue"),
+		DetachedEntry:   testNode("detached.go", "DetachedKickoff", types.NodeTypeFunction, "disconnected kickoff"),
+		UnreachableCore: testNode("detached.go", "ReconcileOrders", types.NodeTypeFunction, "disconnected core"),
+		DetachedState:   testNode("detached.go", "DetachedStore", types.NodeTypeClass, "detached state"),
+		AsyncTrigger:    testNode("async.go", "TriggerNotifications", types.NodeTypeFunction, "non-core async trigger"),
+	}
+
+	nodes := []types.ASTNode{
+		fixture.Route,
+		fixture.UnresolvedRoute,
+		fixture.BrokenRoute,
+		fixture.Handler,
+		fixture.Core,
+		fixture.State,
+		fixture.OrphanState,
+		fixture.AsyncDirect,
+		fixture.AsyncWeak,
+		fixture.DetachedEntry,
+		fixture.UnreachableCore,
+		fixture.DetachedState,
+		fixture.AsyncTrigger,
+	}
+	edges := []types.ASTEdge{
+		{SourceID: fixture.Route.ID, TargetID: fixture.Handler.ID, EdgeType: types.EdgeTypeHandles},
+		{SourceID: fixture.UnresolvedRoute.ID, TargetID: "missing-handler", EdgeType: types.EdgeTypeHandles},
+		{SourceID: fixture.Handler.ID, TargetID: fixture.Core.ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: fixture.Core.ID, TargetID: fixture.State.ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: fixture.Core.ID, TargetID: fixture.AsyncDirect.ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: fixture.AsyncTrigger.ID, TargetID: fixture.AsyncWeak.ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: fixture.DetachedEntry.ID, TargetID: fixture.UnreachableCore.ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: fixture.UnreachableCore.ID, TargetID: fixture.DetachedState.ID, EdgeType: types.EdgeTypeCalls},
+	}
+
+	deps, cleanup = newCustomToolDeps(t, nil, nodes, edges)
+	return deps, cleanup, fixture
+}
+
+func verifiedWorkflowItemByID(t *testing.T, items []types.VerifiedWorkflowItem, id string) types.VerifiedWorkflowItem {
+	t.Helper()
+	for _, item := range items {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("verified workflow item %q not found", id)
+	return types.VerifiedWorkflowItem{}
+}
+
+func recommendedStepByTool(steps []types.RecommendedStep, tool string) (types.RecommendedStep, bool) {
+	for _, step := range steps {
+		if step.Tool == tool {
+			return step, true
+		}
+	}
+	return types.RecommendedStep{}, false
 }
 
 func TestAssembleContext_TraceWorkflow(t *testing.T) {
@@ -362,68 +465,306 @@ func TestClassifyWorkflowPhase_SparseGraph(t *testing.T) {
 	}
 }
 
-func TestRecommendedSteps_TraceWorkflow(t *testing.T) {
-	handlerSrc := "package main\n\nfunc HandleOrder() error { return nil }\n"
-	nodes := []types.ASTNode{
-		{
-			ID:         types.GenerateNodeID("routes.php", "POST /v1/orders"),
-			FilePath:   "routes.php",
-			SymbolName: "POST /v1/orders",
-			NodeType:   types.NodeTypeRoute,
-			ContentSum: "order flow route",
-		},
-		{
-			ID:         types.GenerateNodeID("handler.go", "HandleOrder"),
-			FilePath:   "handler.go",
-			SymbolName: "HandleOrder",
-			NodeType:   types.NodeTypeMethod,
-			StartByte:  0,
-			EndByte:    testClampUint32Len(handlerSrc),
-			ContentSum: "handle order flow",
-		},
-	}
-	edges := []types.ASTEdge{
-		{SourceID: nodes[0].ID, TargetID: nodes[1].ID, EdgeType: types.EdgeTypeHandles},
-	}
-	deps, cleanup := newCustomToolDeps(t, map[string]string{"handler.go": handlerSrc}, nodes, edges)
+func TestVerifyWorkflow_FullChain(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
 	defer cleanup()
 
 	resp, err := assembleContextHandler(deps, AssembleContextParams{
-		Query: "order flow",
-		Goal:  "trace_workflow",
+		Goal:    "verify_workflow",
+		Targets: []string{fixture.Route.ID, fixture.Handler.ID, fixture.Core.ID},
 	})
 	if err != nil {
 		t.Fatalf("assembleContextHandler error: %v", err)
 	}
 
-	payload := resp.(AssembleContextResponse)
-	if len(payload.RecommendedSteps) == 0 || len(payload.RecommendedSteps) > 3 {
-		t.Fatalf("recommended steps = %#v, want 1-3 steps", payload.RecommendedSteps)
+	payload := resp.(types.VerifyWorkflowResponse)
+	routeItem := verifiedWorkflowItemByID(t, payload.Items, fixture.Route.ID)
+	if routeItem.Verification != "confirmed" || routeItem.Confidence != 1.0 {
+		t.Fatalf("route verification = %#v, want confirmed with confidence 1.0", routeItem)
+	}
+	if got, want := strings.Join(routeItem.Path, " -> "), fixture.Route.SymbolName+" -> "+fixture.Handler.SymbolName; got != want {
+		t.Fatalf("route path = %q, want %q", got, want)
 	}
 
-	seen := make(map[string]bool)
-	foundTraceRoute := false
-	foundRefinedAssemble := false
-	for _, step := range payload.RecommendedSteps {
-		key := recommendedStepKey(step)
-		if seen[key] {
-			t.Fatalf("duplicate recommended step: %#v", step)
-		}
-		seen[key] = true
-
-		if step.Tool == "trace_route" {
-			foundTraceRoute = true
-		}
-		if step.Tool == "assemble_context" && strings.Contains(step.Args["query"], "HandleOrder") && step.Args["mode"] == "snippets" {
-			foundRefinedAssemble = true
-		}
+	handlerItem := verifiedWorkflowItemByID(t, payload.Items, fixture.Handler.ID)
+	if handlerItem.Verification != "confirmed" || handlerItem.Confidence != 1.0 {
+		t.Fatalf("handler verification = %#v, want confirmed with confidence 1.0", handlerItem)
 	}
-	if !foundTraceRoute {
+	if got, want := strings.Join(handlerItem.Path, " -> "), fixture.Route.SymbolName+" -> "+fixture.Handler.SymbolName; got != want {
+		t.Fatalf("handler path = %q, want %q", got, want)
+	}
+
+	coreItem := verifiedWorkflowItemByID(t, payload.Items, fixture.Core.ID)
+	if coreItem.Verification != "confirmed" || coreItem.Confidence != 1.0 {
+		t.Fatalf("core verification = %#v, want confirmed with confidence 1.0", coreItem)
+	}
+	if got, want := strings.Join(coreItem.Path, " -> "), fixture.Route.SymbolName+" -> "+fixture.Handler.SymbolName+" -> "+fixture.Core.SymbolName; got != want {
+		t.Fatalf("core path = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyWorkflow_UnreachableCore(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	resp, err := assembleContextHandler(deps, AssembleContextParams{
+		Goal:    "verify_workflow",
+		Targets: []string{fixture.Route.ID, fixture.Handler.ID, fixture.UnreachableCore.ID},
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler error: %v", err)
+	}
+
+	payload := resp.(types.VerifyWorkflowResponse)
+	item := verifiedWorkflowItemByID(t, payload.Items, fixture.UnreachableCore.ID)
+	if item.Verification != "unreachable" || item.Confidence != 0.3 {
+		t.Fatalf("unreachable core = %#v, want unreachable with confidence 0.3", item)
+	}
+	if len(item.Path) != 0 {
+		t.Fatalf("unreachable core path = %#v, want no path", item.Path)
+	}
+}
+
+func TestVerifyWorkflow_BrokenEntryPoint(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	resp, err := assembleContextHandler(deps, AssembleContextParams{
+		Goal:    "verify_workflow",
+		Targets: []string{fixture.BrokenRoute.ID},
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler error: %v", err)
+	}
+
+	payload := resp.(types.VerifyWorkflowResponse)
+	item := verifiedWorkflowItemByID(t, payload.Items, fixture.BrokenRoute.ID)
+	if item.Verification != "broken" || item.Confidence != 0.0 {
+		t.Fatalf("broken entry = %#v, want broken with confidence 0.0", item)
+	}
+	if item.FailReason != "no handler edge" {
+		t.Fatalf("broken entry fail reason = %q, want no handler edge", item.FailReason)
+	}
+}
+
+func TestVerifyWorkflow_OrphanedState(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	resp, err := assembleContextHandler(deps, AssembleContextParams{
+		Goal:    "verify_workflow",
+		Targets: []string{fixture.Route.ID, fixture.Handler.ID, fixture.Core.ID, fixture.OrphanState.ID},
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler error: %v", err)
+	}
+
+	payload := resp.(types.VerifyWorkflowResponse)
+	item := verifiedWorkflowItemByID(t, payload.Items, fixture.OrphanState.ID)
+	if item.Verification != "orphaned" || item.Confidence != 0.3 {
+		t.Fatalf("orphaned state = %#v, want orphaned with confidence 0.3", item)
+	}
+}
+
+func TestVerifyWorkflow_NoConfirmedEntries(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	resp, err := assembleContextHandler(deps, AssembleContextParams{
+		Goal:    "verify_workflow",
+		Targets: []string{fixture.BrokenRoute.ID, fixture.UnresolvedRoute.ID, fixture.UnreachableCore.ID},
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler error: %v", err)
+	}
+
+	payload := resp.(types.VerifyWorkflowResponse)
+	item := verifiedWorkflowItemByID(t, payload.Items, fixture.UnreachableCore.ID)
+	if item.Verification != "unresolved" || item.Confidence != 0.3 {
+		t.Fatalf("core without confirmed entries = %#v, want unresolved with confidence 0.3", item)
+	}
+}
+
+func TestVerifyWorkflow_RecommendedSteps(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	resp, err := assembleContextHandler(deps, AssembleContextParams{
+		Goal:    "verify_workflow",
+		Targets: []string{fixture.UnresolvedRoute.ID, fixture.Route.ID, fixture.Handler.ID, fixture.UnreachableCore.ID, fixture.AsyncWeak.ID},
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler error: %v", err)
+	}
+
+	payload := resp.(types.VerifyWorkflowResponse)
+	if len(payload.RecommendedSteps) != 3 {
+		t.Fatalf("recommended steps = %#v, want exactly 3 capped steps", payload.RecommendedSteps)
+	}
+
+	traceRoute, ok := recommendedStepByTool(payload.RecommendedSteps, "trace_route")
+	if !ok {
 		t.Fatal("expected trace_route recommendation")
 	}
-	if !foundRefinedAssemble {
-		t.Fatal("expected refined assemble_context recommendation for thin core logic")
+	if traceRoute.Args["route"] != fixture.UnresolvedRoute.SymbolName {
+		t.Fatalf("trace_route args = %#v, want route %q", traceRoute.Args, fixture.UnresolvedRoute.SymbolName)
 	}
+
+	tracePath, ok := recommendedStepByTool(payload.RecommendedSteps, "trace_call_path")
+	if !ok {
+		t.Fatal("expected trace_call_path recommendation")
+	}
+	if tracePath.Args["from"] != fixture.Handler.ID || tracePath.Args["to"] != fixture.UnreachableCore.ID {
+		t.Fatalf("trace_call_path args = %#v, want from=%q to=%q", tracePath.Args, fixture.Handler.ID, fixture.UnreachableCore.ID)
+	}
+
+	readStep, ok := recommendedStepByTool(payload.RecommendedSteps, "read_symbol")
+	if !ok {
+		t.Fatal("expected read_symbol recommendation")
+	}
+	if readStep.Args["symbol_id"] != fixture.AsyncWeak.ID || readStep.Args["mode"] != "signature" {
+		t.Fatalf("read_symbol args = %#v, want weak async signature lookup", readStep.Args)
+	}
+}
+
+func TestVerifyWorkflow_TargetCap(t *testing.T) {
+	nodes := make([]types.ASTNode, 0, 31)
+	targets := make([]string, 0, 31)
+	for i := range 31 {
+		node := testNode(
+			fmt.Sprintf("caps/%02d.go", i),
+			fmt.Sprintf("CapState%02d", i),
+			types.NodeTypeClass,
+			fmt.Sprintf("cap state %02d", i),
+		)
+		nodes = append(nodes, node)
+		targets = append(targets, node.ID)
+	}
+
+	deps, cleanup := newCustomToolDeps(t, nil, nodes, nil)
+	defer cleanup()
+
+	resp, err := assembleContextHandler(deps, AssembleContextParams{
+		Goal:    "verify_workflow",
+		Targets: targets,
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler error: %v", err)
+	}
+
+	payload := resp.(types.VerifyWorkflowResponse)
+	if !payload.Truncated {
+		t.Fatal("expected verify_workflow response to be truncated")
+	}
+	if len(payload.Items) != 30 {
+		t.Fatalf("item count = %d, want 30", len(payload.Items))
+	}
+	if payload.Items[29].ID != targets[29] {
+		t.Fatalf("last kept target = %q, want %q", payload.Items[29].ID, targets[29])
+	}
+}
+
+func TestVerifyWorkflow_OutputOrder(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	missingID := "missing-node-id"
+	resp, err := assembleContextHandler(deps, AssembleContextParams{
+		Goal: "verify_workflow",
+		Targets: []string{
+			fixture.AsyncWeak.ID,
+			fixture.Handler.ID,
+			fixture.BrokenRoute.ID,
+			missingID,
+			fixture.Core.ID,
+			fixture.OrphanState.ID,
+			fixture.Route.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler error: %v", err)
+	}
+
+	payload := resp.(types.VerifyWorkflowResponse)
+	got := make([]string, 0, len(payload.Items))
+	for _, item := range payload.Items {
+		got = append(got, item.ID)
+	}
+	want := []string{
+		fixture.BrokenRoute.ID,
+		fixture.Route.ID,
+		fixture.Handler.ID,
+		fixture.Core.ID,
+		fixture.OrphanState.ID,
+		fixture.AsyncWeak.ID,
+		missingID,
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("output order = %#v, want %#v", got, want)
+	}
+}
+
+func TestRecommendedSteps_TraceWorkflow(t *testing.T) {
+	t.Run("cap_and_verify_step", func(t *testing.T) {
+		items := []AssembleContextItem{
+			{ID: "route-id", Name: "POST /v1/orders", FilePath: "routes.go", Group: workflowPhaseEntry},
+			{ID: "core-id", Name: "ProcessOrder", FilePath: "service.go", Group: workflowPhaseCore},
+			{ID: "async-id", Name: "QueueOrderNotification", FilePath: "async.go", Group: workflowPhaseAsync},
+			{ID: "state-id", Name: "OrderRepository", FilePath: "repo.go", Group: workflowPhaseState},
+		}
+
+		steps := buildWorkflowRecommendedSteps(items)
+		if len(steps) != 4 {
+			t.Fatalf("recommended steps = %#v, want 4 capped steps", steps)
+		}
+
+		verifyStep, ok := recommendedStepByTool(steps, "assemble_context")
+		if !ok {
+			t.Fatal("expected verify_workflow assemble_context recommendation")
+		}
+		if verifyStep.Args["goal"] != "verify_workflow" || verifyStep.Args["targets"] != "route-id,core-id,async-id,state-id" {
+			t.Fatalf("verify step args = %#v, want verify_workflow targets", verifyStep.Args)
+		}
+
+		traceRoute, ok := recommendedStepByTool(steps, "trace_route")
+		if !ok || traceRoute.Args["route"] != "POST /v1/orders" {
+			t.Fatalf("trace_route step = %#v, want route recommendation", traceRoute)
+		}
+
+		foundCoreFlow := false
+		foundAsyncSignature := false
+		for _, step := range steps {
+			if step.Tool == "read_symbol" && step.Args["symbol_id"] == "core-id" && step.Args["mode"] == "flow_summary" {
+				foundCoreFlow = true
+			}
+			if step.Tool == "read_symbol" && step.Args["symbol_id"] == "async-id" && step.Args["mode"] == "signature" {
+				foundAsyncSignature = true
+			}
+		}
+		if !foundCoreFlow {
+			t.Fatal("expected flow_summary suggestion for core logic")
+		}
+		if !foundAsyncSignature {
+			t.Fatal("expected signature suggestion for async logic")
+		}
+	})
+
+	t.Run("state_data_mapping", func(t *testing.T) {
+		items := []AssembleContextItem{
+			{ID: "route-id", Name: "POST /v1/orders", FilePath: "routes.go", Group: workflowPhaseEntry},
+			{ID: "core-id", Name: "ProcessOrder", FilePath: "service.go", Group: workflowPhaseCore},
+			{ID: "state-id", Name: "OrderRepository", FilePath: "repo.go", Group: workflowPhaseState},
+		}
+
+		steps := buildWorkflowRecommendedSteps(items)
+		listStep, ok := recommendedStepByTool(steps, "list_file_symbols")
+		if !ok {
+			t.Fatal("expected list_file_symbols recommendation for state/data phase")
+		}
+		if listStep.Args["file_path"] != "repo.go" {
+			t.Fatalf("list_file_symbols args = %#v, want repo.go", listStep.Args)
+		}
+	})
 }
 
 func TestFindRoutes_TokenizedQuery(t *testing.T) {
@@ -464,11 +805,11 @@ func TestFindRoutes_MultiToken(t *testing.T) {
 	}
 }
 
-func TestFindRoutes_VersionToken(t *testing.T) {
+func TestFindRoutes_VersionBoost(t *testing.T) {
 	deps, cleanup := newRouteQueryDeps(t)
 	defer cleanup()
 
-	result, err := findRoutesHandler(deps, FindRoutesParams{Query: "v2 order", Limit: 5})
+	result, err := findRoutesHandler(deps, FindRoutesParams{Query: "v1 orders", Limit: 5})
 	if err != nil {
 		t.Fatalf("findRoutesHandler error: %v", err)
 	}
@@ -478,7 +819,33 @@ func TestFindRoutes_VersionToken(t *testing.T) {
 	if len(routes) == 0 {
 		t.Fatal("expected route results")
 	}
-	if !strings.Contains(routes[0].Symbol, "/v2/") {
-		t.Fatalf("top route = %q, want a v2 route first", routes[0].Symbol)
+	if !strings.Contains(routes[0].Symbol, "/v1/") {
+		t.Fatalf("top route = %q, want a v1 route first", routes[0].Symbol)
+	}
+}
+
+func TestFindRoutes_NoVersionGrouping(t *testing.T) {
+	deps, cleanup := newRouteQueryDeps(t)
+	defer cleanup()
+
+	result, err := findRoutesHandler(deps, FindRoutesParams{Query: "orders", Limit: 10})
+	if err != nil {
+		t.Fatalf("findRoutesHandler error: %v", err)
+	}
+
+	payload := result.(map[string]any)
+	routes := payload["routes"].([]routeResultItem)
+	if len(routes) != 3 {
+		t.Fatalf("route count = %d, want 3 grouped routes", len(routes))
+	}
+
+	baseCount := 0
+	for _, route := range routes {
+		if stripVersionPrefix(route.Path) == "/orders" {
+			baseCount++
+		}
+	}
+	if baseCount != 1 {
+		t.Fatalf("base /orders routes = %d, want 1 after grouping", baseCount)
 	}
 }

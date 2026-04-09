@@ -11,7 +11,7 @@ import (
 type NodeType uint8
 
 const (
-	NodeTypeFunction  NodeType = iota + 1
+	NodeTypeFunction NodeType = iota + 1
 	NodeTypeClass
 	NodeTypeStruct
 	NodeTypeMethod
@@ -231,9 +231,35 @@ func GenerateNodeID(filePath, symbolName string) string {
 
 // SearchResult represents a ranked result from hybrid search
 type SearchResult struct {
-	Node      ASTNode        `json:"node"`
-	Score     float64        `json:"score"`
+	Node      ASTNode         `json:"node"`
+	Score     float64         `json:"score"`
 	Breakdown *ScoreBreakdown `json:"breakdown,omitempty"`
+}
+
+type RecommendedStep struct {
+	Tool   string            `json:"tool"`
+	Reason string            `json:"reason"`
+	Args   map[string]string `json:"args"`
+}
+
+type VerifiedWorkflowItem struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	FilePath     string   `json:"file_path"`
+	Group        string   `json:"group"`
+	Verification string   `json:"verification"`
+	Confidence   float64  `json:"confidence"`
+	Path         []string `json:"path,omitempty"`
+	FailReason   string   `json:"fail_reason,omitempty"`
+}
+
+type VerifyWorkflowResponse struct {
+	Query            string                 `json:"query"`
+	Items            []VerifiedWorkflowItem `json:"items"`
+	Truncated        bool                   `json:"truncated,omitempty"`
+	Summary          string                 `json:"summary"`
+	Strategy         string                 `json:"strategy"`
+	RecommendedSteps []RecommendedStep      `json:"recommended_steps,omitempty"`
 }
 
 // RiskLevel represents the severity of impact from a change
