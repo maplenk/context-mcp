@@ -4220,7 +4220,7 @@ func classifyWorkflowPhase(node types.ASTNode, graphEngine *graph.GraphEngine, i
 	return workflowPhaseOther
 }
 
-func workflowGraphNeighbors(graphEngine *graph.GraphEngine, nodeID string) ([]string, []string) {
+func workflowGraphNeighbors(graphEngine *graph.GraphEngine, nodeID string) (callers, callees []string) {
 	if graphEngine == nil {
 		return nil, nil
 	}

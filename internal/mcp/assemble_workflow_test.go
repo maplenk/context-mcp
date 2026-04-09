@@ -16,16 +16,31 @@ import (
 	"github.com/maplenk/context-mcp/internal/types"
 )
 
-func newCustomToolDeps(t *testing.T, files map[string]string, nodes []types.ASTNode, edges []types.ASTEdge) (ToolDeps, func()) {
+const testMaxUint32 = ^uint32(0)
+
+func testClampUint32Len(s string) uint32 {
+	if uint64(len(s)) > uint64(testMaxUint32) {
+		return testMaxUint32
+	}
+	// #nosec G115 -- len(s) is range-checked before conversion for test fixtures.
+	return uint32(len(s))
+}
+
+func newCustomToolDeps(
+	t *testing.T,
+	files map[string]string,
+	nodes []types.ASTNode,
+	edges []types.ASTEdge,
+) (deps ToolDeps, cleanup func()) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
 	for relPath, content := range files {
 		absPath := filepath.Join(tmpDir, relPath)
-		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(absPath), 0o750); err != nil {
 			t.Fatalf("mkdir %s: %v", relPath, err)
 		}
-		if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(absPath, []byte(content), 0o600); err != nil {
 			t.Fatalf("write %s: %v", relPath, err)
 		}
 	}
@@ -72,16 +87,21 @@ func newCustomToolDeps(t *testing.T, files map[string]string, nodes []types.ASTN
 		}
 	}
 
-	deps := ToolDeps{
+	deps = ToolDeps{
 		Store:    store,
 		Graph:    graphEngine,
 		Search:   search.New(store, embedder, graphEngine),
 		RepoRoot: tmpDir,
 	}
-	return deps, func() { store.Close() }
+	cleanup = func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close store: %v", err)
+		}
+	}
+	return deps, cleanup
 }
 
-func newRouteQueryDeps(t *testing.T) (ToolDeps, func()) {
+func newRouteQueryDeps(t *testing.T) (deps ToolDeps, cleanup func()) {
 	nodes := []types.ASTNode{
 		{
 			ID:         types.GenerateNodeID("routes.php", "POST /v1/orders"),
@@ -295,7 +315,7 @@ func TestClassifyWorkflowPhase_SparseGraph(t *testing.T) {
 			SymbolName: "ProcessOrder",
 			NodeType:   types.NodeTypeFunction,
 			StartByte:  0,
-			EndByte:    uint32(len(processSrc)),
+			EndByte:    testClampUint32Len(processSrc),
 			ContentSum: "order flow processor",
 		},
 		{
@@ -304,7 +324,7 @@ func TestClassifyWorkflowPhase_SparseGraph(t *testing.T) {
 			SymbolName: "ValidateOrder",
 			NodeType:   types.NodeTypeFunction,
 			StartByte:  0,
-			EndByte:    uint32(len(validateSrc)),
+			EndByte:    testClampUint32Len(validateSrc),
 			ContentSum: "order flow validator",
 		},
 	}
@@ -358,7 +378,7 @@ func TestRecommendedSteps_TraceWorkflow(t *testing.T) {
 			SymbolName: "HandleOrder",
 			NodeType:   types.NodeTypeMethod,
 			StartByte:  0,
-			EndByte:    uint32(len(handlerSrc)),
+			EndByte:    testClampUint32Len(handlerSrc),
 			ContentSum: "handle order flow",
 		},
 	}
