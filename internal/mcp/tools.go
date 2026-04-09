@@ -29,8 +29,8 @@ var Version = "dev"
 
 var listFileSymbolsQuerySanitizer = regexp.MustCompile(`[^a-z0-9_\.]+`)
 var routeQueryTokenSplitter = regexp.MustCompile(`[\s/:\-_.]+`)
-var routeVersionPrefixPattern = regexp.MustCompile(`^/v[0-9]+(?:/|$)`)
-var routeVersionTokenPattern = regexp.MustCompile(`^v[0-9]+$`)
+var routeVersionPrefixPattern = regexp.MustCompile(`^/v\d+(?:/|$)`)
+var routeVersionTokenPattern = regexp.MustCompile(`^v\d+$`)
 var workflowTokenExtractor = regexp.MustCompile(`[A-Za-z0-9]+`)
 
 // ToolDeps holds dependencies needed by MCP tools
@@ -4490,7 +4490,7 @@ func hasWorkflowDirectEdge(sourceID, targetID string, graphEngine *graph.GraphEn
 	return false
 }
 
-func routeHandleEdgeRef(deps ToolDeps, routeID string) (bool, string) {
+func routeHandleEdgeRef(deps ToolDeps, routeID string) (hasHandleEdge bool, ref string) {
 	edges, err := deps.Store.GetEdgesFrom(routeID)
 	if err != nil {
 		return false, ""
