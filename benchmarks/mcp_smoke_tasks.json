@@ -22,5 +22,23 @@
     "expected_tools": ["checkpoint_context", "read_delta"],
     "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. Create a checkpoint named %CHECKPOINT_NAME% with checkpoint_context, then immediately call read_delta against that checkpoint. Report whether any symbols changed, explain what the checkpoint or delta feature is for, and include the checkpoint name.",
     "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Explain how checkpoint_context and read_delta are implemented in this repo, what they are for, and name the key files or symbols involved."
+  },
+  {
+    "id": "workflow_order_flow",
+    "expected_tools": ["assemble_context"],
+    "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. Use assemble_context with goal trace_workflow and query 'order flow' to get a workflow skeleton. Report the phases found, the number of items per phase, and the recommended next steps.",
+    "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Trace the order flow workflow end-to-end. Identify entry points, core logic, data layer, and async components involved."
+  },
+  {
+    "id": "workflow_payment_pipeline",
+    "expected_tools": ["assemble_context"],
+    "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. Use assemble_context with goal trace_workflow and query 'payment pipeline' to get a workflow skeleton. Report the phases found, the number of items per phase, and the recommended next steps.",
+    "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Trace the payment pipeline workflow end-to-end. Identify entry points, core logic, data layer, and async components involved."
+  },
+  {
+    "id": "workflow_verify",
+    "expected_tools": ["assemble_context"],
+    "prompt_mcp": "You are validating the context-mcp MCP server for repository %REPO_ROOT%. First use assemble_context with goal trace_workflow and query 'order flow' to get a workflow skeleton. Then use assemble_context with goal verify_workflow passing the item IDs from the first response as targets. Report how many items were confirmed, unresolved, unreachable, or broken.",
+    "prompt_nomcp": "You are inspecting repository %REPO_ROOT% without MCP tools. Trace the order flow workflow and then manually verify each component: confirm entry points resolve to handlers, core logic is reachable from entries, and data layer items are called by core logic."
   }
 ]
