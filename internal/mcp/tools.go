@@ -20,6 +20,7 @@ import (
 	"github.com/maplenk/context-mcp/internal/graph"
 	"github.com/maplenk/context-mcp/internal/search"
 	"github.com/maplenk/context-mcp/internal/storage"
+	"github.com/maplenk/context-mcp/internal/tokenutil"
 	"github.com/maplenk/context-mcp/internal/types"
 )
 
@@ -27,6 +28,8 @@ import (
 var Version = "dev"
 
 var listFileSymbolsQuerySanitizer = regexp.MustCompile(`[^a-z0-9_\.]+`)
+var routeQueryTokenSplitter = regexp.MustCompile(`[\s/:\-_.]+`)
+var workflowTokenExtractor = regexp.MustCompile(`[A-Za-z0-9]+`)
 
 // ToolDeps holds dependencies needed by MCP tools
 type ToolDeps struct {
@@ -489,20 +492,22 @@ type AssembleContextParams struct {
 	MaxPerFile       int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per file (default: 2)"`
 	IncludeNeighbors bool     `json:"include_neighbors,omitempty" jsonschema:"description=Include callers/callees of top results (default: false)"`
 	Compact          bool     `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
-	Goal             string   `json:"goal,omitempty" jsonschema:"description=Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes"`
+	Goal             string   `json:"goal,omitempty" jsonschema:"description=Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow"`
 	Targets          []string `json:"targets,omitempty" jsonschema:"description=Optional symbol or route references used with goal-aware assembly"`
 }
 
 // AssembleContextResponse is the structured response from assemble_context
 type AssembleContextResponse struct {
-	Query        string                `json:"query"`
-	Mode         string                `json:"mode"`
-	BudgetTokens int                   `json:"budget_tokens"`
-	UsedTokens   int                   `json:"used_tokens"`
-	Items        []AssembleContextItem `json:"items"`
-	Excluded     int                   `json:"excluded"`
-	Summary      string                `json:"summary"`
-	Strategy     string                `json:"strategy,omitempty"`
+	Query            string                `json:"query"`
+	Mode             string                `json:"mode"`
+	BudgetTokens     int                   `json:"budget_tokens"`
+	UsedTokens       int                   `json:"used_tokens"`
+	Items            []AssembleContextItem `json:"items"`
+	Excluded         int                   `json:"excluded"`
+	Summary          string                `json:"summary"`
+	Strategy         string                `json:"strategy,omitempty"`
+	Phases           map[string][]string   `json:"phases,omitempty"`
+	RecommendedSteps []RecommendedStep     `json:"recommended_steps,omitempty"`
 }
 
 // AssembleContextItem represents a single item in the assembled context
@@ -516,6 +521,12 @@ type AssembleContextItem struct {
 	Tokens   int     `json:"tokens"`
 	Reason   string  `json:"reason,omitempty"`
 	Group    string  `json:"group,omitempty"`
+}
+
+type RecommendedStep struct {
+	Tool   string            `json:"tool"`
+	Reason string            `json:"reason"`
+	Args   map[string]string `json:"args"`
 }
 
 type CompareSymbolsParams struct {
@@ -3949,8 +3960,26 @@ type routeResultItem struct {
 }
 
 type goalCandidate struct {
-	Result types.SearchResult
-	Group  string
+	Result   types.SearchResult
+	Group    string
+	Expanded bool
+}
+
+const (
+	workflowPhaseEntry = "Entry Points"
+	workflowPhaseCore  = "Core Logic"
+	workflowPhaseState = "State / Data Layer"
+	workflowPhaseAsync = "Async"
+	workflowPhaseOther = "Other"
+)
+
+var workflowPhaseRank = map[string]int{
+	workflowPhaseEntry: 0,
+	workflowPhaseCore:  1,
+	workflowPhaseState: 2,
+	workflowPhaseAsync: 3,
+	"":                 4,
+	workflowPhaseOther: 5,
 }
 
 func parseRouteSymbol(symbol string) (string, string, error) {
@@ -4113,6 +4142,254 @@ func collectNeighbors(graphEngine *graph.GraphEngine, roots []string, depth int,
 	return out
 }
 
+func tokenizeRouteQuery(query string) []string {
+	parts := routeQueryTokenSplitter.Split(strings.ToLower(query), -1)
+	seen := make(map[string]bool, len(parts))
+	tokens := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if len(part) < 2 {
+			continue
+		}
+		if seen[part] {
+			continue
+		}
+		seen[part] = true
+		tokens = append(tokens, part)
+	}
+	return tokens
+}
+
+func routeTokenMatchCount(node types.ASTNode, tokens []string) int {
+	if len(tokens) == 0 {
+		return 0
+	}
+	searchable := strings.ToLower(strings.Join([]string{
+		node.SymbolName,
+		node.FilePath,
+		node.ContentSum,
+	}, " "))
+	count := 0
+	for _, token := range tokens {
+		if strings.Contains(searchable, token) {
+			count++
+		}
+	}
+	return count
+}
+
+func classifyWorkflowPhase(node types.ASTNode, graphEngine *graph.GraphEngine, isExpanded bool) string {
+	if node.NodeType == types.NodeTypeRoute {
+		return workflowPhaseEntry
+	}
+
+	callers, callees := workflowGraphNeighbors(graphEngine, node.ID)
+	if (node.NodeType == types.NodeTypeFunction || node.NodeType == types.NodeTypeMethod) && len(callers) == 0 {
+		return workflowPhaseEntry
+	}
+
+	if isExpanded && hasAsyncWorkflowSignal(node) {
+		return workflowPhaseAsync
+	}
+
+	if len(callers) > 0 && len(callees) > 0 {
+		return workflowPhaseCore
+	}
+
+	if node.NodeType == types.NodeTypeClass || node.NodeType == types.NodeTypeStruct {
+		if len(callees) <= 1 {
+			return workflowPhaseState
+		}
+	}
+
+	if len(callees) > 0 && graphEngine != nil {
+		leafCount := 0
+		nonLeafCount := 0
+		for _, calleeID := range uniqueNodeIDs(callees) {
+			if len(graphEngine.GetCallees(calleeID)) == 0 {
+				leafCount++
+			} else {
+				nonLeafCount++
+			}
+		}
+		if leafCount > nonLeafCount {
+			return workflowPhaseState
+		}
+	}
+
+	return workflowPhaseOther
+}
+
+func workflowGraphNeighbors(graphEngine *graph.GraphEngine, nodeID string) ([]string, []string) {
+	if graphEngine == nil {
+		return nil, nil
+	}
+	return graphEngine.GetCallers(nodeID), graphEngine.GetCallees(nodeID)
+}
+
+func workflowGraphCoverage(candidates []goalCandidate, graphEngine *graph.GraphEngine) float64 {
+	if graphEngine == nil || len(candidates) == 0 {
+		return 0
+	}
+	withEdges := 0
+	for _, candidate := range candidates {
+		callers, callees := workflowGraphNeighbors(graphEngine, candidate.Result.Node.ID)
+		if len(callers)+len(callees) > 0 {
+			withEdges++
+		}
+	}
+	return float64(withEdges) / float64(len(candidates))
+}
+
+func hasAsyncWorkflowSignal(node types.ASTNode) bool {
+	signals := map[string]bool{
+		"job": true, "queue": true, "dispatch": true, "worker": true,
+		"event": true, "listener": true, "consumer": true, "subscriber": true,
+	}
+	for _, token := range normalizeWorkflowTokens(node.SymbolName, node.FilePath) {
+		if signals[token] {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeWorkflowTokens(parts ...string) []string {
+	var tokens []string
+	for _, part := range parts {
+		for _, chunk := range workflowTokenExtractor.FindAllString(part, -1) {
+			for _, camel := range tokenutil.SplitCamelCase(chunk) {
+				token := strings.ToLower(strings.TrimSpace(camel))
+				if token != "" {
+					tokens = append(tokens, token)
+				}
+			}
+		}
+	}
+	return tokens
+}
+
+func buildWorkflowPhases(items []AssembleContextItem) map[string][]string {
+	phases := make(map[string][]string)
+	for _, item := range items {
+		switch item.Group {
+		case workflowPhaseEntry, workflowPhaseCore, workflowPhaseState, workflowPhaseAsync, workflowPhaseOther:
+		default:
+			continue
+		}
+		phases[item.Group] = append(phases[item.Group], item.ID)
+	}
+	if len(phases) == 0 {
+		return nil
+	}
+	return phases
+}
+
+func buildWorkflowRecommendedSteps(query string, items []AssembleContextItem) []RecommendedStep {
+	var topRoute *AssembleContextItem
+	var topNonRoute *AssembleContextItem
+	coreWithContent := 0
+	for i := range items {
+		item := &items[i]
+		if item.Group == workflowPhaseCore && item.Content != "" {
+			coreWithContent++
+		}
+		if topRoute == nil && isRouteName(item.Name) {
+			topRoute = item
+		}
+		if topNonRoute == nil && !isRouteName(item.Name) {
+			topNonRoute = item
+		}
+	}
+
+	steps := make([]RecommendedStep, 0, 3)
+	if topRoute != nil {
+		steps = append(steps, RecommendedStep{
+			Tool:   "trace_route",
+			Reason: "Trace this entry point to see the full request-handling chain",
+			Args:   map[string]string{"route": topRoute.Name},
+		})
+	}
+	if coreWithContent < 2 && topNonRoute != nil {
+		steps = append(steps, RecommendedStep{
+			Tool:   "assemble_context",
+			Reason: "Get deeper code content for core processing logic",
+			Args: map[string]string{
+				"query": query + " " + topNonRoute.Name,
+				"mode":  "snippets",
+			},
+		})
+	}
+	if topNonRoute != nil {
+		steps = append(steps, RecommendedStep{
+			Tool:   "read_symbol",
+			Reason: "Read the full implementation of the most relevant symbol",
+			Args:   map[string]string{"symbol_id": topNonRoute.ID},
+		})
+	}
+	return dedupeRecommendedSteps(steps)
+}
+
+func isRouteName(name string) bool {
+	_, _, err := parseRouteSymbol(name)
+	return err == nil
+}
+
+func dedupeRecommendedSteps(steps []RecommendedStep) []RecommendedStep {
+	seen := make(map[string]bool, len(steps))
+	deduped := make([]RecommendedStep, 0, len(steps))
+	for _, step := range steps {
+		key := recommendedStepKey(step)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		deduped = append(deduped, step)
+		if len(deduped) == 3 {
+			break
+		}
+	}
+	if len(deduped) == 0 {
+		return nil
+	}
+	return deduped
+}
+
+func recommendedStepKey(step RecommendedStep) string {
+	keys := make([]string, 0, len(step.Args))
+	for key := range step.Args {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteString(step.Tool)
+	for _, key := range keys {
+		b.WriteString("|")
+		b.WriteString(key)
+		b.WriteString("=")
+		b.WriteString(step.Args[key])
+	}
+	return b.String()
+}
+
+func applyGoalCandidatePerFileCap(candidates []goalCandidate, maxPerFile int) []goalCandidate {
+	if maxPerFile <= 0 {
+		return candidates
+	}
+	fileCounts := make(map[string]int)
+	capped := make([]goalCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		count := fileCounts[candidate.Result.Node.FilePath]
+		if count >= maxPerFile {
+			continue
+		}
+		fileCounts[candidate.Result.Node.FilePath] = count + 1
+		capped = append(capped, candidate)
+	}
+	return capped
+}
+
 func summarizeIDs(store *storage.Store, ids []string) []compactNameID {
 	ids = uniqueNodeIDs(ids)
 	out := make([]compactNameID, 0, len(ids))
@@ -4212,6 +4489,7 @@ func findRoutesHandler(deps ToolDeps, p FindRoutesParams) (interface{}, error) {
 		p.Limit = 10
 	}
 	includeHandlers := routeHandlersEnabled(p.IncludeHandlers)
+	tokens := tokenizeRouteQuery(p.Query)
 
 	var items []routeResultItem
 	seen := make(map[string]bool)
@@ -4229,7 +4507,18 @@ func findRoutesHandler(deps ToolDeps, p FindRoutesParams) (interface{}, error) {
 
 	if exact, err := deps.Store.SearchNodesByName(p.Query); err == nil {
 		for _, node := range exact {
-			addNode(node, 1.5)
+			addNode(node, 2.0)
+		}
+	}
+	if len(tokens) > 0 {
+		if keywordMatches, err := deps.Store.FindRouteNodesByKeywords(tokens, p.Limit*4); err == nil {
+			for _, result := range keywordMatches {
+				matchCount := routeTokenMatchCount(result.Node, tokens)
+				if matchCount == 0 {
+					continue
+				}
+				addNode(result.Node, 1.0+0.15*float64(matchCount))
+			}
 		}
 	}
 	if deps.Search != nil {
@@ -4604,7 +4893,7 @@ func readNodeSource(repoRoot string, node types.ASTNode) string {
 	return string(buf[:n])
 }
 
-func collectGoalAwareCandidates(deps ToolDeps, p AssembleContextParams) ([]goalCandidate, string, error) {
+func collectGoalAwareCandidates(deps ToolDeps, p AssembleContextParams, activeFileNodeIDs []string) ([]goalCandidate, string, error) {
 	switch p.Goal {
 	case "":
 		return nil, "", nil
@@ -4739,6 +5028,68 @@ func collectGoalAwareCandidates(deps ToolDeps, p AssembleContextParams) ([]goalC
 			}
 		}
 		return results, "goal=compare_routes balanced_routes_handlers_and_downstream", nil
+	case "trace_workflow":
+		searchLimit := 60
+		results, err := deps.Search.Search(p.Query, searchLimit, activeFileNodeIDs, p.MaxPerFile)
+		if err != nil {
+			return nil, "", fmt.Errorf("workflow search failed: %w", err)
+		}
+
+		seen := make(map[string]bool)
+		candidates := make([]goalCandidate, 0, len(results))
+		for _, result := range results {
+			if seen[result.Node.ID] {
+				continue
+			}
+			seen[result.Node.ID] = true
+			candidates = append(candidates, goalCandidate{Result: result})
+		}
+
+		for _, seed := range results[:min(8, len(results))] {
+			for _, id := range collectNeighbors(deps.Graph, []string{seed.Node.ID}, 1, "callees") {
+				if seen[id] {
+					continue
+				}
+				node, err := deps.Store.GetNode(id)
+				if err != nil || node == nil {
+					continue
+				}
+				seen[id] = true
+				candidates = append(candidates, goalCandidate{
+					Result: types.SearchResult{
+						Node:  *node,
+						Score: seed.Score * 0.7,
+					},
+					Expanded: true,
+				})
+			}
+		}
+
+		sparseGraph := workflowGraphCoverage(candidates, deps.Graph) < 0.5
+		for i := range candidates {
+			node := candidates[i].Result.Node
+			if sparseGraph {
+				if node.NodeType == types.NodeTypeRoute {
+					candidates[i].Group = workflowPhaseEntry
+				}
+				continue
+			}
+			candidates[i].Group = classifyWorkflowPhase(node, deps.Graph, candidates[i].Expanded)
+		}
+
+		sort.SliceStable(candidates, func(i, j int) bool {
+			leftGroup := workflowPhaseRank[candidates[i].Group]
+			rightGroup := workflowPhaseRank[candidates[j].Group]
+			if leftGroup != rightGroup {
+				return leftGroup < rightGroup
+			}
+			if candidates[i].Result.Score != candidates[j].Result.Score {
+				return candidates[i].Result.Score > candidates[j].Result.Score
+			}
+			return candidates[i].Result.Node.ID < candidates[j].Result.Node.ID
+		})
+		candidates = applyGoalCandidatePerFileCap(candidates, p.MaxPerFile)
+		return candidates, "goal=trace_workflow phase_grouped", nil
 	default:
 		return nil, "", fmt.Errorf("invalid goal %q", p.Goal)
 	}
@@ -4766,6 +5117,17 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 	if p.MaxPerFile == 0 {
 		p.MaxPerFile = 2
 	}
+	if p.Goal == "trace_workflow" {
+		if p.BudgetTokens == 4000 {
+			p.BudgetTokens = 12000
+		}
+		if p.Mode == "snippets" {
+			p.Mode = "signatures"
+		}
+		if p.MaxPerFile == 2 {
+			p.MaxPerFile = 3
+		}
+	}
 
 	// Validate mode
 	validModes := map[string]bool{
@@ -4789,7 +5151,7 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 	}
 
 	var strategy string
-	goalResults, strategy, err := collectGoalAwareCandidates(deps, p)
+	goalResults, strategy, err := collectGoalAwareCandidates(deps, p, activeFileNodeIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -4924,15 +5286,24 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 		}
 	}
 
+	var phases map[string][]string
+	var recommendedSteps []RecommendedStep
+	if p.Goal == "trace_workflow" {
+		phases = buildWorkflowPhases(items)
+		recommendedSteps = buildWorkflowRecommendedSteps(p.Query, items)
+	}
+
 	return AssembleContextResponse{
-		Query:        p.Query,
-		Mode:         p.Mode,
-		BudgetTokens: p.BudgetTokens,
-		UsedTokens:   usedTokens,
-		Items:        items,
-		Excluded:     excluded,
-		Summary:      summary,
-		Strategy:     strategy,
+		Query:            p.Query,
+		Mode:             p.Mode,
+		BudgetTokens:     p.BudgetTokens,
+		UsedTokens:       usedTokens,
+		Items:            items,
+		Excluded:         excluded,
+		Summary:          summary,
+		Strategy:         strategy,
+		Phases:           phases,
+		RecommendedSteps: recommendedSteps,
 	}, nil
 }
 
@@ -4996,7 +5367,7 @@ func generateModeContent(repoRoot string, node types.ASTNode, mode string) strin
 }
 
 func registerAssembleContextTool(s *Server, deps ToolDeps) {
-	desc := "Token-budgeted context assembly. Returns ranked code snippets fitted within a token budget. Use when you need to gather context efficiently within a token limit."
+	desc := "Token-budgeted context assembly. Returns ranked code snippets fitted within a token budget. Use when you need to gather context efficiently within a token limit. Use goal=trace_workflow for broad questions like 'how does X work', 'entire flow', or 'pipeline'."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -5021,8 +5392,12 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 				"max_per_file":      map[string]interface{}{"type": "integer", "description": "Maximum results per file (default: 2)", "default": 2},
 				"include_neighbors": map[string]interface{}{"type": "boolean", "description": "Include callers/callees of top results"},
 				"compact":           map[string]interface{}{"type": "boolean", "description": "Return compact output: IDs, scores, and line spans only"},
-				"goal":              map[string]interface{}{"type": "string", "description": "Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes"},
-				"targets":           map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional goal-specific route/symbol refs"},
+				"goal": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow",
+					"enum":        []string{"inspect_symbol", "compare_symbols", "find_routes", "trace_route", "compare_routes", "trace_workflow"},
+				},
+				"targets": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional goal-specific route/symbol refs"},
 			},
 		},
 	}, cliHandler)
@@ -5040,7 +5415,7 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 		mcp.WithNumber("max_per_file", mcp.Description("Maximum results per file (default: 2)")),
 		mcp.WithBoolean("include_neighbors", mcp.Description("Include callers/callees of top results")),
 		mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
-		mcp.WithString("goal", mcp.Description("Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes")),
+		mcp.WithString("goal", mcp.Description("Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow")),
 		mcp.WithArray("targets", mcp.Description("Optional goal-specific route/symbol refs"), mcp.WithStringItems()),
 	)
 	tool.Meta = &mcp.Meta{

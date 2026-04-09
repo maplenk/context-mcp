@@ -219,6 +219,16 @@ Run your own benchmarks with `./benchmarks/run_mcp_usage.sh`.
 
 Also includes **5 prompt templates** (review\_changes, trace\_impact, prepare\_fix\_context, onboard\_repo, collect\_minimal\_context) and **4 resources** (repo\_summary, index\_stats, changed\_symbols, hot\_paths). Full parameter documentation in [USAGE.md](USAGE.md).
 
+## Workflow Retrieval
+
+For broad orientation questions such as "how does order flow work?", "entire checkout flow", or "payment pipeline", prefer:
+
+```json
+{"query": "order flow", "goal": "trace_workflow"}
+```
+
+via `assemble_context`. That path returns a phase-grouped, token-budgeted workflow skeleton with follow-up suggestions. Use `context` for targeted discovery, not first-pass workflow mapping.
+
 ## Compact Output
 
 High-output analysis tools (`context`, `impact`, `understand`, `explore`, `detect_changes`, `get_architecture_summary`, `assemble_context`) accept a `compact: true` parameter that strips verbose fields (Reason, WhyNow, NextTool, NextArgs) from each result. `list_file_symbols` also accepts `compact: true` and keeps only the minimal symbol inventory shape for large files. This reduces output tokens by 50-70% for agents that only need IDs and scores.

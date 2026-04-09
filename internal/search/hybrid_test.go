@@ -1446,7 +1446,7 @@ func TestDetectQueryKind(t *testing.T) {
 		{"PascalCase class", "FiscalYearController", queryKindClass},
 		{"HTTP verb POST", "POST /v1/merchant/{storeID}/order", queryKindRoute},
 		{"snake_case function", "stock_transaction", queryKindFunction},
-		{"natural language", "payment processing flow", queryKindNatural},
+		{"workflow language", "payment processing flow", queryKindWorkflow},
 		{"natural language auth", "authentication and session management", queryKindNatural},
 		{"natural language webhook", "webhook handling and dispatch", queryKindNatural},
 		{"route login+endpoint", "find login endpoint", queryKindRoute},
@@ -1459,6 +1459,37 @@ func TestDetectQueryKind(t *testing.T) {
 				t.Errorf("detectQueryKind(%q) = %d, want %d", tt.query, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDetectQueryKind_Workflow(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"flow", "order flow"},
+		{"pipeline", "checkout pipeline"},
+		{"lifecycle", "payment lifecycle"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectQueryKind(tt.query); got != queryKindWorkflow {
+				t.Fatalf("detectQueryKind(%q) = %v, want %v", tt.query, got, queryKindWorkflow)
+			}
+		})
+	}
+}
+
+func TestDetectQueryKind_RouteWinsOverWorkflow(t *testing.T) {
+	if got := detectQueryKind("POST order flow"); got != queryKindRoute {
+		t.Fatalf("detectQueryKind(%q) = %v, want %v", "POST order flow", got, queryKindRoute)
+	}
+}
+
+func TestDetectQueryKind_BareWorkflowTerm(t *testing.T) {
+	if got := detectQueryKind("flow"); got != queryKindNatural {
+		t.Fatalf("detectQueryKind(%q) = %v, want %v", "flow", got, queryKindNatural)
 	}
 }
 
@@ -1490,6 +1521,12 @@ func TestNodeTypeBoost(t *testing.T) {
 		{"function+Method", queryKindFunction, types.NodeTypeMethod, 1.0},
 		{"function+Class", queryKindFunction, types.NodeTypeClass, 1.0},
 
+		// Workflow kind
+		{"workflow+Route", queryKindWorkflow, types.NodeTypeRoute, 1.3},
+		{"workflow+Method", queryKindWorkflow, types.NodeTypeMethod, 1.3},
+		{"workflow+Class", queryKindWorkflow, types.NodeTypeClass, 1.3},
+		{"workflow+Function", queryKindWorkflow, types.NodeTypeFunction, 1.0},
+
 		// Natural kind (all 1.0)
 		{"natural+Function", queryKindNatural, types.NodeTypeFunction, 1.0},
 		{"natural+Class", queryKindNatural, types.NodeTypeClass, 1.0},
@@ -1504,6 +1541,50 @@ func TestNodeTypeBoost(t *testing.T) {
 				t.Errorf("nodeTypeBoost(%d, %v) = %f, want %f", tt.kind, tt.nodeType, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWorkflowRerank_BoostsRoutes(t *testing.T) {
+	hs := &HybridSearch{config: DefaultConfig()}
+	results := []types.SearchResult{
+		{
+			Node:  types.ASTNode{ID: "fn", FilePath: "service.go", SymbolName: "ProcessOrder", NodeType: types.NodeTypeFunction},
+			Score: 1.0,
+		},
+		{
+			Node:  types.ASTNode{ID: "route", FilePath: "routes.go", SymbolName: "POST /v1/orders", NodeType: types.NodeTypeRoute},
+			Score: 0.9,
+		},
+	}
+
+	reranked := hs.workflowRerank(results)
+	if len(reranked) != 2 {
+		t.Fatalf("expected 2 reranked results, got %d", len(reranked))
+	}
+	if reranked[0].Node.NodeType != types.NodeTypeRoute {
+		t.Fatalf("expected route to rank first after workflow rerank, got %s", reranked[0].Node.NodeType)
+	}
+}
+
+func TestWorkflowRerank_PenalizesTests(t *testing.T) {
+	hs := &HybridSearch{config: DefaultConfig()}
+	results := []types.SearchResult{
+		{
+			Node:  types.ASTNode{ID: "test-route", FilePath: "tests/order_routes_test.go", SymbolName: "POST /v1/orders", NodeType: types.NodeTypeRoute},
+			Score: 1.25,
+		},
+		{
+			Node:  types.ASTNode{ID: "src-route", FilePath: "routes.go", SymbolName: "POST /v2/orders", NodeType: types.NodeTypeRoute},
+			Score: 1.0,
+		},
+	}
+
+	reranked := hs.workflowRerank(results)
+	if len(reranked) != 2 {
+		t.Fatalf("expected 2 reranked results, got %d", len(reranked))
+	}
+	if reranked[0].Node.ID != "src-route" {
+		t.Fatalf("expected non-test route to outrank test route after rerank, got %s", reranked[0].Node.ID)
 	}
 }
 

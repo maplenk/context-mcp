@@ -794,6 +794,7 @@ Returns ranked code snippets fitted within a token budget. Use when you need to 
 | `max_per_file` | integer | no | 2 | Maximum results per file |
 | `include_neighbors` | boolean | no | false | Include callers/callees of top results |
 | `compact` | boolean | no | false | Strip verbose fields for smaller output |
+| `goal` | string | no | -- | Optional task shape such as `trace_workflow`, `trace_route`, or `find_routes` |
 
 **Example:**
 
@@ -804,6 +805,17 @@ Returns ranked code snippets fitted within a token budget. Use when you need to 
   "mode": "snippets"
 }
 ```
+
+**Workflow-oriented example:**
+
+```json
+{
+  "query": "order flow",
+  "goal": "trace_workflow"
+}
+```
+
+Use `assemble_context` with `goal: "trace_workflow"` for broad questions like "how does X work", "entire flow", or "pipeline". Use `context` for narrower discovery when you already know the symbol or concept you want to inspect.
 
 ---
 

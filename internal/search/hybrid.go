@@ -111,6 +111,8 @@ var queryAliases = map[string][]string{
 	"route":       {"endpoint", "api", "controller"},
 }
 
+var intentTokenRe = regexp.MustCompile(`[a-z0-9]+`)
+
 // camelCaseRe splits CamelCase identifiers into words.
 // fts5SpecialRe matches FTS5 special characters that must be sanitized before query construction.
 var fts5SpecialRe = regexp.MustCompile("[\"':(){}^+\\-*/`]")
@@ -401,6 +403,13 @@ func (h *HybridSearch) Search(query string, limit int, activeFileNodeIDs []strin
 		return results[i].Node.ID < results[j].Node.ID
 	})
 
+	if kind == queryKindWorkflow {
+		results = h.workflowRerank(results)
+	}
+	if kind == queryKindWorkflow && perFileCap < 3 {
+		perFileCap = 3
+	}
+
 	// Apply per-file cap
 	results = h.applyPerFileCap(results, perFileCap, kind == queryKindRoute)
 
@@ -492,10 +501,11 @@ func cleanQuery(query string) string {
 type queryKind int
 
 const (
-	queryKindNatural  queryKind = iota
+	queryKindNatural queryKind = iota
 	queryKindRoute
 	queryKindClass
 	queryKindFunction
+	queryKindWorkflow
 )
 
 // detectQueryKind analyzes a search query to determine intent (route, class,
@@ -516,6 +526,10 @@ func detectQueryKind(query string) queryKind {
 		}
 	}
 
+	if hasWorkflowIntent(query) {
+		return queryKindWorkflow
+	}
+
 	// Class intent: any word is PascalCase (starts uppercase, has lowercase)
 	for _, w := range strings.Fields(query) { // use original case
 		if len(w) >= 2 && unicode.IsUpper(rune(w[0])) && containsLower(w) && !isAllUpper(w) {
@@ -531,6 +545,71 @@ func detectQueryKind(query string) queryKind {
 	}
 
 	return queryKindNatural
+}
+
+var workflowTriggerTokens = [][]string{
+	{"workflow"},
+	{"flow"},
+	{"pipeline"},
+	{"lifecycle"},
+	{"end", "to", "end"},
+	{"how", "does"},
+	{"how", "do"},
+	{"walkthrough"},
+}
+
+func hasWorkflowIntent(query string) bool {
+	tokens := tokenizeIntentQuery(query)
+	if len(tokens) == 0 {
+		return false
+	}
+
+	matched := make([]bool, len(tokens))
+	hasTrigger := false
+	for i := 0; i < len(tokens); i++ {
+		for _, trigger := range workflowTriggerTokens {
+			if !matchesTokenSequence(tokens, i, trigger) {
+				continue
+			}
+			hasTrigger = true
+			for j := 0; j < len(trigger); j++ {
+				matched[i+j] = true
+			}
+		}
+	}
+	if !hasTrigger {
+		return false
+	}
+
+	stopWordsMu.RLock()
+	currentStopWords := stopWords
+	stopWordsMu.RUnlock()
+
+	for i, token := range tokens {
+		if matched[i] || len(token) < 2 {
+			continue
+		}
+		if !currentStopWords[token] {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenizeIntentQuery(query string) []string {
+	return intentTokenRe.FindAllString(strings.ToLower(query), -1)
+}
+
+func matchesTokenSequence(tokens []string, offset int, sequence []string) bool {
+	if offset+len(sequence) > len(tokens) {
+		return false
+	}
+	for i := range sequence {
+		if tokens[offset+i] != sequence[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // containsLower returns true if s contains at least one lowercase letter.
@@ -609,6 +688,11 @@ func (h *HybridSearch) nodeTypeBoost(kind queryKind, nodeType types.NodeType) fl
 		switch nodeType {
 		case types.NodeTypeFunction:
 			return h.config.FunctionBoost
+		}
+	case queryKindWorkflow:
+		switch nodeType {
+		case types.NodeTypeRoute, types.NodeTypeMethod, types.NodeTypeClass:
+			return 1.3
 		}
 	}
 	return 1.0
@@ -857,42 +941,102 @@ func applyPerFileCap(results []types.SearchResult, maxPerFile int) []types.Searc
 	return hs.applyPerFileCap(results, maxPerFile, false)
 }
 
+func (h *HybridSearch) workflowRerank(results []types.SearchResult) []types.SearchResult {
+	reranked := append([]types.SearchResult(nil), results...)
+	for i := range reranked {
+		switch reranked[i].Node.NodeType {
+		case types.NodeTypeRoute:
+			reranked[i].Score += 0.25
+		case types.NodeTypeMethod:
+			reranked[i].Score += 0.15
+		case types.NodeTypeClass:
+			reranked[i].Score += 0.10
+		}
+
+		switch h.pathCategory(reranked[i].Node.FilePath) {
+		case pathCategoryTest, pathCategoryVendor, pathCategoryMigration:
+			reranked[i].Score -= 0.3
+		case pathCategoryGenerated:
+			reranked[i].Score -= 0.2
+		}
+	}
+
+	sort.Slice(reranked, func(i, j int) bool {
+		if reranked[i].Score != reranked[j].Score {
+			return reranked[i].Score > reranked[j].Score
+		}
+		return reranked[i].Node.ID < reranked[j].Node.ID
+	})
+	return reranked
+}
+
+type pathCategory int
+
+const (
+	pathCategoryCore pathCategory = iota
+	pathCategoryGenerated
+	pathCategoryVendor
+	pathCategoryMigration
+	pathCategoryTest
+	pathCategoryExample
+	pathCategoryConfig
+)
+
 // pathPenalty returns a scoring multiplier for a file path.
 // Core source files return 1.0; non-core paths return lower values
 // so they don't dominate results over the actual implementation files.
 // Uses h.config for penalty values.
 func (h *HybridSearch) pathPenalty(filePath string) float64 {
+	switch h.pathCategory(filePath) {
+	case pathCategoryGenerated:
+		return h.config.PenaltyGenerated
+	case pathCategoryVendor:
+		return h.config.PenaltyVendor
+	case pathCategoryMigration:
+		return h.config.PenaltyMigration
+	case pathCategoryTest:
+		return h.config.PenaltyTest
+	case pathCategoryExample:
+		return h.config.PenaltyExample
+	case pathCategoryConfig:
+		return h.config.PenaltyConfig
+	default:
+		return 1.0
+	}
+}
+
+func (h *HybridSearch) pathCategory(filePath string) pathCategory {
 	lower := strings.ToLower(filePath)
 
 	// Auto-generated / IDE helpers — strongest penalty
 	if strings.Contains(lower, "_ide_helper") || strings.HasSuffix(lower, ".d.ts") {
-		return h.config.PenaltyGenerated
+		return pathCategoryGenerated
 	}
 	for _, part := range strings.Split(lower, "/") {
 		if part == "generated" || strings.HasPrefix(part, "generated.") ||
 			strings.HasPrefix(part, "generated_") {
-			return h.config.PenaltyGenerated
+			return pathCategoryGenerated
 		}
 	}
 
 	// Vendor / third-party dependencies
 	for _, part := range strings.Split(lower, "/") {
 		if part == "vendor" || part == "node_modules" || part == "lib" {
-			return h.config.PenaltyVendor
+			return pathCategoryVendor
 		}
 	}
 
 	// Database migrations — schema changes, not business logic
 	for _, part := range strings.Split(lower, "/") {
 		if part == "migrations" || part == "migration" {
-			return h.config.PenaltyMigration
+			return pathCategoryMigration
 		}
 	}
 
 	// Test files
 	for _, part := range strings.Split(lower, "/") {
 		if part == "tests" || part == "test" || part == "__tests__" || part == "spec" {
-			return h.config.PenaltyTest
+			return pathCategoryTest
 		}
 	}
 	// File-name patterns for tests
@@ -903,28 +1047,28 @@ func (h *HybridSearch) pathPenalty(filePath string) float64 {
 	if strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.js") ||
 		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".spec.js") ||
 		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, "test.php") {
-		return h.config.PenaltyTest
+		return pathCategoryTest
 	}
 	// CamelCase test convention (e.g., OrderControllerTest.php, FooTest.java)
 	if strings.Contains(base, "test.") || strings.Contains(base, "Test.") {
-		return h.config.PenaltyTest
+		return pathCategoryTest
 	}
 
 	// Examples
 	for _, part := range strings.Split(lower, "/") {
 		if part == "examples" || part == "example" {
-			return h.config.PenaltyExample
+			return pathCategoryExample
 		}
 	}
 
 	// Config directories — useful but not primary business logic
 	for _, part := range strings.Split(lower, "/") {
 		if part == "config" {
-			return h.config.PenaltyConfig
+			return pathCategoryConfig
 		}
 	}
 
-	return 1.0
+	return pathCategoryCore
 }
 
 // pathPenalty (free function) is a backward-compatible wrapper that uses DefaultConfig.
