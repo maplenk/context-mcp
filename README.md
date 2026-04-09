@@ -48,7 +48,27 @@ The latest packaged release is [`v0.3.0`](https://github.com/maplenk/context-mcp
 
 That packaged release runs with the default TF-IDF embedding path unless you manually configure an alternate backend such as ONNX at runtime.
 
-The client-specific commands below are the local-binary path. They assume `context-mcp` is already present on disk, whether you built it yourself or downloaded it from a release artifact.
+The release page also publishes an `install.sh` helper. It downloads the matching archive, verifies the published SHA-256, and installs `context-mcp` into a PATH directory.
+
+```bash
+curl -fsSL https://github.com/maplenk/context-mcp/releases/latest/download/install.sh | sh
+```
+
+By default the helper installs to `~/.local/bin`. For a system-wide install, use:
+
+```bash
+curl -fsSL https://github.com/maplenk/context-mcp/releases/latest/download/install.sh | sh -s -- --system
+```
+
+If you already downloaded `context-mcp-darwin-arm64.tar.gz` from the release page, download `install.sh` from the same release and run:
+
+```bash
+sh install.sh --archive ~/Downloads/context-mcp-darwin-arm64.tar.gz
+```
+
+This terminal installer is the best friction-reduction path we can ship without an Apple Developer account. It is checksum-verified, but it is not a Developer ID signed, notarized “verified developer” installer.
+
+The client-specific commands below are the local-binary path. They assume `context-mcp` is already present on disk, whether you built it yourself or installed it from a release asset.
 
 ## Connect to Your Agent
 

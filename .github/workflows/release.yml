@@ -72,8 +72,61 @@ jobs:
           output_path.write_text(json.dumps(manifest, indent=2) + "\n")
           PY
 
-      - name: Upload release manifest
+      - name: Generate release installer
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          release_tag = os.environ["RELEASE_TAG"]
+          version = release_tag.removeprefix("v")
+          archive_name = "context-mcp-darwin-arm64.tar.gz"
+          archive_url = (
+              f"https://github.com/maplenk/context-mcp/releases/download/{release_tag}/{archive_name}"
+          )
+          checksum_path = Path("dist/context-mcp-checksums.txt")
+
+          checksum = None
+          for line in checksum_path.read_text().splitlines():
+              line = line.strip()
+              if not line:
+                  continue
+              parts = line.split()
+              if len(parts) >= 2 and parts[-1] == archive_name:
+                  checksum = parts[0]
+                  break
+          if checksum is None:
+              raise SystemExit(f"checksum for {archive_name} not found in {checksum_path}")
+
+          template = Path("scripts/install.sh").read_text()
+          rendered = (
+              template.replace("__VERSION__", version)
+              .replace("__ARCHIVE_URL__", archive_url)
+              .replace("__ARCHIVE_SHA256__", checksum)
+          )
+
+          output_path = Path("dist/install.sh")
+          output_path.write_text(rendered)
+          output_path.chmod(0o755)
+          PY
+
+      - name: Smoke test release installer
+        run: |
+          python3 -m http.server 18080 -d dist >/tmp/context-mcp-release-http.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+
+          install_dir="$RUNNER_TEMP/context-mcp-bin"
+          CONTEXT_MCP_BASE_URL="http://127.0.0.1:18080" \
+            sh dist/install.sh --dir "$install_dir"
+
+          test -x "$install_dir/context-mcp"
+          "$install_dir/context-mcp" --help >/dev/null
+
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release upload "$RELEASE_TAG" dist/server.json --clobber
+        run: gh release upload "$RELEASE_TAG" dist/server.json dist/install.sh --clobber
