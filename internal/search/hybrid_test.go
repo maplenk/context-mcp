@@ -871,11 +871,6 @@ func TestBuildFTSQuery_AliasExpansion(t *testing.T) {
 		wantTerms []string // terms that should appear in the FTS query
 	}{
 		{
-			"omnichannel expands to code names",
-			"omnichannel order sync",
-			[]string{"easyecom", "unicommerce", "onlineorder", "order", "sync"},
-		},
-		{
 			"auth expands to auth terms",
 			"auth session management",
 			[]string{"oauth", "login", "token", "auth"},
@@ -883,17 +878,17 @@ func TestBuildFTSQuery_AliasExpansion(t *testing.T) {
 		{
 			"webhook expands to callback",
 			"webhook dispatch",
-			[]string{"callback", "hook", "dispatchwebhook", "webhook", "dispatch"},
+			[]string{"callback", "hook", "notification", "webhook", "dispatch"},
 		},
 		{
 			"inventory expands to stock terms",
 			"inventory lookup",
-			[]string{"stock", "stocktransaction", "stockledger", "warehouse", "inventory", "lookup"},
+			[]string{"stock", "warehouse", "inventory", "lookup"},
 		},
 		{
 			"payment expands to billing terms",
 			"payment processing",
-			[]string{"razorpay", "billing", "invoice", "payment", "processing"},
+			[]string{"billing", "invoice", "checkout", "payment", "processing"},
 		},
 		{
 			"no alias for regular terms",
@@ -939,11 +934,11 @@ func TestBuildFTSQuery_AliasPrefixMatching(t *testing.T) {
 	t.Run("payments triggers payment alias via prefix", func(t *testing.T) {
 		result := buildFTSQuery("payments lookup")
 		lower := strings.ToLower(result)
-		if !strings.Contains(lower, "razorpay") {
-			t.Errorf("expected 'razorpay' from payment prefix alias, got: %s", result)
-		}
 		if !strings.Contains(lower, "billing") {
 			t.Errorf("expected 'billing' from payment prefix alias, got: %s", result)
+		}
+		if !strings.Contains(lower, "checkout") {
+			t.Errorf("expected 'checkout' from payment prefix alias, got: %s", result)
 		}
 	})
 }
@@ -1274,14 +1269,14 @@ func TestBuildFTSQuery_PrefixAliasMatching(t *testing.T) {
 			[]string{"authentication", "oauth", "login", "token", "middleware", "check"},
 		},
 		{
-			"loyaltypoint triggers loyalty aliases via prefix",
-			"loyaltypoint redeem",
-			[]string{"loyaltypoint", "mobiquest", "easyrewardz", "redeem"},
+			"logging triggers logging aliases via prefix",
+			"logging setup",
+			[]string{"logging", "log", "logger", "errortracker", "setup"},
 		},
 		{
 			"webhook still triggers webhook aliases (exact is subset of prefix)",
 			"webhook dispatch",
-			[]string{"webhook", "callback", "hook", "dispatchwebhook", "dispatch"},
+			[]string{"webhook", "callback", "hook", "notification", "dispatch"},
 		},
 		{
 			"exact match auth still works",
@@ -1333,8 +1328,8 @@ func TestBuildFTSQuery_PrefixAliasNoFalsePositives(t *testing.T) {
 		result := buildFTSQuery("xyz controller")
 		lower := strings.ToLower(result)
 		// Should only contain the original terms (plus wildcards)
-		if strings.Contains(lower, "oauth") || strings.Contains(lower, "razorpay") ||
-			strings.Contains(lower, "easyecom") || strings.Contains(lower, "sentry") {
+		if strings.Contains(lower, "oauth") || strings.Contains(lower, "billing") ||
+			strings.Contains(lower, "warehouse") || strings.Contains(lower, "logger") {
 			t.Errorf("unexpected alias expansion for 'xyz controller', got: %s", result)
 		}
 	})
@@ -1347,9 +1342,9 @@ func TestBuildFTSQuery_NewAliases(t *testing.T) {
 		wantTerms []string
 	}{
 		{
-			"loyalty alias expands",
-			"loyalty program",
-			[]string{"loyalty", "loyaltypoint", "mobiquest", "easyrewardz"},
+			"error alias expands",
+			"error reporting",
+			[]string{"error", "exception", "handler", "errorhandler"},
 		},
 		{
 			"session alias expands",

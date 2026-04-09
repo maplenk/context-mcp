@@ -94,21 +94,19 @@ func GetStopWords() []string {
 // When a query term matches a key, the alias terms are appended to the FTS query
 // with OR, broadening lexical search to cover vocabulary gaps.
 var queryAliases = map[string][]string{
-	"omnichannel": {"easyecom", "unicommerce", "onlineorder"},
-	"auth":        {"oauth", "login", "token", "session", "authenticate", "middleware"},
-	"webhook":     {"callback", "hook", "dispatchwebhook"},
-	"payment":     {"razorpay", "billing", "invoice"},
-	"inventory":   {"stock", "stocktransaction", "stockledger", "warehouse"},
-	"schema":      {"migration", "updateschema"},
-	"logging":     {"sentry", "log", "errortracker"},
-	"error":       {"exception", "handler", "sentry"},
-	"loyalty":     {"loyaltypoint", "mobiquest", "easyrewardz"},
-	"session":     {"sessionhandler", "cookie"},
-	"sync":        {"listener", "event", "dispatch"},
-	"database":    {"migration", "schema", "table"},
-	"endpoint":    {"route", "api", "controller"},
-	"endpoints":   {"route", "api", "controller"},
-	"route":       {"endpoint", "api", "controller"},
+	"auth":      {"oauth", "login", "token", "session", "authenticate", "middleware"},
+	"webhook":   {"callback", "hook", "notification"},
+	"payment":   {"billing", "invoice", "checkout", "transaction"},
+	"inventory": {"stock", "warehouse"},
+	"schema":    {"migration", "table"},
+	"logging":   {"log", "logger", "errortracker"},
+	"error":     {"exception", "handler", "errorhandler"},
+	"session":   {"cookie", "sessionhandler"},
+	"sync":      {"listener", "event", "dispatch"},
+	"database":  {"migration", "schema", "table"},
+	"endpoint":  {"route", "api", "controller"},
+	"endpoints": {"route", "api", "controller"},
+	"route":     {"endpoint", "api", "controller"},
 }
 
 var intentTokenRe = regexp.MustCompile(`[a-z0-9]+`)
