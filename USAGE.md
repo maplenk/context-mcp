@@ -185,7 +185,14 @@ Send `SIGINT` (Ctrl+C) or `SIGTERM` for graceful shutdown.
 
 ### Direct Release Install
 
-The checked-in [`server.json`](server.json) manifest is the source template for release-based installs. Tagged GitHub Releases publish a prebuilt `context-mcp-darwin-arm64.tar.gz` artifact and a checksum-resolved `server.json` asset for agents that install from release metadata instead of a locally built binary. Use the release asset as the install manifest; the repo copy is intentionally templated until a release is cut.
+The checked-in [`server.json`](server.json) manifest is the source template for release-based installs. Tagged GitHub Releases publish a prebuilt `context-mcp-darwin-arm64.tar.gz` artifact, a checksum-resolved `server.json` asset, and an `install.sh` helper for users who want the binary placed on their `PATH` automatically.
+
+```bash
+curl -fsSL https://github.com/maplenk/context-mcp/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/maplenk/context-mcp/releases/latest/download/install.sh | sh -s -- --system
+```
+
+The installer verifies the published SHA-256 before installing the binary. Without an Apple Developer account this remains a terminal-based, checksum-verified install path rather than a notarized macOS installer.
 
 `install --client ...` remains the local-binary helper path. It writes client config that points at a `context-mcp` binary you already have on disk.
 
