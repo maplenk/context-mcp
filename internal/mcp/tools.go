@@ -4634,12 +4634,13 @@ func verifyWorkflowHandler(deps ToolDeps, p AssembleContextParams) (interface{},
 			case handlerNode != nil:
 				record.Item.Verification = "confirmed"
 				record.Item.Confidence = 1.0
-				record.Item.Path = resolveWorkflowPathNames(deps.Store, []string{node.ID, handlerNode.ID})
+				record.Item.PathIDs = []string{node.ID, handlerNode.ID}
+				record.Item.Path = resolveWorkflowPathNames(deps.Store, record.Item.PathIDs)
 				confirmedEntries = append(confirmedEntries, verifiedWorkflowEntry{
 					EntryID:   node.ID,
 					EntryName: node.SymbolName,
 					StartID:   handlerNode.ID,
-					PathIDs:   []string{node.ID, handlerNode.ID},
+					PathIDs:   append([]string(nil), record.Item.PathIDs...),
 				})
 			case hasHandleEdge:
 				record.Item.Verification = "unresolved"
@@ -4659,12 +4660,13 @@ func verifyWorkflowHandler(deps ToolDeps, p AssembleContextParams) (interface{},
 		if deps.Graph == nil || len(uniqueNodeIDs(deps.Graph.GetCallers(node.ID))) == 0 {
 			record.Item.Verification = "confirmed"
 			record.Item.Confidence = 0.7
-			record.Item.Path = resolveWorkflowPathNames(deps.Store, []string{node.ID})
+			record.Item.PathIDs = []string{node.ID}
+			record.Item.Path = resolveWorkflowPathNames(deps.Store, record.Item.PathIDs)
 			confirmedEntries = append(confirmedEntries, verifiedWorkflowEntry{
 				EntryID:   node.ID,
 				EntryName: node.SymbolName,
 				StartID:   node.ID,
-				PathIDs:   []string{node.ID},
+				PathIDs:   append([]string(nil), record.Item.PathIDs...),
 			})
 			continue
 		}
@@ -4721,11 +4723,12 @@ func verifyWorkflowHandler(deps ToolDeps, p AssembleContextParams) (interface{},
 
 		record.Item.Verification = "confirmed"
 		record.Item.Confidence = 1.0
-		record.Item.Path = resolveWorkflowPathNames(deps.Store, bestPath)
+		record.Item.PathIDs = append([]string(nil), bestPath...)
+		record.Item.Path = resolveWorkflowPathNames(deps.Store, record.Item.PathIDs)
 		confirmedCores = append(confirmedCores, verifiedWorkflowCore{
 			ID:      record.Node.ID,
 			Name:    record.Node.SymbolName,
-			PathIDs: bestPath,
+			PathIDs: append([]string(nil), bestPath...),
 		})
 	}
 
@@ -4761,11 +4764,13 @@ func verifyWorkflowHandler(deps ToolDeps, p AssembleContextParams) (interface{},
 			case len(directPath) > 0:
 				record.Item.Verification = "confirmed"
 				record.Item.Confidence = 1.0
-				record.Item.Path = resolveWorkflowPathNames(deps.Store, directPath)
+				record.Item.PathIDs = append([]string(nil), directPath...)
+				record.Item.Path = resolveWorkflowPathNames(deps.Store, record.Item.PathIDs)
 			case len(inferredPath) > 0:
 				record.Item.Verification = "inferred"
 				record.Item.Confidence = 0.7
-				record.Item.Path = resolveWorkflowPathNames(deps.Store, inferredPath)
+				record.Item.PathIDs = append([]string(nil), inferredPath...)
+				record.Item.Path = resolveWorkflowPathNames(deps.Store, record.Item.PathIDs)
 			default:
 				record.Item.Verification = "orphaned"
 				record.Item.Confidence = 0.3
@@ -4796,11 +4801,13 @@ func verifyWorkflowHandler(deps ToolDeps, p AssembleContextParams) (interface{},
 			case len(directPath) > 0:
 				record.Item.Verification = "confirmed"
 				record.Item.Confidence = 1.0
-				record.Item.Path = resolveWorkflowPathNames(deps.Store, directPath)
+				record.Item.PathIDs = append([]string(nil), directPath...)
+				record.Item.Path = resolveWorkflowPathNames(deps.Store, record.Item.PathIDs)
 			case len(inferredPath) > 0:
 				record.Item.Verification = "inferred"
 				record.Item.Confidence = 0.7
-				record.Item.Path = resolveWorkflowPathNames(deps.Store, inferredPath)
+				record.Item.PathIDs = append([]string(nil), inferredPath...)
+				record.Item.Path = resolveWorkflowPathNames(deps.Store, record.Item.PathIDs)
 			default:
 				record.Item.Verification = "inferred"
 				record.Item.Confidence = 0.3
@@ -4864,6 +4871,9 @@ func verifyWorkflowHandler(deps ToolDeps, p AssembleContextParams) (interface{},
 func workflowBriefHandler(deps ToolDeps, p AssembleContextParams) (interface{}, error) {
 	if p.Query == "" {
 		return nil, fmt.Errorf("query is required")
+	}
+	if deps.Search == nil {
+		return nil, fmt.Errorf("search engine not initialized")
 	}
 
 	var activeFileNodeIDs []string
@@ -5005,31 +5015,132 @@ func extractCriticalPath(items []types.VerifiedWorkflowItem) []types.CriticalPat
 		return nil
 	}
 
+	bestByID := make(map[string]types.VerifiedWorkflowItem, len(items))
 	bestByName := make(map[string]types.VerifiedWorkflowItem, len(items))
+	pathNameByID := make(map[string]string)
 	for _, item := range items {
+		if item.ID != "" {
+			existing, ok := bestByID[item.ID]
+			if !ok || item.Confidence > existing.Confidence {
+				bestByID[item.ID] = item
+			}
+		}
 		if item.Name == "" {
+			if len(item.PathIDs) > 0 && len(item.Path) == len(item.PathIDs) {
+				for idx, pathID := range item.PathIDs {
+					if pathID == "" {
+						continue
+					}
+					if _, ok := pathNameByID[pathID]; ok {
+						continue
+					}
+					pathName := item.Path[idx]
+					if pathName == "" {
+						continue
+					}
+					pathNameByID[pathID] = pathName
+				}
+			}
 			continue
 		}
 		existing, ok := bestByName[item.Name]
 		if !ok || item.Confidence > existing.Confidence || (item.Confidence == existing.Confidence && item.ID < existing.ID) {
 			bestByName[item.Name] = item
 		}
+		if len(item.PathIDs) > 0 && len(item.Path) == len(item.PathIDs) {
+			for idx, pathID := range item.PathIDs {
+				if pathID == "" {
+					continue
+				}
+				if _, ok := pathNameByID[pathID]; ok {
+					continue
+				}
+				pathName := item.Path[idx]
+				if pathName == "" {
+					continue
+				}
+				pathNameByID[pathID] = pathName
+			}
+		}
 	}
 
-	var bestConfirmedPath []string
+	var bestConfirmedPathIDs []string
+	var bestConfirmedPathNames []string
 	for _, item := range items {
-		if item.Verification != "confirmed" || len(item.Path) == 0 {
+		if item.Verification != "confirmed" {
 			continue
 		}
-		if len(bestConfirmedPath) == 0 || len(item.Path) > len(bestConfirmedPath) ||
-			(len(item.Path) == len(bestConfirmedPath) && strings.Join(item.Path, "|") < strings.Join(bestConfirmedPath, "|")) {
-			bestConfirmedPath = append([]string(nil), item.Path...)
+		if len(item.PathIDs) > 0 {
+			if len(bestConfirmedPathIDs) == 0 || len(item.PathIDs) > len(bestConfirmedPathIDs) ||
+				(len(item.PathIDs) == len(bestConfirmedPathIDs) && strings.Join(item.PathIDs, "|") < strings.Join(bestConfirmedPathIDs, "|")) {
+				bestConfirmedPathIDs = append([]string(nil), item.PathIDs...)
+				if len(item.Path) == len(item.PathIDs) {
+					bestConfirmedPathNames = append([]string(nil), item.Path...)
+				} else {
+					bestConfirmedPathNames = nil
+				}
+			}
+			continue
+		}
+		if len(item.Path) == 0 || len(bestConfirmedPathIDs) > 0 {
+			continue
+		}
+		if len(bestConfirmedPathNames) == 0 || len(item.Path) > len(bestConfirmedPathNames) ||
+			(len(item.Path) == len(bestConfirmedPathNames) && strings.Join(item.Path, "|") < strings.Join(bestConfirmedPathNames, "|")) {
+			bestConfirmedPathNames = append([]string(nil), item.Path...)
 		}
 	}
 
 	criticalPath := make([]types.CriticalPathNode, 0, 6)
-	if len(bestConfirmedPath) > 0 {
-		for _, name := range bestConfirmedPath {
+	if len(bestConfirmedPathIDs) > 0 {
+		for idx, pathID := range bestConfirmedPathIDs {
+			item, ok := bestByID[pathID]
+			if !ok {
+				name := pathNameByID[pathID]
+				if name == "" && idx < len(bestConfirmedPathNames) {
+					name = bestConfirmedPathNames[idx]
+				}
+				if name == "" {
+					name = pathID
+				}
+				criticalPath = append(criticalPath, types.CriticalPathNode{
+					ID:       pathID,
+					Name:     name,
+					Phase:    workflowPhaseOther,
+					Verified: true,
+				})
+			} else {
+				phase := item.Group
+				if phase == "" {
+					phase = workflowPhaseOther
+				}
+				name := item.Name
+				if name == "" {
+					if mappedName, ok := pathNameByID[pathID]; ok && mappedName != "" {
+						name = mappedName
+					} else {
+						name = pathID
+					}
+				}
+				criticalPath = append(criticalPath, types.CriticalPathNode{
+					ID:         item.ID,
+					Name:       name,
+					Phase:      phase,
+					Confidence: item.Confidence,
+					Verified:   true,
+				})
+			}
+			if len(criticalPath) == 6 {
+				break
+			}
+		}
+		if len(criticalPath) == 0 {
+			return nil
+		}
+		return criticalPath
+	}
+	if len(bestConfirmedPathNames) > 0 {
+		for _, name := range bestConfirmedPathNames {
 			item, ok := bestByName[name]
 			if !ok {
 				criticalPath = append(criticalPath, types.CriticalPathNode{
@@ -5169,7 +5280,7 @@ func computeHealthScore(items []types.VerifiedWorkflowItem) (float64, string) {
 }
 
 func extractRiskFlags(items []types.VerifiedWorkflowItem) []types.RiskFlag {
-	flags := make([]types.RiskFlag, 0, 5)
+	flags := make([]types.RiskFlag, 0, len(items))
 	severityRank := map[string]int{
 		"critical": 0,
 		"warning":  1,
@@ -5214,9 +5325,6 @@ func extractRiskFlags(items []types.VerifiedWorkflowItem) []types.RiskFlag {
 			FilePath: item.FilePath,
 			Issue:    issue,
 		})
-		if len(flags) == 5 {
-			break
-		}
 	}
 
 	sort.SliceStable(flags, func(i, j int) bool {
@@ -5227,6 +5335,9 @@ func extractRiskFlags(items []types.VerifiedWorkflowItem) []types.RiskFlag {
 		}
 		return false
 	})
+	if len(flags) > 5 {
+		flags = flags[:5]
+	}
 
 	if len(flags) == 0 {
 		return nil
@@ -6121,6 +6232,9 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 		if p.MaxPerFile == 2 {
 			p.MaxPerFile = 3
 		}
+	}
+	if p.Goal == "workflow_brief" && deps.Search == nil {
+		return nil, fmt.Errorf("search engine not initialized")
 	}
 	if p.Goal == "workflow_brief" {
 		return workflowBriefHandler(deps, p)

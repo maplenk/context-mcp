@@ -250,6 +250,7 @@ type VerifiedWorkflowItem struct {
 	Verification string   `json:"verification"`
 	Confidence   float64  `json:"confidence"`
 	Path         []string `json:"path,omitempty"`
+	PathIDs      []string `json:"path_ids,omitempty"`
 	FailReason   string   `json:"fail_reason,omitempty"`
 }
 

@@ -505,6 +505,9 @@ func TestVerifyWorkflow_FullChain(t *testing.T) {
 	if got, want := strings.Join(routeItem.Path, " -> "), fixture.Route.SymbolName+" -> "+fixture.Handler.SymbolName; got != want {
 		t.Fatalf("route path = %q, want %q", got, want)
 	}
+	if got, want := strings.Join(routeItem.PathIDs, " -> "), fixture.Route.ID+" -> "+fixture.Handler.ID; got != want {
+		t.Fatalf("route path_ids = %q, want %q", got, want)
+	}
 
 	handlerItem := verifiedWorkflowItemByID(t, payload.Items, fixture.Handler.ID)
 	if handlerItem.Verification != "confirmed" || handlerItem.Confidence != 1.0 {
@@ -513,6 +516,9 @@ func TestVerifyWorkflow_FullChain(t *testing.T) {
 	if got, want := strings.Join(handlerItem.Path, " -> "), fixture.Route.SymbolName+" -> "+fixture.Handler.SymbolName; got != want {
 		t.Fatalf("handler path = %q, want %q", got, want)
 	}
+	if got, want := strings.Join(handlerItem.PathIDs, " -> "), fixture.Route.ID+" -> "+fixture.Handler.ID; got != want {
+		t.Fatalf("handler path_ids = %q, want %q", got, want)
+	}
 
 	coreItem := verifiedWorkflowItemByID(t, payload.Items, fixture.Core.ID)
 	if coreItem.Verification != "confirmed" || coreItem.Confidence != 1.0 {
@@ -520,6 +526,9 @@ func TestVerifyWorkflow_FullChain(t *testing.T) {
 	}
 	if got, want := strings.Join(coreItem.Path, " -> "), fixture.Route.SymbolName+" -> "+fixture.Handler.SymbolName+" -> "+fixture.Core.SymbolName; got != want {
 		t.Fatalf("core path = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(coreItem.PathIDs, " -> "), fixture.Route.ID+" -> "+fixture.Handler.ID+" -> "+fixture.Core.ID; got != want {
+		t.Fatalf("core path_ids = %q, want %q", got, want)
 	}
 }
 
@@ -789,6 +798,24 @@ func TestWorkflowBrief_FullChain(t *testing.T) {
 	}
 }
 
+func TestWorkflowBrief_SearchNotInitialized(t *testing.T) {
+	deps, cleanup, _ := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	deps.Search = nil
+
+	_, err := assembleContextHandler(deps, AssembleContextParams{
+		Query: "order workflow",
+		Goal:  "workflow_brief",
+	})
+	if err == nil {
+		t.Fatal("expected search initialization error for workflow_brief")
+	}
+	if !strings.Contains(err.Error(), "search engine not initialized") {
+		t.Fatalf("error = %v, want search engine not initialized", err)
+	}
+}
+
 func TestWorkflowBrief_NarrativeContainsPath(t *testing.T) {
 	criticalPath := []types.CriticalPathNode{
 		{ID: "route", Name: "POST /v1/orders", Phase: workflowPhaseEntry, Confidence: 1.0, Verified: true},
@@ -850,6 +877,29 @@ func TestWorkflowBrief_RiskFlags(t *testing.T) {
 	unresolved := workflowBriefRiskFlagBySymbol(t, flags, "POST /v1/pending-orders")
 	if unresolved.Severity != "info" || unresolved.FilePath != "routes.go" {
 		t.Fatalf("unresolved flag = %#v, want info severity with file path", unresolved)
+	}
+}
+
+func TestWorkflowBrief_RiskFlagsSortBeforeCap(t *testing.T) {
+	items := []types.VerifiedWorkflowItem{
+		{ID: "info-1", Name: "UnresolvedA", FilePath: "a.go", Verification: "unresolved", Confidence: 0.3},
+		{ID: "warn-1", Name: "OrphanA", FilePath: "b.go", Verification: "orphaned", Confidence: 0.3},
+		{ID: "info-2", Name: "UnresolvedB", FilePath: "c.go", Verification: "unresolved", Confidence: 0.3},
+		{ID: "warn-2", Name: "UnreachableA", FilePath: "d.go", Verification: "unreachable", Confidence: 0.3},
+		{ID: "info-3", Name: "UnresolvedC", FilePath: "e.go", Verification: "unresolved", Confidence: 0.3},
+		{ID: "critical-late", Name: "BrokenLate", FilePath: "z.go", Verification: "broken", Confidence: 0.0},
+	}
+
+	flags := extractRiskFlags(items)
+	if len(flags) != 5 {
+		t.Fatalf("risk flags = %#v, want cap of 5", flags)
+	}
+	if flags[0].Severity != "critical" {
+		t.Fatalf("risk flags = %#v, want critical severity first even when discovered late", flags)
+	}
+	critical := workflowBriefRiskFlagBySymbol(t, flags, "BrokenLate")
+	if critical.Severity != "critical" || critical.FilePath != "z.go" {
+		t.Fatalf("critical late flag = %#v, want retained critical issue", critical)
 	}
 }
 
@@ -981,6 +1031,99 @@ func TestWorkflowBrief_CriticalPathExtraction(t *testing.T) {
 		if !node.Verified {
 			t.Fatalf("critical path node = %#v, want verified=true for confirmed path", node)
 		}
+	}
+}
+
+func TestWorkflowBrief_CriticalPathPrefersStableIDsOverDuplicateNames(t *testing.T) {
+	items := []types.VerifiedWorkflowItem{
+		{
+			ID:           "route-id",
+			Name:         "POST /v1/orders",
+			Group:        workflowPhaseEntry,
+			Verification: "confirmed",
+			Confidence:   1.0,
+			Path:         []string{"POST /v1/orders", "HandleOrders", "ProcessOrder"},
+			PathIDs:      []string{"route-id", "handler-right", "core-id"},
+		},
+		{
+			ID:           "handler-right",
+			Name:         "HandleOrders",
+			Group:        workflowPhaseCore,
+			Verification: "confirmed",
+			Confidence:   0.7,
+			Path:         []string{"POST /v1/orders", "HandleOrders"},
+			PathIDs:      []string{"route-id", "handler-right"},
+		},
+		{
+			ID:           "handler-wrong",
+			Name:         "HandleOrders",
+			Group:        workflowPhaseCore,
+			Verification: "unresolved",
+			Confidence:   0.99,
+		},
+		{
+			ID:           "core-id",
+			Name:         "ProcessOrder",
+			Group:        workflowPhaseCore,
+			Verification: "confirmed",
+			Confidence:   1.0,
+			Path:         []string{"POST /v1/orders", "HandleOrders", "ProcessOrder"},
+			PathIDs:      []string{"route-id", "handler-right", "core-id"},
+		},
+	}
+
+	path := extractCriticalPath(items)
+	if len(path) != 3 {
+		t.Fatalf("critical path = %#v, want 3 nodes", path)
+	}
+	if path[1].ID != "handler-right" {
+		t.Fatalf("critical path = %#v, want duplicate name resolved to stable path ID handler-right", path)
+	}
+}
+
+func TestWorkflowBrief_CriticalPathUntargetedIntermediateKeepsID(t *testing.T) {
+	items := []types.VerifiedWorkflowItem{
+		{
+			ID:           "route-id",
+			Name:         "POST /v1/orders",
+			Group:        workflowPhaseEntry,
+			Verification: "confirmed",
+			Confidence:   1.0,
+			Path:         []string{"POST /v1/orders", "HandleOrders", "NormalizeOrder", "ProcessOrder"},
+			PathIDs:      []string{"route-id", "handler-id", "normalize-id", "core-id"},
+		},
+		{
+			ID:           "handler-id",
+			Name:         "HandleOrders",
+			Group:        workflowPhaseCore,
+			Verification: "confirmed",
+			Confidence:   1.0,
+			Path:         []string{"POST /v1/orders", "HandleOrders"},
+			PathIDs:      []string{"route-id", "handler-id"},
+		},
+		{
+			ID:           "core-id",
+			Name:         "ProcessOrder",
+			Group:        workflowPhaseCore,
+			Verification: "confirmed",
+			Confidence:   1.0,
+			Path:         []string{"POST /v1/orders", "HandleOrders", "NormalizeOrder", "ProcessOrder"},
+			PathIDs:      []string{"route-id", "handler-id", "normalize-id", "core-id"},
+		},
+	}
+
+	path := extractCriticalPath(items)
+	if len(path) != 4 {
+		t.Fatalf("critical path = %#v, want 4 nodes including intermediate hop", path)
+	}
+	if path[2].ID != "normalize-id" {
+		t.Fatalf("critical path = %#v, want untargeted intermediate to keep graph ID normalize-id", path)
+	}
+	if path[2].Name != "NormalizeOrder" {
+		t.Fatalf("critical path intermediate = %#v, want display name from resolved path names", path[2])
+	}
+	if !path[2].Verified {
+		t.Fatalf("critical path intermediate = %#v, want verified=true for confirmed path hop", path[2])
 	}
 }
 
