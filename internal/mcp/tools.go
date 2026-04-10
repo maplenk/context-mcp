@@ -494,7 +494,7 @@ type AssembleContextParams struct {
 	MaxPerFile       int      `json:"max_per_file,omitempty" jsonschema:"description=Maximum results per file (default: 2)"`
 	IncludeNeighbors bool     `json:"include_neighbors,omitempty" jsonschema:"description=Include callers/callees of top results (default: false)"`
 	Compact          bool     `json:"compact,omitempty" jsonschema:"description=Return compact output: IDs, scores, and line spans only. Drops reasons, next-tool hints, and verbose prose."`
-	Goal             string   `json:"goal,omitempty" jsonschema:"description=Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow, verify_workflow"`
+	Goal             string   `json:"goal,omitempty" jsonschema:"description=Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow, verify_workflow, workflow_brief"`
 	Targets          []string `json:"targets,omitempty" jsonschema:"description=Optional symbol or route references used with goal-aware assembly"`
 }
 
@@ -4861,6 +4861,475 @@ func verifyWorkflowHandler(deps ToolDeps, p AssembleContextParams) (interface{},
 	}, nil
 }
 
+func workflowBriefHandler(deps ToolDeps, p AssembleContextParams) (interface{}, error) {
+	if p.Query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+
+	var activeFileNodeIDs []string
+	for _, filePath := range p.ActiveFiles {
+		nodeIDs, err := deps.Store.GetNodeIDsByFile(filePath)
+		if err == nil {
+			activeFileNodeIDs = append(activeFileNodeIDs, nodeIDs...)
+		}
+	}
+
+	traceParams := p
+	traceParams.Goal = "trace_workflow"
+	goalResults, _, err := collectGoalAwareCandidates(deps, traceParams, activeFileNodeIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	targetIDs := make([]string, 0, len(goalResults))
+	for _, candidate := range goalResults {
+		if candidate.Result.Node.ID != "" {
+			targetIDs = append(targetIDs, candidate.Result.Node.ID)
+		}
+	}
+	targetIDs = uniqueNodeIDs(targetIDs)
+
+	if len(targetIDs) == 0 {
+		return types.WorkflowBriefResponse{
+			Query:       p.Query,
+			Narrative:   buildWorkflowNarrative(p.Query, nil, nil, nil, "low"),
+			HealthScore: 0,
+			Confidence:  "low",
+			PhaseCounts: map[string]int{},
+			Strategy:    "workflow_brief empty",
+		}, nil
+	}
+
+	verifyResult, err := verifyWorkflowHandler(deps, AssembleContextParams{
+		Query:   p.Query,
+		Goal:    "verify_workflow",
+		Targets: targetIDs,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	verifyResp, ok := verifyResult.(types.VerifyWorkflowResponse)
+	if !ok {
+		return nil, fmt.Errorf("unexpected verify workflow response type %T", verifyResult)
+	}
+
+	phaseCounts := make(map[string]int)
+	for _, item := range verifyResp.Items {
+		phase := item.Group
+		if phase == "" {
+			phase = workflowPhaseOther
+		}
+		phaseCounts[phase]++
+	}
+
+	criticalPath := extractCriticalPath(verifyResp.Items)
+	healthScore, confidence := computeHealthScore(verifyResp.Items)
+	riskFlags := extractRiskFlags(verifyResp.Items)
+	narrative := buildWorkflowNarrative(p.Query, criticalPath, phaseCounts, riskFlags, confidence)
+
+	strategy := "workflow_brief fallback_path"
+	allVerified := len(criticalPath) > 0
+	for _, node := range criticalPath {
+		if !node.Verified {
+			allVerified = false
+			break
+		}
+	}
+	if len(criticalPath) == 0 {
+		strategy = "workflow_brief empty"
+	} else if allVerified {
+		strategy = "workflow_brief verified_path"
+	}
+
+	hasCriticalRisk := false
+	for _, flag := range riskFlags {
+		if flag.Severity == "critical" {
+			hasCriticalRisk = true
+			break
+		}
+	}
+
+	var recommendedSteps []types.RecommendedStep
+	if healthScore < 0.8 || hasCriticalRisk {
+		repairSteps := make([]types.RecommendedStep, 0, len(verifyResp.RecommendedSteps))
+		exploratorySteps := make([]types.RecommendedStep, 0, len(verifyResp.RecommendedSteps))
+		for _, step := range verifyResp.RecommendedSteps {
+			switch step.Tool {
+			case "trace_route", "trace_call_path", "assemble_context":
+				repairSteps = append(repairSteps, step)
+			default:
+				exploratorySteps = append(exploratorySteps, step)
+			}
+		}
+
+		ordered := append(repairSteps, exploratorySteps...)
+		if len(ordered) == 0 && len(criticalPath) > 0 {
+			ordered = append(ordered, types.RecommendedStep{
+				Tool:   "read_symbol",
+				Reason: "Inspect the strongest workflow anchor to validate call and state assumptions",
+				Args: map[string]string{
+					"symbol_id": criticalPath[0].ID,
+					"mode":      "flow_summary",
+				},
+			})
+		}
+		if len(ordered) == 1 && len(criticalPath) > 1 {
+			ordered = append(ordered, types.RecommendedStep{
+				Tool:   "trace_call_path",
+				Reason: "Trace whether the representative endpoints have a concrete graph path",
+				Args: map[string]string{
+					"from": criticalPath[0].ID,
+					"to":   criticalPath[len(criticalPath)-1].ID,
+				},
+			})
+		}
+		recommendedSteps = dedupeRecommendedSteps(ordered, 2)
+	}
+
+	return types.WorkflowBriefResponse{
+		Query:            p.Query,
+		Narrative:        narrative,
+		CriticalPath:     criticalPath,
+		HealthScore:      healthScore,
+		Confidence:       confidence,
+		PhaseCounts:      phaseCounts,
+		RiskFlags:        riskFlags,
+		Strategy:         strategy,
+		RecommendedSteps: recommendedSteps,
+	}, nil
+}
+
+func extractCriticalPath(items []types.VerifiedWorkflowItem) []types.CriticalPathNode {
+	if len(items) == 0 {
+		return nil
+	}
+
+	bestByName := make(map[string]types.VerifiedWorkflowItem, len(items))
+	for _, item := range items {
+		if item.Name == "" {
+			continue
+		}
+		existing, ok := bestByName[item.Name]
+		if !ok || item.Confidence > existing.Confidence || (item.Confidence == existing.Confidence && item.ID < existing.ID) {
+			bestByName[item.Name] = item
+		}
+	}
+
+	var bestConfirmedPath []string
+	for _, item := range items {
+		if item.Verification != "confirmed" || len(item.Path) == 0 {
+			continue
+		}
+		if len(bestConfirmedPath) == 0 || len(item.Path) > len(bestConfirmedPath) ||
+			(len(item.Path) == len(bestConfirmedPath) && strings.Join(item.Path, "|") < strings.Join(bestConfirmedPath, "|")) {
+			bestConfirmedPath = append([]string(nil), item.Path...)
+		}
+	}
+
+	criticalPath := make([]types.CriticalPathNode, 0, 6)
+	if len(bestConfirmedPath) > 0 {
+		for _, name := range bestConfirmedPath {
+			item, ok := bestByName[name]
+			if !ok {
+				criticalPath = append(criticalPath, types.CriticalPathNode{
+					ID:       name,
+					Name:     name,
+					Phase:    workflowPhaseOther,
+					Verified: true,
+				})
+			} else {
+				phase := item.Group
+				if phase == "" {
+					phase = workflowPhaseOther
+				}
+				criticalPath = append(criticalPath, types.CriticalPathNode{
+					ID:         item.ID,
+					Name:       item.Name,
+					Phase:      phase,
+					Confidence: item.Confidence,
+					Verified:   true,
+				})
+			}
+			if len(criticalPath) == 6 {
+				break
+			}
+		}
+		if len(criticalPath) == 0 {
+			return nil
+		}
+		return criticalPath
+	}
+
+	phaseOrder := []string{
+		workflowPhaseEntry,
+		workflowPhaseCore,
+		workflowPhaseState,
+		workflowPhaseAsync,
+		workflowPhaseOther,
+	}
+	bestByPhase := make(map[string]types.VerifiedWorkflowItem, len(phaseOrder))
+	for _, item := range items {
+		phase := item.Group
+		if phase == "" {
+			phase = workflowPhaseOther
+		}
+		if _, ok := workflowPhaseRank[phase]; !ok {
+			phase = workflowPhaseOther
+		}
+		existing, ok := bestByPhase[phase]
+		if !ok || item.Confidence > existing.Confidence || (item.Confidence == existing.Confidence && item.ID < existing.ID) {
+			bestByPhase[phase] = item
+		}
+	}
+
+	for _, phase := range phaseOrder {
+		item, ok := bestByPhase[phase]
+		if !ok {
+			continue
+		}
+		name := item.Name
+		if name == "" {
+			name = item.ID
+		}
+		criticalPath = append(criticalPath, types.CriticalPathNode{
+			ID:         item.ID,
+			Name:       name,
+			Phase:      phase,
+			Confidence: item.Confidence,
+			Verified:   false,
+		})
+		if len(criticalPath) == 6 {
+			break
+		}
+	}
+
+	if len(criticalPath) == 0 {
+		return nil
+	}
+	return criticalPath
+}
+
+func computeHealthScore(items []types.VerifiedWorkflowItem) (float64, string) {
+	if len(items) == 0 {
+		return 0, "low"
+	}
+
+	phaseWeights := map[string]float64{
+		workflowPhaseEntry: 2.0,
+		workflowPhaseCore:  1.5,
+		workflowPhaseState: 1.0,
+		workflowPhaseAsync: 1.0,
+		workflowPhaseOther: 0.5,
+	}
+
+	phaseTotals := make(map[string]float64)
+	phaseCounts := make(map[string]int)
+	for _, item := range items {
+		phase := item.Group
+		if _, ok := phaseWeights[phase]; !ok {
+			phase = workflowPhaseOther
+		}
+		phaseTotals[phase] += item.Confidence
+		phaseCounts[phase]++
+	}
+
+	numerator := 0.0
+	denominator := 0.0
+	for phase, count := range phaseCounts {
+		if count == 0 {
+			continue
+		}
+		avg := phaseTotals[phase] / float64(count)
+		weight := phaseWeights[phase]
+		numerator += avg * weight
+		denominator += weight
+	}
+
+	if denominator == 0 {
+		return 0, "low"
+	}
+
+	score := numerator / denominator
+	if score < 0 {
+		score = 0
+	}
+	if score > 1 {
+		score = 1
+	}
+
+	switch {
+	case score >= 0.8:
+		return score, "high"
+	case score >= 0.5:
+		return score, "medium"
+	default:
+		return score, "low"
+	}
+}
+
+func extractRiskFlags(items []types.VerifiedWorkflowItem) []types.RiskFlag {
+	flags := make([]types.RiskFlag, 0, 5)
+	severityRank := map[string]int{
+		"critical": 0,
+		"warning":  1,
+		"info":     2,
+	}
+
+	for _, item := range items {
+		var severity string
+		switch item.Verification {
+		case "broken":
+			severity = "critical"
+		case "orphaned", "unreachable":
+			severity = "warning"
+		case "unresolved":
+			severity = "info"
+		}
+		if severity == "" {
+			continue
+		}
+
+		issue := item.FailReason
+		if issue == "" {
+			switch item.Verification {
+			case "broken":
+				issue = "node not found in index"
+			case "orphaned":
+				issue = "no path from confirmed core items"
+			case "unreachable":
+				issue = "no call path from confirmed entry handlers"
+			case "unresolved":
+				issue = "workflow phase could not be verified"
+			}
+		}
+
+		symbol := item.Name
+		if symbol == "" {
+			symbol = item.ID
+		}
+		flags = append(flags, types.RiskFlag{
+			Severity: severity,
+			Symbol:   symbol,
+			FilePath: item.FilePath,
+			Issue:    issue,
+		})
+		if len(flags) == 5 {
+			break
+		}
+	}
+
+	sort.SliceStable(flags, func(i, j int) bool {
+		leftRank := severityRank[flags[i].Severity]
+		rightRank := severityRank[flags[j].Severity]
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return false
+	})
+
+	if len(flags) == 0 {
+		return nil
+	}
+	return flags
+}
+
+func buildWorkflowNarrative(
+	query string,
+	criticalPath []types.CriticalPathNode,
+	phaseCounts map[string]int,
+	riskFlags []types.RiskFlag,
+	healthLabel string,
+) string {
+	if len(criticalPath) == 0 {
+		return fmt.Sprintf("No grounded workflow evidence found for '%s'. Try a narrower concept, a specific route, or a module name.", query)
+	}
+
+	var builder strings.Builder
+	firstName := criticalPath[0].Name
+	lastName := criticalPath[len(criticalPath)-1].Name
+	if firstName == "" {
+		firstName = criticalPath[0].ID
+	}
+	if lastName == "" {
+		lastName = criticalPath[len(criticalPath)-1].ID
+	}
+
+	if criticalPath[0].Verified {
+		switch len(criticalPath) {
+		case 1:
+			builder.WriteString(fmt.Sprintf("%s centers on %s.", query, firstName))
+		case 2:
+			builder.WriteString(fmt.Sprintf("%s flows from %s to %s.", query, firstName, lastName))
+		default:
+			midName := criticalPath[1].Name
+			if midName == "" {
+				midName = criticalPath[1].ID
+			}
+			builder.WriteString(fmt.Sprintf("%s flows from %s through %s to %s.", query, firstName, midName, lastName))
+		}
+	} else {
+		names := make([]string, 0, len(criticalPath))
+		for _, node := range criticalPath {
+			name := node.Name
+			if name == "" {
+				name = node.ID
+			}
+			names = append(names, name)
+		}
+		builder.WriteString(fmt.Sprintf("The workflow for %s involves %s but the full call chain could not be verified.", query, strings.Join(names, ", ")))
+	}
+
+	phaseSummary := make([]string, 0, 5)
+	if phaseCounts[workflowPhaseEntry] > 0 {
+		phaseSummary = append(phaseSummary, fmt.Sprintf("%d entry points", phaseCounts[workflowPhaseEntry]))
+	}
+	if phaseCounts[workflowPhaseCore] > 0 {
+		phaseSummary = append(phaseSummary, fmt.Sprintf("%d core logic symbols", phaseCounts[workflowPhaseCore]))
+	}
+	if phaseCounts[workflowPhaseState] > 0 {
+		phaseSummary = append(phaseSummary, fmt.Sprintf("%d state/data symbols", phaseCounts[workflowPhaseState]))
+	}
+	if phaseCounts[workflowPhaseAsync] > 0 {
+		phaseSummary = append(phaseSummary, fmt.Sprintf("%d async symbols", phaseCounts[workflowPhaseAsync]))
+	}
+	if phaseCounts[workflowPhaseOther] > 0 {
+		phaseSummary = append(phaseSummary, fmt.Sprintf("%d other symbols", phaseCounts[workflowPhaseOther]))
+	}
+	if len(phaseSummary) > 0 {
+		builder.WriteString(" ")
+		builder.WriteString(fmt.Sprintf("The workflow spans %s.", strings.Join(phaseSummary, ", ")))
+	}
+
+	builder.WriteString(" ")
+	switch healthLabel {
+	case "high":
+		builder.WriteString("All primary paths are graph-verified.")
+	case "medium":
+		builder.WriteString("Most paths verified but some gaps remain.")
+	default:
+		builder.WriteString("Significant verification gaps; the graph could not confirm several connections.")
+	}
+
+	if len(riskFlags) > 0 {
+		firstRisk := riskFlags[0]
+		riskDesc := firstRisk.Symbol
+		if riskDesc == "" {
+			riskDesc = "unknown symbol"
+		}
+		if firstRisk.FilePath != "" {
+			riskDesc = fmt.Sprintf("%s (%s)", riskDesc, firstRisk.FilePath)
+		}
+		if firstRisk.Issue != "" {
+			riskDesc = fmt.Sprintf("%s: %s", riskDesc, firstRisk.Issue)
+		}
+		builder.WriteString(" ")
+		builder.WriteString(fmt.Sprintf("%d issue(s): %s.", len(riskFlags), riskDesc))
+	}
+
+	return strings.TrimSpace(builder.String())
+}
+
 func applyGoalCandidatePerFileCap(candidates []goalCandidate, maxPerFile int) []goalCandidate {
 	if maxPerFile <= 0 {
 		return candidates
@@ -5642,7 +6111,7 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 	if p.MaxPerFile == 0 {
 		p.MaxPerFile = 2
 	}
-	if p.Goal == "trace_workflow" {
+	if p.Goal == "trace_workflow" || p.Goal == "workflow_brief" {
 		if p.BudgetTokens == 4000 {
 			p.BudgetTokens = 12000
 		}
@@ -5652,6 +6121,9 @@ func assembleContextHandler(deps ToolDeps, p AssembleContextParams) (interface{}
 		if p.MaxPerFile == 2 {
 			p.MaxPerFile = 3
 		}
+	}
+	if p.Goal == "workflow_brief" {
+		return workflowBriefHandler(deps, p)
 	}
 	if p.Goal == "verify_workflow" {
 		return verifyWorkflowHandler(deps, p)
@@ -5898,7 +6370,7 @@ func generateModeContent(repoRoot string, node types.ASTNode, mode string) strin
 }
 
 func registerAssembleContextTool(s *Server, deps ToolDeps) {
-	desc := "Token-budgeted context assembly. Returns ranked code snippets fitted within a token budget. Use when you need to gather context efficiently within a token limit. Use goal=trace_workflow for broad questions like 'how does X work', 'entire flow', or 'pipeline', and goal=verify_workflow to validate a workflow skeleton against concrete graph edges."
+	desc := "Token-budgeted context assembly. Returns ranked code snippets fitted within a token budget. Use when you need to gather context efficiently within a token limit. Use goal=trace_workflow for broad questions like 'how does X work', 'entire flow', or 'pipeline', and goal=verify_workflow to validate a workflow skeleton against concrete graph edges, and goal=workflow_brief for a single-call verified workflow summary."
 
 	// CLI handler
 	cliHandler := func(params json.RawMessage) (interface{}, error) {
@@ -5925,8 +6397,8 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 				"compact":           map[string]interface{}{"type": "boolean", "description": "Return compact output: IDs, scores, and line spans only"},
 				"goal": map[string]interface{}{
 					"type":        "string",
-					"description": "Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow, verify_workflow",
-					"enum":        []string{"inspect_symbol", "compare_symbols", "find_routes", "trace_route", "compare_routes", "trace_workflow", "verify_workflow"},
+					"description": "Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow, verify_workflow, workflow_brief",
+					"enum":        []string{"inspect_symbol", "compare_symbols", "find_routes", "trace_route", "compare_routes", "trace_workflow", "verify_workflow", "workflow_brief"},
 				},
 				"targets": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional goal-specific route/symbol refs"},
 			},
@@ -5946,7 +6418,7 @@ func registerAssembleContextTool(s *Server, deps ToolDeps) {
 		mcp.WithNumber("max_per_file", mcp.Description("Maximum results per file (default: 2)")),
 		mcp.WithBoolean("include_neighbors", mcp.Description("Include callers/callees of top results")),
 		mcp.WithBoolean("compact", mcp.Description("Return compact output: IDs, scores, and line spans only")),
-		mcp.WithString("goal", mcp.Description("Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow, verify_workflow")),
+		mcp.WithString("goal", mcp.Description("Optional task shape: inspect_symbol, compare_symbols, find_routes, trace_route, compare_routes, trace_workflow, verify_workflow, workflow_brief")),
 		mcp.WithArray("targets", mcp.Description("Optional goal-specific route/symbol refs"), mcp.WithStringItems()),
 	)
 	tool.Meta = &mcp.Meta{

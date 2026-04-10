@@ -262,6 +262,36 @@ type VerifyWorkflowResponse struct {
 	RecommendedSteps []RecommendedStep      `json:"recommended_steps,omitempty"`
 }
 
+// WorkflowBriefResponse is a concise, grounded workflow summary synthesized from verified items.
+type WorkflowBriefResponse struct {
+	Query            string             `json:"query"`
+	Narrative        string             `json:"narrative"`
+	CriticalPath     []CriticalPathNode `json:"critical_path"`
+	HealthScore      float64            `json:"health_score"`
+	Confidence       string             `json:"confidence"`
+	PhaseCounts      map[string]int     `json:"phase_counts"`
+	RiskFlags        []RiskFlag         `json:"risk_flags,omitempty"`
+	Strategy         string             `json:"strategy"`
+	RecommendedSteps []RecommendedStep  `json:"recommended_steps,omitempty"`
+}
+
+// CriticalPathNode is a workflow node used in the brief critical path representation.
+type CriticalPathNode struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Phase      string  `json:"phase"`
+	Confidence float64 `json:"confidence"`
+	Verified   bool    `json:"verified"`
+}
+
+// RiskFlag captures verification gaps and failures that affect workflow trust.
+type RiskFlag struct {
+	Severity string `json:"severity"`
+	Symbol   string `json:"symbol"`
+	FilePath string `json:"file_path,omitempty"`
+	Issue    string `json:"issue"`
+}
+
 // RiskLevel represents the severity of impact from a change
 type RiskLevel string
 
