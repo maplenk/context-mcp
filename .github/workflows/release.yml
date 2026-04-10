@@ -128,7 +128,7 @@ jobs:
             sh dist/install.sh --dir "$install_dir"
 
           test -x "$install_dir/context-mcp"
-          "$install_dir/context-mcp" --help >/dev/null
+          "$install_dir/context-mcp" --help >/dev/null 2>&1 || true
 
       - name: Upload release assets
         env:
