@@ -4872,6 +4872,7 @@ func workflowBriefHandler(deps ToolDeps, p AssembleContextParams) (interface{}, 
 	if p.Query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
+	// Defense-in-depth: dispatch also checks this, but handler may be called directly.
 	if deps.Search == nil {
 		return nil, fmt.Errorf("search engine not initialized")
 	}
@@ -4938,6 +4939,11 @@ func workflowBriefHandler(deps ToolDeps, p AssembleContextParams) (interface{}, 
 	riskFlags := extractRiskFlags(verifyResp.Items)
 	narrative := buildWorkflowNarrative(p.Query, criticalPath, phaseCounts, riskFlags, confidence)
 
+	const maxNarrativeLen = 1024
+	if len(narrative) > maxNarrativeLen {
+		narrative = narrative[:maxNarrativeLen-3] + "..."
+	}
+
 	strategy := "workflow_brief fallback_path"
 	allVerified := len(criticalPath) > 0
 	for _, node := range criticalPath {
@@ -4973,7 +4979,9 @@ func workflowBriefHandler(deps ToolDeps, p AssembleContextParams) (interface{}, 
 			}
 		}
 
-		ordered := append(repairSteps, exploratorySteps...)
+		ordered := make([]types.RecommendedStep, 0, len(repairSteps)+len(exploratorySteps))
+		ordered = append(ordered, repairSteps...)
+		ordered = append(ordered, exploratorySteps...)
 		if len(ordered) == 0 && len(criticalPath) > 0 {
 			ordered = append(ordered, types.RecommendedStep{
 				Tool:   "read_symbol",
@@ -5221,6 +5229,9 @@ func extractCriticalPath(items []types.VerifiedWorkflowItem) []types.CriticalPat
 	return criticalPath
 }
 
+// computeHealthScore computes a coarse workflow-trust indicator from verified items.
+// It uses per-phase average confidence weighted by phase importance, so that a single
+// phase with many weak items does not dominate the score over phases with fewer strong items.
 func computeHealthScore(items []types.VerifiedWorkflowItem) (float64, string) {
 	if len(items) == 0 {
 		return 0, "low"
