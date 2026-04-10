@@ -5,6 +5,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -229,6 +230,25 @@ func recommendedStepByTool(steps []types.RecommendedStep, tool string) (types.Re
 		}
 	}
 	return types.RecommendedStep{}, false
+}
+
+func workflowBriefRiskFlagBySymbol(t *testing.T, flags []types.RiskFlag, symbol string) types.RiskFlag {
+	t.Helper()
+	for _, flag := range flags {
+		if flag.Symbol == symbol {
+			return flag
+		}
+	}
+	t.Fatalf("workflow brief risk flag %q not found", symbol)
+	return types.RiskFlag{}
+}
+
+func workflowBriefPhaseTotal(counts map[string]int) int {
+	total := 0
+	for _, count := range counts {
+		total += count
+	}
+	return total
 }
 
 func TestAssembleContext_TraceWorkflow(t *testing.T) {
@@ -701,6 +721,476 @@ func TestVerifyWorkflow_OutputOrder(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("output order = %#v, want %#v", got, want)
+	}
+}
+
+func TestWorkflowBrief_FullChain(t *testing.T) {
+	deps, cleanup, fixture := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	result, err := workflowBriefHandler(deps, AssembleContextParams{
+		Query: "order workflow",
+		Goal:  "workflow_brief",
+	})
+	if err != nil {
+		t.Fatalf("workflowBriefHandler error: %v", err)
+	}
+
+	resp := result.(types.WorkflowBriefResponse)
+	if resp.Query != "order workflow" {
+		t.Fatalf("query = %q, want %q", resp.Query, "order workflow")
+	}
+	if resp.Strategy != "workflow_brief verified_path" {
+		t.Fatalf("strategy = %q, want verified_path", resp.Strategy)
+	}
+	if len(resp.CriticalPath) < 3 {
+		t.Fatalf("critical path = %#v, want at least route, handler, core", resp.CriticalPath)
+	}
+	if workflowBriefPhaseTotal(resp.PhaseCounts) <= len(resp.CriticalPath) {
+		t.Fatalf("phase counts = %#v, want counts for all verified items rather than only the critical path", resp.PhaseCounts)
+	}
+	if resp.HealthScore <= 0 {
+		t.Fatalf("health_score = %v, want > 0", resp.HealthScore)
+	}
+	if resp.Confidence == "" || resp.Confidence == "low" {
+		t.Fatalf("confidence = %q, want medium or high for grounded verified path", resp.Confidence)
+	}
+	if resp.Narrative == "" {
+		t.Fatal("expected non-empty narrative")
+	}
+	if len(resp.RecommendedSteps) > 2 {
+		t.Fatalf("recommended steps = %#v, want cap of 2", resp.RecommendedSteps)
+	}
+
+	verifiedCount := 0
+	foundRoute := false
+	foundHandler := false
+	foundCore := false
+	for _, node := range resp.CriticalPath {
+		if !node.Verified {
+			t.Fatalf("critical path node = %#v, want verified path nodes", node)
+		}
+		if node.Name == fixture.Route.SymbolName {
+			foundRoute = true
+		}
+		if node.Name == fixture.Handler.SymbolName {
+			foundHandler = true
+		}
+		if node.Name == fixture.Core.SymbolName {
+			foundCore = true
+		}
+		verifiedCount++
+	}
+	if verifiedCount != len(resp.CriticalPath) {
+		t.Fatalf("verified nodes = %d, want %d", verifiedCount, len(resp.CriticalPath))
+	}
+	if !foundRoute || !foundHandler || !foundCore {
+		t.Fatalf("critical path = %#v, want route %q, handler %q, and core %q", resp.CriticalPath, fixture.Route.SymbolName, fixture.Handler.SymbolName, fixture.Core.SymbolName)
+	}
+}
+
+func TestWorkflowBrief_NarrativeContainsPath(t *testing.T) {
+	criticalPath := []types.CriticalPathNode{
+		{ID: "route", Name: "POST /v1/orders", Phase: workflowPhaseEntry, Confidence: 1.0, Verified: true},
+		{ID: "handler", Name: "HandleOrders", Phase: workflowPhaseCore, Confidence: 1.0, Verified: true},
+		{ID: "core", Name: "ProcessOrder", Phase: workflowPhaseCore, Confidence: 1.0, Verified: true},
+		{ID: "state", Name: "OrderRepository", Phase: workflowPhaseState, Confidence: 1.0, Verified: true},
+	}
+
+	narrative := buildWorkflowNarrative(
+		"order creation",
+		criticalPath,
+		map[string]int{
+			workflowPhaseEntry: 1,
+			workflowPhaseCore:  2,
+			workflowPhaseState: 1,
+		},
+		nil,
+		"high",
+	)
+
+	if !strings.Contains(narrative, "order creation") {
+		t.Fatalf("narrative = %q, want query text", narrative)
+	}
+	if !strings.Contains(narrative, "POST /v1/orders") || !strings.Contains(narrative, "HandleOrders") || !strings.Contains(narrative, "OrderRepository") {
+		t.Fatalf("narrative = %q, want critical path symbol names", narrative)
+	}
+	if !strings.Contains(narrative, "All primary paths are graph-verified.") {
+		t.Fatalf("narrative = %q, want high-confidence health clause", narrative)
+	}
+}
+
+func TestWorkflowBrief_RiskFlags(t *testing.T) {
+	items := []types.VerifiedWorkflowItem{
+		{ID: "broken-route", Name: "POST /v1/broken-orders", FilePath: "routes.go", Group: workflowPhaseEntry, Verification: "broken", Confidence: 0.0},
+		{ID: "broken-core", Name: "ApplyOrderDiscount", FilePath: "discounts.go", Group: workflowPhaseCore, Verification: "broken", Confidence: 0.0},
+		{ID: "orphan-state", Name: "AuditStore", FilePath: "repo.go", Group: workflowPhaseState, Verification: "orphaned", Confidence: 0.3},
+		{ID: "unreachable-core", Name: "ReconcileOrders", FilePath: "reconcile.go", Group: workflowPhaseCore, Verification: "unreachable", Confidence: 0.3},
+		{ID: "unresolved-entry", Name: "POST /v1/pending-orders", FilePath: "routes.go", Group: workflowPhaseEntry, Verification: "unresolved", Confidence: 0.3},
+	}
+
+	flags := extractRiskFlags(items)
+	if len(flags) != 5 {
+		t.Fatalf("risk flags = %#v, want cap of 5", flags)
+	}
+	if flags[0].Severity != "critical" || flags[1].Severity != "critical" {
+		t.Fatalf("risk flags = %#v, want critical issues first", flags)
+	}
+
+	broken := workflowBriefRiskFlagBySymbol(t, flags, "POST /v1/broken-orders")
+	if broken.Severity != "critical" || broken.FilePath != "routes.go" {
+		t.Fatalf("broken flag = %#v, want critical severity with file path", broken)
+	}
+
+	orphan := workflowBriefRiskFlagBySymbol(t, flags, "AuditStore")
+	if orphan.Severity != "warning" || orphan.FilePath != "repo.go" {
+		t.Fatalf("orphan flag = %#v, want warning severity with file path", orphan)
+	}
+
+	unresolved := workflowBriefRiskFlagBySymbol(t, flags, "POST /v1/pending-orders")
+	if unresolved.Severity != "info" || unresolved.FilePath != "routes.go" {
+		t.Fatalf("unresolved flag = %#v, want info severity with file path", unresolved)
+	}
+}
+
+func TestWorkflowBrief_EmptyResults(t *testing.T) {
+	deps, cleanup := newCustomToolDeps(t, nil, nil, nil)
+	defer cleanup()
+
+	result, err := workflowBriefHandler(deps, AssembleContextParams{
+		Query: "missing workflow",
+		Goal:  "workflow_brief",
+	})
+	if err != nil {
+		t.Fatalf("workflowBriefHandler error: %v", err)
+	}
+
+	resp := result.(types.WorkflowBriefResponse)
+	wantNarrative := "No grounded workflow evidence found for 'missing workflow'. Try a narrower concept, a specific route, or a module name."
+	if resp.Strategy != "workflow_brief empty" {
+		t.Fatalf("strategy = %q, want empty", resp.Strategy)
+	}
+	if resp.Narrative != wantNarrative {
+		t.Fatalf("narrative = %q, want %q", resp.Narrative, wantNarrative)
+	}
+	if resp.HealthScore != 0 {
+		t.Fatalf("health_score = %v, want 0", resp.HealthScore)
+	}
+	if resp.Confidence != "low" {
+		t.Fatalf("confidence = %q, want low", resp.Confidence)
+	}
+	if len(resp.CriticalPath) != 0 {
+		t.Fatalf("critical path = %#v, want empty", resp.CriticalPath)
+	}
+}
+
+func TestWorkflowBrief_OutputSize(t *testing.T) {
+	deps, cleanup, _ := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	result, err := workflowBriefHandler(deps, AssembleContextParams{
+		Query: "order workflow",
+		Goal:  "workflow_brief",
+	})
+	if err != nil {
+		t.Fatalf("workflowBriefHandler error: %v", err)
+	}
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if len(payload) >= 4096 {
+		t.Fatalf("workflow brief size = %d bytes, want < 4096", len(payload))
+	}
+	t.Logf("workflow brief serialized size = %d bytes", len(payload))
+}
+
+func TestWorkflowBrief_HealthScoreComputation(t *testing.T) {
+	t.Run("high", func(t *testing.T) {
+		score, label := computeHealthScore([]types.VerifiedWorkflowItem{
+			{Group: workflowPhaseEntry, Confidence: 1.0},
+			{Group: workflowPhaseCore, Confidence: 1.0},
+			{Group: workflowPhaseState, Confidence: 1.0},
+		})
+
+		if score != 1.0 {
+			t.Fatalf("score = %v, want 1.0", score)
+		}
+		if label != "high" {
+			t.Fatalf("label = %q, want high", label)
+		}
+	})
+
+	t.Run("medium", func(t *testing.T) {
+		score, label := computeHealthScore([]types.VerifiedWorkflowItem{
+			{Group: workflowPhaseEntry, Confidence: 1.0},
+			{Group: workflowPhaseCore, Confidence: 0.6},
+			{Group: workflowPhaseState, Confidence: 0.3},
+			{Group: workflowPhaseAsync, Confidence: 0.3},
+		})
+
+		want := (1.0*2.0 + 0.6*1.5 + 0.3*1.0 + 0.3*1.0) / (2.0 + 1.5 + 1.0 + 1.0)
+		if math.Abs(score-want) > 1e-9 {
+			t.Fatalf("score = %v, want %v", score, want)
+		}
+		if label != "medium" {
+			t.Fatalf("label = %q, want medium", label)
+		}
+	})
+
+	t.Run("low", func(t *testing.T) {
+		score, label := computeHealthScore([]types.VerifiedWorkflowItem{
+			{Group: workflowPhaseEntry, Confidence: 0.0},
+			{Group: workflowPhaseCore, Confidence: 0.3},
+			{Group: workflowPhaseState, Confidence: 0.3},
+		})
+
+		want := (0.0*2.0 + 0.3*1.5 + 0.3*1.0) / (2.0 + 1.5 + 1.0)
+		if math.Abs(score-want) > 1e-9 {
+			t.Fatalf("score = %v, want %v", score, want)
+		}
+		if label != "low" {
+			t.Fatalf("label = %q, want low", label)
+		}
+	})
+}
+
+func TestWorkflowBrief_CriticalPathExtraction(t *testing.T) {
+	items := []types.VerifiedWorkflowItem{
+		{ID: "a", Name: "POST /v1/orders", Group: workflowPhaseEntry, Verification: "confirmed", Confidence: 1.0, Path: []string{"POST /v1/orders"}},
+		{ID: "b", Name: "HandleOrders", Group: workflowPhaseCore, Verification: "confirmed", Confidence: 0.98, Path: []string{"POST /v1/orders", "HandleOrders"}},
+		{ID: "c", Name: "ProcessOrder", Group: workflowPhaseCore, Verification: "confirmed", Confidence: 0.95, Path: []string{"POST /v1/orders", "HandleOrders", "ProcessOrder"}},
+		{ID: "d", Name: "BuildOrder", Group: workflowPhaseCore, Verification: "confirmed", Confidence: 0.92, Path: []string{"POST /v1/orders", "HandleOrders", "ProcessOrder", "BuildOrder"}},
+		{ID: "e", Name: "PersistOrder", Group: workflowPhaseState, Verification: "confirmed", Confidence: 0.89, Path: []string{"POST /v1/orders", "HandleOrders", "ProcessOrder", "BuildOrder", "PersistOrder"}},
+		{ID: "f", Name: "PublishOrderEvent", Group: workflowPhaseAsync, Verification: "confirmed", Confidence: 0.84, Path: []string{"POST /v1/orders", "HandleOrders", "ProcessOrder", "BuildOrder", "PersistOrder", "PublishOrderEvent"}},
+		{ID: "g", Name: "EmitAuditRecord", Group: workflowPhaseOther, Verification: "confirmed", Confidence: 0.8, Path: []string{"POST /v1/orders", "HandleOrders", "ProcessOrder", "BuildOrder", "PersistOrder", "PublishOrderEvent", "EmitAuditRecord"}},
+	}
+
+	path := extractCriticalPath(items)
+	if len(path) != 6 {
+		t.Fatalf("critical path = %#v, want cap of 6 nodes", path)
+	}
+	if path[0].ID != "a" || path[0].Name != "POST /v1/orders" {
+		t.Fatalf("path[0] = %#v, want entry node", path[0])
+	}
+	if path[5].ID != "f" || path[5].Name != "PublishOrderEvent" {
+		t.Fatalf("path[5] = %#v, want capped sixth node", path[5])
+	}
+	for _, node := range path {
+		if !node.Verified {
+			t.Fatalf("critical path node = %#v, want verified=true for confirmed path", node)
+		}
+	}
+}
+
+func TestWorkflowBrief_FallbackPath(t *testing.T) {
+	items := []types.VerifiedWorkflowItem{
+		{ID: "entry-low", Name: "POST /v1/pending-orders", Group: workflowPhaseEntry, Verification: "unresolved", Confidence: 0.2},
+		{ID: "entry-best", Name: "POST /v1/reconcile-orders", Group: workflowPhaseEntry, Verification: "unresolved", Confidence: 0.3},
+		{ID: "core-low", Name: "LoadOrder", Group: workflowPhaseCore, Verification: "unreachable", Confidence: 0.2},
+		{ID: "core-best", Name: "ReconcileOrders", Group: workflowPhaseCore, Verification: "unreachable", Confidence: 0.4},
+		{ID: "state", Name: "OrderStore", Group: workflowPhaseState, Verification: "orphaned", Confidence: 0.3},
+		{ID: "async", Name: "QueueOrderNotification", Group: workflowPhaseAsync, Verification: "inferred", Confidence: 0.3},
+	}
+
+	path := extractCriticalPath(items)
+	if len(path) != 4 {
+		t.Fatalf("critical path = %#v, want one representative node per phase", path)
+	}
+	if path[0].ID != "entry-best" || path[1].ID != "core-best" || path[2].ID != "state" || path[3].ID != "async" {
+		t.Fatalf("critical path = %#v, want best fallback chain ordered by phase", path)
+	}
+	for _, node := range path {
+		if node.Verified {
+			t.Fatalf("fallback node = %#v, want verified=false for representative chain", node)
+		}
+	}
+
+	narrative := buildWorkflowNarrative(
+		"order reconciliation",
+		path,
+		map[string]int{
+			workflowPhaseEntry: 1,
+			workflowPhaseCore:  1,
+			workflowPhaseState: 1,
+			workflowPhaseAsync: 1,
+		},
+		extractRiskFlags(items),
+		"low",
+	)
+	if !strings.Contains(narrative, "could not be verified") {
+		t.Fatalf("narrative = %q, want fallback wording", narrative)
+	}
+}
+
+func TestWorkflowBrief_MixedQuality(t *testing.T) {
+	items := []types.VerifiedWorkflowItem{
+		{ID: "route", Name: "POST /v1/orders", FilePath: "routes.go", Group: workflowPhaseEntry, Verification: "confirmed", Confidence: 1.0, Path: []string{"POST /v1/orders", "HandleOrders"}},
+		{ID: "handler", Name: "HandleOrders", FilePath: "handlers.go", Group: workflowPhaseCore, Verification: "confirmed", Confidence: 1.0, Path: []string{"POST /v1/orders", "HandleOrders"}},
+		{ID: "core", Name: "ProcessOrder", FilePath: "service.go", Group: workflowPhaseCore, Verification: "confirmed", Confidence: 0.7, Path: []string{"POST /v1/orders", "HandleOrders", "ProcessOrder"}},
+		{ID: "state", Name: "AuditStore", FilePath: "repo.go", Group: workflowPhaseState, Verification: "orphaned", Confidence: 0.3},
+		{ID: "async", Name: "QueueOrderNotification", FilePath: "async.go", Group: workflowPhaseAsync, Verification: "unresolved", Confidence: 0.3},
+	}
+
+	score, label := computeHealthScore(items)
+	if label != "medium" {
+		t.Fatalf("label = %q, want medium", label)
+	}
+	if score < 0.5 || score >= 0.8 {
+		t.Fatalf("score = %v, want medium range [0.5, 0.8)", score)
+	}
+
+	narrative := buildWorkflowNarrative(
+		"order creation",
+		extractCriticalPath(items),
+		map[string]int{
+			workflowPhaseEntry: 1,
+			workflowPhaseCore:  2,
+			workflowPhaseState: 1,
+			workflowPhaseAsync: 1,
+		},
+		extractRiskFlags(items),
+		label,
+	)
+	if strings.Contains(narrative, "All primary paths are graph-verified.") {
+		t.Fatalf("narrative = %q, should not overclaim fully verified paths", narrative)
+	}
+	if !strings.Contains(narrative, "Most paths verified but some gaps remain.") {
+		t.Fatalf("narrative = %q, want medium-confidence health clause", narrative)
+	}
+	if !strings.Contains(narrative, "issue(s)") {
+		t.Fatalf("narrative = %q, want explicit issue summary", narrative)
+	}
+}
+
+func TestWorkflowBrief_Defaults(t *testing.T) {
+	workflowSrc := `package workflow
+
+func HandleOrders() {}
+
+func ProcessOrder() {}
+
+type OrderStore struct{}
+
+func PublishOrderEvent() {}
+`
+	nodes := []types.ASTNode{
+		{
+			ID:         types.GenerateNodeID("routes.go", "POST /v1/orders"),
+			FilePath:   "routes.go",
+			SymbolName: "POST /v1/orders",
+			NodeType:   types.NodeTypeRoute,
+			ContentSum: "order workflow route",
+		},
+		{
+			ID:         types.GenerateNodeID("workflow.go", "HandleOrders"),
+			FilePath:   "workflow.go",
+			SymbolName: "HandleOrders",
+			NodeType:   types.NodeTypeMethod,
+			StartByte:  18,
+			EndByte:    37,
+			ContentSum: "order workflow handler",
+		},
+		{
+			ID:         types.GenerateNodeID("workflow.go", "ProcessOrder"),
+			FilePath:   "workflow.go",
+			SymbolName: "ProcessOrder",
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  39,
+			EndByte:    59,
+			ContentSum: "order workflow core",
+		},
+		{
+			ID:         types.GenerateNodeID("workflow.go", "OrderStore"),
+			FilePath:   "workflow.go",
+			SymbolName: "OrderStore",
+			NodeType:   types.NodeTypeClass,
+			StartByte:  61,
+			EndByte:    80,
+			ContentSum: "order workflow state",
+		},
+		{
+			ID:         types.GenerateNodeID("workflow.go", "PublishOrderEvent"),
+			FilePath:   "workflow.go",
+			SymbolName: "PublishOrderEvent",
+			NodeType:   types.NodeTypeFunction,
+			StartByte:  82,
+			EndByte:    106,
+			ContentSum: "order workflow async",
+		},
+	}
+	edges := []types.ASTEdge{
+		{SourceID: nodes[0].ID, TargetID: nodes[1].ID, EdgeType: types.EdgeTypeHandles},
+		{SourceID: nodes[1].ID, TargetID: nodes[2].ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: nodes[2].ID, TargetID: nodes[3].ID, EdgeType: types.EdgeTypeCalls},
+		{SourceID: nodes[2].ID, TargetID: nodes[4].ID, EdgeType: types.EdgeTypeCalls},
+	}
+	deps, cleanup := newCustomToolDeps(t, map[string]string{
+		"workflow.go": workflowSrc,
+	}, nodes, edges)
+	defer cleanup()
+
+	defaultResult, err := assembleContextHandler(deps, AssembleContextParams{
+		Query: "order workflow",
+		Goal:  "workflow_brief",
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler default workflow_brief error: %v", err)
+	}
+
+	limitedResult, err := assembleContextHandler(deps, AssembleContextParams{
+		Query:      "order workflow",
+		Goal:       "workflow_brief",
+		MaxPerFile: 1,
+	})
+	if err != nil {
+		t.Fatalf("assembleContextHandler limited workflow_brief error: %v", err)
+	}
+
+	defaultResp := defaultResult.(types.WorkflowBriefResponse)
+	limitedResp := limitedResult.(types.WorkflowBriefResponse)
+	if defaultResp.Strategy != "workflow_brief verified_path" {
+		t.Fatalf("default strategy = %q, want verified_path", defaultResp.Strategy)
+	}
+	if workflowBriefPhaseTotal(defaultResp.PhaseCounts) <= workflowBriefPhaseTotal(limitedResp.PhaseCounts) {
+		t.Fatalf("default phase counts = %#v, limited phase counts = %#v; want workflow_brief defaults to inherit broader trace_workflow candidate coverage", defaultResp.PhaseCounts, limitedResp.PhaseCounts)
+	}
+	if len(defaultResp.CriticalPath) <= len(limitedResp.CriticalPath) {
+		t.Fatalf("default critical path = %#v, limited critical path = %#v; want broader default trace coverage than max_per_file=1", defaultResp.CriticalPath, limitedResp.CriticalPath)
+	}
+}
+
+func TestWorkflowBrief_ViaRegisteredHandler(t *testing.T) {
+	deps, cleanup, _ := newVerifyWorkflowDeps(t)
+	defer cleanup()
+
+	server := NewServerWithIO(nil, nil)
+	RegisterTools(server, deps, nil)
+
+	handler, ok := server.GetHandler("assemble_context")
+	if !ok {
+		t.Fatal("assemble_context handler not registered")
+	}
+
+	params, _ := json.Marshal(AssembleContextParams{
+		Query: "order workflow",
+		Goal:  "workflow_brief",
+	})
+	result, err := handler(params)
+	if err != nil {
+		t.Fatalf("assemble_context error: %v", err)
+	}
+
+	resp := result.(types.WorkflowBriefResponse)
+	if resp.Strategy == "" {
+		t.Fatal("expected non-empty workflow_brief strategy")
+	}
+	if len(resp.CriticalPath) == 0 {
+		t.Fatal("expected grounded critical path through registered handler")
+	}
+	if len(resp.RiskFlags) > 5 {
+		t.Fatalf("risk flags = %#v, want cap of 5", resp.RiskFlags)
 	}
 }
 
